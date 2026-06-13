@@ -1,18 +1,36 @@
 import { Line, OrbitControls } from "@react-three/drei";
 import { useFrame, useThree } from "@react-three/fiber";
-import { useLayoutEffect, useMemo, useRef, type MutableRefObject } from "react";
+import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import * as THREE from "three";
 import type { AircraftSnapshot, MatchReplay, ReplayFrame, Vec3 } from "../protocol/schema";
+import type { PlaybackClock } from "./usePlayback";
+
+export type CameraMode = "orbit" | "cabin";
 
 const SCENE_SCALE = 0.01;
 
 interface FlightSceneProps {
   frame: ReplayFrame;
   replay: MatchReplay;
+  cameraMode: CameraMode;
+  pilotId?: string;
+  clock: PlaybackClock;
+  onIndex: (index: number) => void;
 }
 
-export function FlightScene({ frame, replay }: FlightSceneProps) {
+export function FlightScene({
+  frame,
+  replay,
+  cameraMode,
+  pilotId = "blue-1",
+  clock,
+  onIndex,
+}: FlightSceneProps) {
   const controlsRef = useRef<any>(null);
+  // Persistent aircraft groups, keyed by id — the SceneDriver moves them imperatively every
+  // render frame so they glide between recorded states instead of snapping per tick.
+  const shipRefs = useRef<Record<string, THREE.Group | null>>({});
+  const roster = replay.frames[0].aircraft;
 
   return (
     <>
@@ -28,19 +46,31 @@ export function FlightScene({ frame, replay }: FlightSceneProps) {
         shadow-mapSize-height={1024}
       />
       <Terrain />
-      <CameraRig frame={frame} controlsRef={controlsRef} />
-      <OrbitControls
-        ref={controlsRef}
-        makeDefault
-        enableDamping
-        dampingFactor={0.08}
-        minDistance={8}
-        maxDistance={70}
-      />
 
-      {frame.aircraft.map((ship) => (
-        <AircraftMesh key={ship.id} ship={ship} />
-      ))}
+      <SceneDriver
+        replay={replay}
+        clock={clock}
+        cameraMode={cameraMode}
+        pilotId={pilotId}
+        shipRefs={shipRefs}
+        controlsRef={controlsRef}
+        onIndex={onIndex}
+      />
+      {cameraMode === "orbit" ? (
+        <OrbitControls
+          ref={controlsRef}
+          makeDefault
+          enableDamping
+          dampingFactor={0.08}
+          minDistance={8}
+          maxDistance={70}
+        />
+      ) : null}
+
+      {roster.map((entry) => {
+        const ship = frame.aircraft.find((candidate) => candidate.id === entry.id) ?? entry;
+        return <AircraftMesh key={entry.id} ship={ship} shipId={entry.id} refMap={shipRefs} />;
+      })}
 
       {frame.aircraft.map((ship) => (
         <PathLine key={`path-${ship.id}`} ship={ship} replay={replay} frameIndex={frame.index} />
@@ -76,90 +106,202 @@ function Terrain() {
   );
 }
 
-function CameraRig({
-  frame,
+// Single render-loop driver: advances the clock, interpolates every aircraft between the
+// bracketing recorded frames (position lerp + orientation slerp), drives the camera from the
+// same interpolated state, and reports the integer frame up to React at tick rate.
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const UP_FALLBACK = new THREE.Vector3(0, 0, -1); // only used in near-vertical flight
+const tmpQa = new THREE.Quaternion();
+const tmpQb = new THREE.Quaternion();
+const tmpVec = new THREE.Vector3();
+const tmpEye = new THREE.Vector3();
+const tmpTarget = new THREE.Vector3();
+
+function SceneDriver({
+  replay,
+  clock,
+  cameraMode,
+  pilotId,
+  shipRefs,
   controlsRef,
+  onIndex,
 }: {
-  frame: ReplayFrame;
+  replay: MatchReplay;
+  clock: PlaybackClock;
+  cameraMode: CameraMode;
+  pilotId: string;
+  shipRefs: MutableRefObject<Record<string, THREE.Group | null>>;
   controlsRef: MutableRefObject<any>;
+  onIndex: (index: number) => void;
 }) {
   const { camera } = useThree();
-  const target = useMemo(() => new THREE.Vector3(...frameCenter(frame)), [frame]);
-  const currentTarget = useRef(target.clone());
+  const camPosition = useRef<THREE.Vector3 | null>(null);
+  const camForward = useRef<THREE.Vector3 | null>(null);
+  const orbitTarget = useRef<THREE.Vector3 | null>(null);
+  const lastReported = useRef(-1);
+  const lastMode = useRef<CameraMode | null>(null);
 
-  useLayoutEffect(() => {
-    currentTarget.current.copy(target);
-    const desired = target.clone().add(new THREE.Vector3(0, 14, 32));
-    camera.position.copy(desired);
-    camera.lookAt(target);
-    setControlsTarget(controlsRef.current, target);
-  }, []);
+  useFrame((_, delta) => {
+    const frames = replay.frames;
+    const maxIndex = frames.length - 1;
+    if (maxIndex < 0) return;
 
-  useFrame(() => {
-    currentTarget.current.lerp(target, 0.08);
-    const desired = currentTarget.current.clone().add(new THREE.Vector3(0, 14, 32));
-    camera.position.lerp(desired, 0.05);
-    camera.lookAt(currentTarget.current);
-    setControlsTarget(controlsRef.current, currentTarget.current);
+    if (clock.playing) {
+      clock.position += delta * clock.framesPerSecond;
+      if (clock.position > maxIndex) clock.position = 0; // loop
+    }
+    clock.position = Math.min(maxIndex, Math.max(0, clock.position));
+
+    const i = Math.floor(clock.position);
+    const j = Math.min(maxIndex, i + 1);
+    const t = clock.position - i;
+    const fa = frames[i];
+    const fb = frames[j];
+
+    let centerX = 0;
+    let centerY = 0;
+    let centerZ = 0;
+    let count = 0;
+    let pilotX = 0;
+    let pilotY = 0;
+    let pilotZ = 0;
+    let pilotVx = 0;
+    let pilotVy = 0;
+    let pilotVz = 0;
+    let havePilot = false;
+
+    for (const a of fa.aircraft) {
+      const b = fb.aircraft.find((s) => s.id === a.id) ?? a;
+      const px = THREE.MathUtils.lerp(a.position.x, b.position.x, t);
+      const py = THREE.MathUtils.lerp(a.position.y, b.position.y, t);
+      const pz = THREE.MathUtils.lerp(a.position.z, b.position.z, t);
+      centerX += px;
+      centerY += py;
+      centerZ += pz;
+      count += 1;
+
+      const group = shipRefs.current[a.id];
+      if (group) {
+        group.position.set(px * SCENE_SCALE, py * SCENE_SCALE, pz * SCENE_SCALE);
+        tmpQa.set(a.orientation.x, a.orientation.y, a.orientation.z, a.orientation.w);
+        tmpQb.set(b.orientation.x, b.orientation.y, b.orientation.z, b.orientation.w);
+        group.quaternion.slerpQuaternions(tmpQa, tmpQb, t);
+      }
+
+      if (a.id === pilotId) {
+        havePilot = true;
+        pilotX = px;
+        pilotY = py;
+        pilotZ = pz;
+        pilotVx = THREE.MathUtils.lerp(a.velocity.x, b.velocity.x, t);
+        pilotVy = THREE.MathUtils.lerp(a.velocity.y, b.velocity.y, t);
+        pilotVz = THREE.MathUtils.lerp(a.velocity.z, b.velocity.z, t);
+      }
+    }
+    if (count === 0) return;
+
+    const cx = (centerX / count) * SCENE_SCALE;
+    const cy = (centerY / count) * SCENE_SCALE;
+    const cz = (centerZ / count) * SCENE_SCALE;
+
+    const entering = lastMode.current !== cameraMode;
+    lastMode.current = cameraMode;
+
+    if (cameraMode === "cabin") {
+      const ex = (havePilot ? pilotX : centerX / count) * SCENE_SCALE;
+      const ey = (havePilot ? pilotY : centerY / count) * SCENE_SCALE;
+      const ez = (havePilot ? pilotZ : centerZ / count) * SCENE_SCALE;
+
+      tmpVec.set(pilotVx, pilotVy, pilotVz);
+      if (tmpVec.lengthSq() < 1e-6) tmpVec.set(0, 0, -1);
+      tmpVec.normalize();
+      if (entering || !camForward.current) camForward.current = tmpVec.clone();
+      else camForward.current.lerp(tmpVec, 0.08).normalize();
+
+      tmpEye.set(ex, ey, ez).addScaledVector(camForward.current, 0.25);
+      tmpEye.y += 0.12;
+      if (entering || !camPosition.current) camPosition.current = tmpEye.clone();
+      else camPosition.current.lerp(tmpEye, 0.2);
+
+      camera.up.copy(Math.abs(camForward.current.y) > 0.95 ? UP_FALLBACK : WORLD_UP);
+      camera.position.copy(camPosition.current);
+      tmpTarget.copy(camPosition.current).addScaledVector(camForward.current, 10);
+      camera.lookAt(tmpTarget);
+    } else {
+      if (entering || !orbitTarget.current) {
+        // Snap to a clean chase view when (re)entering orbit, then let OrbitControls own the
+        // camera while we keep panning the target to follow the action.
+        orbitTarget.current = new THREE.Vector3(cx, cy, cz);
+        camera.up.copy(WORLD_UP);
+        camera.position.set(cx, cy + 14, cz + 32);
+        camera.lookAt(cx, cy, cz);
+      } else {
+        orbitTarget.current.lerp(tmpVec.set(cx, cy, cz), 0.1);
+      }
+      const controls = controlsRef.current;
+      if (
+        controls &&
+        controls.target instanceof THREE.Vector3 &&
+        typeof controls.update === "function"
+      ) {
+        controls.target.copy(orbitTarget.current);
+        controls.update();
+      }
+    }
+
+    if (i !== lastReported.current) {
+      lastReported.current = i;
+      onIndex(i);
+    }
   });
 
   return null;
 }
 
-function setControlsTarget(controls: unknown, target: THREE.Vector3) {
-  if (
-    controls &&
-    typeof controls === "object" &&
-    "target" in controls &&
-    "update" in controls &&
-    controls.target instanceof THREE.Vector3 &&
-    typeof controls.update === "function"
-  ) {
-    controls.target.copy(target);
-    controls.update();
-  }
-}
-
-function AircraftMesh({ ship }: { ship: AircraftSnapshot }) {
-  const position = toScenePoint(ship.position);
-  const quaternion = useMemo(
-    () => new THREE.Quaternion(ship.orientation.x, ship.orientation.y, ship.orientation.z, ship.orientation.w),
-    [ship.orientation.w, ship.orientation.x, ship.orientation.y, ship.orientation.z],
+function AircraftMesh({
+  ship,
+  shipId,
+  refMap,
+}: {
+  ship: AircraftSnapshot;
+  shipId: string;
+  refMap: MutableRefObject<Record<string, THREE.Group | null>>;
+}) {
+  // Stable ref callback so the persistent group isn't torn down on per-tick re-renders.
+  const register = useCallback(
+    (group: THREE.Group | null) => {
+      refMap.current[shipId] = group;
+    },
+    [refMap, shipId],
   );
-  const velocityEnd = toScenePoint({
-    x: ship.position.x + ship.velocity.x * 1.2,
-    y: ship.position.y + ship.velocity.y * 1.2,
-    z: ship.position.z + ship.velocity.z * 1.2,
-  });
 
+  // Position/orientation are driven imperatively by SceneDriver; only the discrete visual props
+  // (colour, death scale, stall tint) come from the current frame's snapshot.
   return (
-    <group>
-      <group position={position} quaternion={quaternion} scale={ship.health <= 0 ? 1.05 : 1.42}>
-        <mesh castShadow>
-          <boxGeometry args={[0.12, 0.12, 0.86]} />
-          <meshStandardMaterial color={ship.color} roughness={0.44} metalness={0.25} />
-        </mesh>
-        <mesh castShadow position={[0, 0, -0.52]} rotation={[Math.PI / 2, 0, 0]}>
-          <coneGeometry args={[0.12, 0.26, 16]} />
-          <meshStandardMaterial color="#f4fbff" roughness={0.28} metalness={0.18} />
-        </mesh>
-        <mesh castShadow position={[0, 0, 0.03]}>
-          <boxGeometry args={[1.06, 0.035, 0.18]} />
-          <meshStandardMaterial color={ship.color} roughness={0.5} metalness={0.18} />
-        </mesh>
-        <mesh castShadow position={[0, 0.06, 0.38]}>
-          <boxGeometry args={[0.42, 0.04, 0.16]} />
-          <meshStandardMaterial color="#dce6e9" roughness={0.36} metalness={0.22} />
-        </mesh>
-        <mesh castShadow position={[0, 0.12, 0.3]}>
-          <boxGeometry args={[0.08, 0.36, 0.17]} />
-          <meshStandardMaterial color={ship.color} roughness={0.42} metalness={0.16} />
-        </mesh>
-      </group>
-      <Line points={[position, velocityEnd]} color={ship.color} lineWidth={1} transparent opacity={0.38} />
-      <mesh position={position}>
-        <sphereGeometry args={[0.14, 16, 16]} />
-        <meshBasicMaterial color={ship.stalled ? "#f2c94c" : ship.color} transparent opacity={0.78} />
+    <group ref={register} scale={ship.health <= 0 ? 1.05 : 1.42}>
+      <mesh castShadow>
+        <boxGeometry args={[0.12, 0.12, 0.86]} />
+        <meshStandardMaterial color={ship.color} roughness={0.44} metalness={0.25} />
+      </mesh>
+      <mesh castShadow position={[0, 0, -0.52]} rotation={[Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[0.12, 0.26, 16]} />
+        <meshStandardMaterial color="#f4fbff" roughness={0.28} metalness={0.18} />
+      </mesh>
+      <mesh castShadow position={[0, 0, 0.03]}>
+        <boxGeometry args={[1.06, 0.035, 0.18]} />
+        <meshStandardMaterial color={ship.color} roughness={0.5} metalness={0.18} />
+      </mesh>
+      <mesh castShadow position={[0, 0.06, 0.38]}>
+        <boxGeometry args={[0.42, 0.04, 0.16]} />
+        <meshStandardMaterial color="#dce6e9" roughness={0.36} metalness={0.22} />
+      </mesh>
+      <mesh castShadow position={[0, 0.12, 0.3]}>
+        <boxGeometry args={[0.08, 0.36, 0.17]} />
+        <meshStandardMaterial color={ship.color} roughness={0.42} metalness={0.16} />
+      </mesh>
+      <mesh>
+        <sphereGeometry args={[0.12, 16, 16]} />
+        <meshBasicMaterial color={ship.stalled ? "#f2c94c" : ship.color} transparent opacity={0.7} />
       </mesh>
     </group>
   );
@@ -187,28 +329,6 @@ function PathLine({
   }
 
   return <Line points={points} color={ship.color} lineWidth={2} transparent opacity={0.5} />;
-}
-
-function frameCenter(frame: ReplayFrame): [number, number, number] {
-  if (frame.aircraft.length === 0) {
-    return [0, 8, 0];
-  }
-
-  const center = frame.aircraft.reduce(
-    (acc, ship) => {
-      acc.x += ship.position.x;
-      acc.y += ship.position.y;
-      acc.z += ship.position.z;
-      return acc;
-    },
-    { x: 0, y: 0, z: 0 },
-  );
-
-  center.x /= frame.aircraft.length;
-  center.y /= frame.aircraft.length;
-  center.z /= frame.aircraft.length;
-
-  return toScenePoint(center);
 }
 
 function toScenePoint(point: Vec3): [number, number, number] {

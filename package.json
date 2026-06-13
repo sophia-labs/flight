@@ -1,6 +1,6 @@
 {
   "name": "flight",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "match": "tsx src/headless/runMatch.ts > match.json"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
@@ -22,10 +23,12 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
+    "@types/node": "^25.9.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/three": "^0.181.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.0",
     "vite": "^8.0.16",
     "vitest": "^4.0.0"
