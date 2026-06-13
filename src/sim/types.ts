@@ -5,6 +5,7 @@ import type {
   ReplayEvent,
   Vec3,
 } from "../protocol/schema";
+import type { SensorDevice } from "./parts";
 
 export type Team = "blue" | "red";
 
@@ -31,6 +32,7 @@ export interface AircraftState {
   weaponCooldown: number;
   model: AircraftModel;
   metrics: FlightMetrics;
+  devices?: SensorDevice[]; // v0.4.0: mounted sensors (camera, …). Static config, not per-frame state.
 }
 
 export interface FlightMetrics {

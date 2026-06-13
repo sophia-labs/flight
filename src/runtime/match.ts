@@ -1,5 +1,6 @@
 import { adapterFor } from "../agent/action";
 import { toObservation } from "../agent/observation";
+import { senseAndEncode } from "../agent/perception";
 import type { ControllerContext } from "../agent/controller";
 import {
   MatchReplaySchema,
@@ -119,6 +120,12 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       };
       if (outcome.rationale !== undefined) decision.rationale = outcome.rationale;
       if (outcome.usage !== undefined) decision.usage = outcome.usage;
+
+      // Record each mounted sensor's percept (pre-step world, same state the observation saw). This
+      // is recorded for the viewer / as a capability proof — it does NOT feed the controller.
+      const percepts = (ship.devices ?? []).map((device) => senseAndEncode(device, aircraft, ship));
+      if (percepts.length > 0) decision.percepts = percepts;
+
       decisions.push(decision);
     }
 

@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+// A number that must be real (not NaN/±Infinity). Bare z.number() ACCEPTS both, which would let a
+// degenerate projection silently poison a recorded replay; perception numbers go through this.
+export const finiteNumber = z.number().refine(Number.isFinite, { message: "must be a finite number" });
+
 export const Vec3Schema = z.object({
   x: z.number(),
   y: z.number(),
@@ -167,6 +171,35 @@ export const UsageSchema = z.object({
   costUsd: z.number(),
 });
 
+// --- v0.4.0 perception: a sensor Percept, recorded per turn for the viewer/audit ---
+// A Percept is the model-readable artifact a mounted sensor's encoder produces from its SenseFrame
+// — the perception-side mirror of a ControlInput. In v0.4.0 it is RECORDED (for the v0.5.0
+// instrument and as a capability proof) but NOT fed to the controller: pilots fly on the same
+// Observation as before.
+
+// One contact as a camera sees it: image-plane position + size/aspect cues, no rendering. ndc are
+// the projected screen coords in [-1,1] (x right, y up) and are meaningful only when inView.
+export const PerceptContactSchema = z.object({
+  id: z.string(),
+  team: z.enum(["blue", "red"]),
+  ndcX: finiteNumber,
+  ndcY: finiteNumber,
+  rangeM: finiteNumber,
+  aspectDeg: finiteNumber, // 0 = pointing at us (nose-on), 180 = we see its tail
+  angularSizeDeg: finiteNumber, // subtended diameter — the rendering-free range cue
+  inView: z.boolean(), // passes the device cone + range gate
+  health: finiteNumber,
+});
+
+export const PerceptSchema = z.object({
+  deviceId: z.string(),
+  modality: z.enum(["camera", "radar", "ir"]),
+  encoderId: z.string(), // recorded so a result is attributable to the interface under test
+  text: z.string().optional(), // what a model would read (the ASCII viewport)
+  contacts: z.array(PerceptContactSchema).optional(),
+  attitude: z.object({ bankDeg: finiteNumber, pitchDeg: finiteNumber }).optional(), // for the horizon overlay
+});
+
 export const TurnDecisionSchema = z.object({
   turn: z.number().int().nonnegative(),
   agentId: z.string(),
@@ -177,6 +210,7 @@ export const TurnDecisionSchema = z.object({
   rationale: z.string().optional(),
   latencyMs: z.number().optional(),
   usage: UsageSchema.optional(),
+  percepts: z.array(PerceptSchema).optional(), // v0.4.0: recorded sensor output (camera, …)
 });
 
 export const MatchReplaySchema = z.object({
@@ -224,6 +258,8 @@ export type Score = z.infer<typeof ScoreSchema>;
 export type MatchOutcome = z.infer<typeof MatchOutcomeSchema>;
 export type TurnDecision = z.infer<typeof TurnDecisionSchema>;
 export type Usage = z.infer<typeof UsageSchema>;
+export type PerceptContact = z.infer<typeof PerceptContactSchema>;
+export type Percept = z.infer<typeof PerceptSchema>;
 export type Competence = z.infer<typeof CompetenceSchema>;
 
 export function clampControlInput(input: ControlInput): ControlInput {
