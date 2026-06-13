@@ -130,7 +130,7 @@ async function step(actionJson: string): Promise<void> {
   const blue = state.aircraft.find((a) => a.id === PILOT_ID);
   if (blue && blue.health > 0) {
     const observation = toObservation(blue, state.aircraft, nextTurn, state.time, perfectSensor);
-    const controlInput = rawStickAdapter.toControlInput(pilotAction, blue);
+    const controlInput = rawStickAdapter.controlFor(pilotAction, blue);
     controlsById[blue.id] = controlInput;
     const decision: TurnDecision = {
       turn: nextTurn,
@@ -154,7 +154,7 @@ async function step(actionJson: string): Promise<void> {
       deadlineMs: 5_000,
       signal: new AbortController().signal,
     });
-    const controlInput = rawStickAdapter.toControlInput(decision.action, ship);
+    const controlInput = rawStickAdapter.controlFor(decision.action, ship);
     controlsById[ship.id] = controlInput;
     const record: TurnDecision = {
       turn: nextTurn,
@@ -179,7 +179,7 @@ async function step(actionJson: string): Promise<void> {
   if (state.aircraft.some((a) => a.health <= 0) || nextTurn >= MAX_TURNS) {
     state.done = true;
     saveState(state);
-    const outcome = minimalEvaluator.evaluate(state.aircraft, state.decisions, nextTurn);
+    const outcome = minimalEvaluator.evaluate(state.aircraft, state.frames, state.decisions, nextTurn);
     emit({ done: true, turn: nextTurn, outcome });
     return;
   }
@@ -190,7 +190,7 @@ async function step(actionJson: string): Promise<void> {
 
 function finish(): void {
   const state = loadState();
-  const outcome = minimalEvaluator.evaluate(state.aircraft, state.decisions, state.turn);
+  const outcome = minimalEvaluator.evaluate(state.aircraft, state.frames, state.decisions, state.turn);
   const agents: AgentMeta[] = [
     { id: PILOT_ID, kind: "llm", label: "subagent-pilot" },
     ...state.aircraft

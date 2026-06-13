@@ -1,6 +1,6 @@
 {
   "name": "flight",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,9 +9,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "match": "tsx src/headless/runMatch.ts > match.json"
+    "match": "tsx src/headless/runMatch.ts > match.json",
+    "sweep": "tsx --env-file=.env src/headless/sweep.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^0.79.3",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.4.2",
     "lucide-react": "^0.468.0",

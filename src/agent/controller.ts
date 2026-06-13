@@ -1,4 +1,4 @@
-import type { Action, AgentMeta, Observation } from "../protocol/schema";
+import type { Action, AgentMeta, Observation, Usage } from "../protocol/schema";
 
 export type { AgentMeta };
 
@@ -14,6 +14,7 @@ export interface ControllerContext {
 export interface ControllerDecision {
   action: Action;
   rationale?: string; // free-text "why" (LLM); recorded into the replay
+  usage?: Usage; // per-call tokens + cost (LLM controllers); recorded for the cost study
   raw?: unknown; // raw provider response, kept in-memory for debugging (not persisted)
 }
 

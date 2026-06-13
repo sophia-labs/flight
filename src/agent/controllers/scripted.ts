@@ -1,11 +1,11 @@
 import { clamp } from "../../sim/math";
-import type { Action, Observation } from "../../protocol/schema";
+import type { Action, Observation, RawStickAction } from "../../protocol/schema";
 import type { Controller } from "../controller";
 
 // Geometric pursuit, ported verbatim from the old src/sim/agents.ts but now reading the
 // ego-relative Observation instead of omniscient AircraftState. The direction cosines
 // (bearingForward/right/up) and closureRate are exactly the dot products the original took.
-export function pursuitAction(observation: Observation, aggression: number): Action {
+export function pursuitAction(observation: Observation, aggression: number): RawStickAction {
   const enemy = observation.contacts[0];
   if (!enemy) {
     return { kind: "raw-stick", pitch: 0, roll: 0, yaw: 0, throttle: 0.7, trigger: false };

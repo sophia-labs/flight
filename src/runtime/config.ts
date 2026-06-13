@@ -1,4 +1,3 @@
-import type { ActionAdapter } from "../agent/action";
 import type { Controller } from "../agent/controller";
 import type { SensorModel } from "../agent/observation";
 import type { Evaluator } from "../eval/outcome";
@@ -8,7 +7,6 @@ import type { AircraftState } from "../sim/types";
 export interface AgentEntry {
   meta: AgentMeta;
   controller: Controller;
-  adapter: ActionAdapter;
 }
 
 export interface MatchConfig {

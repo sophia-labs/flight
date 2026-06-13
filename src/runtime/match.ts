@@ -1,7 +1,9 @@
+import { adapterFor } from "../agent/action";
 import { toObservation } from "../agent/observation";
-import type { Controller, ControllerContext } from "../agent/controller";
+import type { ControllerContext } from "../agent/controller";
 import {
   MatchReplaySchema,
+  type Action,
   type AgentMeta,
   type ControlInput,
   type MatchReplay,
@@ -33,6 +35,7 @@ function snapshot(
 interface DecisionOutcome {
   action: TurnDecision["action"];
   rationale?: string;
+  usage?: TurnDecision["usage"];
   source: TurnDecision["source"];
 }
 
@@ -54,13 +57,18 @@ async function decide(
   });
 
   try {
-    const decision = await Promise.race([
-      entry.controller(observation, { ...context, signal: aborter.signal }),
-      timeout,
-    ]);
-    return { action: decision.action, rationale: decision.rationale, source: "controller" };
-  } catch {
-    return { action: fallback(observation), source: "fallback" };
+    const pending = entry.controller(observation, { ...context, signal: aborter.signal });
+    pending.catch(() => {}); // swallow a late rejection if the deadline wins the race
+    const decision = await Promise.race([pending, timeout]);
+    return {
+      action: decision.action,
+      rationale: decision.rationale,
+      usage: decision.usage,
+      source: "controller",
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { action: fallback(observation), source: "fallback", rationale: message.slice(0, 160) };
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -83,8 +91,9 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
 
   for (let turn = 1; turn <= config.maxTurns; turn += 1) {
     turnsRun = turn;
-    const controlsById: Record<string, ControlInput> = {};
+    const actionsById: Record<string, Action> = {};
 
+    // Decide once per turn, per living agent.
     for (const ship of aircraft) {
       if (ship.health <= 0) continue;
       const entry = config.agents[ship.id];
@@ -98,22 +107,29 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
         signal: new AbortController().signal,
       };
       const outcome = await decide(entry, observation, context, config.fallback);
-      const controlInput = entry.adapter.toControlInput(outcome.action, ship);
-      controlsById[ship.id] = controlInput;
+      actionsById[ship.id] = outcome.action;
 
       const decision: TurnDecision = {
         turn,
         agentId: ship.id,
         observation,
         action: outcome.action,
-        controlInput,
+        controlInput: adapterFor(outcome.action.kind).controlFor(outcome.action, ship),
         source: outcome.source,
       };
       if (outcome.rationale !== undefined) decision.rationale = outcome.rationale;
+      if (outcome.usage !== undefined) decision.usage = outcome.usage;
       decisions.push(decision);
     }
 
+    // Re-derive each held action into a control EVERY frame, so a setpoint adapter can track
+    // the evolving state (raw-stick returns a constant, identical to holding the stick).
     for (let s = 0; s < stepsPerTurn; s += 1) {
+      const controlsById: Record<string, ControlInput> = {};
+      for (const ship of aircraft) {
+        const action = actionsById[ship.id];
+        if (action) controlsById[ship.id] = adapterFor(action.kind).controlFor(action, ship);
+      }
       const result = stepSimulation(aircraft, controlsById, config.frameDt);
       time += config.frameDt;
       frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events));
@@ -123,7 +139,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
     if (aircraft.some((ship) => ship.health <= 0)) break;
   }
 
-  const outcome = config.evaluator.evaluate(aircraft, decisions, turnsRun);
+  const outcome = config.evaluator.evaluate(aircraft, frames, decisions, turnsRun);
   const agents: AgentMeta[] = Object.values(config.agents).map((entry) => entry.meta);
 
   return MatchReplaySchema.parse({

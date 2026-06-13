@@ -11,39 +11,66 @@ import {
   StepForward,
   Volume2,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { MatchReplaySchema, type MatchReplay } from "./protocol/schema";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { z } from "zod";
+import {
+  MatchReplaySchema,
+  MatchSummarySchema,
+  type MatchReplay,
+  type MatchSummary,
+} from "./protocol/schema";
 import { generateDemoMatch } from "./runtime/scenario";
-import { FlightScene, type CameraMode } from "./viewer/FlightScene";
 import { ControlsPanel } from "./viewer/ControlsPanel";
+import { FlightScene, type CameraMode } from "./viewer/FlightScene";
+import { MatchBrowser } from "./viewer/MatchBrowser";
+import { MatchStats } from "./viewer/MatchStats";
 import { StatusPanel } from "./viewer/StatusPanel";
 import { Timeline } from "./viewer/Timeline";
-import { useReplayAudio } from "./viewer/useReplayAudio";
 import { usePlayback } from "./viewer/usePlayback";
+import { useReplayAudio } from "./viewer/useReplayAudio";
 
 export function App() {
+  const [matches, setMatches] = useState<MatchSummary[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [replay, setReplay] = useState<MatchReplay | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [captionsOn, setCaptionsOn] = useState(true);
   const [soundOn, setSoundOn] = useState(false);
   const [voiceOn, setVoiceOn] = useState(false);
+  const requestRef = useRef(0);
 
+  // Source preference: sweep manifest (browser) → single recorded match.json → generated demo.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Prefer a recorded match dropped into public/ (e.g. the LLM pilot's flight); otherwise
-      // generate a fresh scripted demo in-browser.
       try {
-        const response = await fetch("/match.json");
-        if (response.ok) {
-          const parsed = MatchReplaySchema.parse(await response.json());
-          if (!cancelled) {
-            setReplay(parsed);
+        const indexRes = await fetch("/matches/index.json");
+        if (indexRes.ok) {
+          const list = z.array(MatchSummarySchema).parse(await indexRes.json());
+          if (list.length > 0) {
+            const first = list[0];
+            const replayRes = await fetch(`/matches/${first.file}`);
+            const parsed = MatchReplaySchema.parse(await replayRes.json());
+            if (!cancelled) {
+              setMatches(list);
+              setSelectedId(first.id);
+              setReplay(parsed);
+            }
             return;
           }
         }
       } catch {
-        // no recorded match available — fall through to the generated demo
+        // no sweep manifest — fall through
+      }
+      try {
+        const single = await fetch("/match.json");
+        if (single.ok) {
+          const parsed = MatchReplaySchema.parse(await single.json());
+          if (!cancelled) setReplay(parsed);
+          return;
+        }
+      } catch {
+        // no recorded match — fall through
       }
       const demo = await generateDemoMatch();
       if (!cancelled) setReplay(demo);
@@ -53,11 +80,22 @@ export function App() {
     };
   }, []);
 
-  const playback = usePlayback(replay);
-  const frame = replay?.frames[playback.frameIndex];
+  const selectMatch = useCallback((match: MatchSummary) => {
+    setSelectedId(match.id);
+    const req = (requestRef.current += 1);
+    fetch(`/matches/${match.file}`)
+      .then((res) => res.json())
+      .then((json) => {
+        if (requestRef.current === req) setReplay(MatchReplaySchema.parse(json));
+      })
+      .catch(() => {});
+  }, []);
 
-  // The pilot is whichever seat an LLM flew (falls back to blue). Its per-turn rationale is the
-  // subtitle / narration track.
+  const playback = usePlayback(replay);
+  const frame = replay
+    ? replay.frames[Math.min(playback.frameIndex, replay.frames.length - 1)]
+    : undefined;
+
   const pilotId = useMemo(
     () => replay?.agents?.find((agent) => agent.kind === "llm")?.id ?? "blue-1",
     [replay],
@@ -75,7 +113,6 @@ export function App() {
 
   useReplayAudio(frame, pilotId, soundOn);
 
-  // Speak the pilot's current thought when the line changes.
   useEffect(() => {
     if (!voiceOn || !caption || typeof window === "undefined" || !window.speechSynthesis) return;
     const utterance = new SpeechSynthesisUtterance(caption);
@@ -90,6 +127,8 @@ export function App() {
     }
   }, [voiceOn]);
 
+  const hasBrowser = matches.length > 0;
+
   if (!replay || !frame) {
     return (
       <main className="app-shell">
@@ -101,14 +140,18 @@ export function App() {
               <h1>Physics Turn Lab</h1>
             </div>
           </header>
-          <p className="event-line">Generating match…</p>
+          <p className="event-line">Loading matches…</p>
         </aside>
       </main>
     );
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${hasBrowser ? " with-browser" : ""}`}>
+      {hasBrowser ? (
+        <MatchBrowser matches={matches} selectedId={selectedId} onSelect={selectMatch} />
+      ) : null}
+
       <section className="simulation">
         <Canvas
           camera={{ position: [0, 5.5, 13], fov: 54, near: 0.1, far: 1200 }}
@@ -219,6 +262,7 @@ export function App() {
           onChange={playback.setFrameIndex}
         />
 
+        {hasBrowser ? <MatchStats replay={replay} pilotId={pilotId} /> : null}
         <StatusPanel frame={frame} />
         <ControlsPanel frame={frame} />
       </aside>

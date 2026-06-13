@@ -7,3 +7,5 @@ playwright-report/
 .env.*
 match.json
 match-state.json
+sweep-results.jsonl
+public/matches/

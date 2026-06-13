@@ -1,4 +1,3 @@
-import { rawStickAdapter } from "../agent/action";
 import {
   defensiveController,
   pursuitController,
@@ -77,12 +76,10 @@ export function buildScriptedMatchConfig(turnCount = 28): MatchConfig {
       "blue-1": {
         meta: { id: "blue-1", kind: "scripted", label: "pursuit" },
         controller: pursuitController(0.82),
-        adapter: rawStickAdapter,
       },
       "red-1": {
         meta: { id: "red-1", kind: "scripted", label: "defensive" },
         controller: defensiveController(0.64),
-        adapter: rawStickAdapter,
       },
     },
   };

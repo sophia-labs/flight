@@ -78,8 +78,16 @@ export const RawStickActionSchema = z.object({
   trigger: z.boolean(),
 });
 
-// A union from day one, so a maneuver-vocabulary variant is purely additive in 0.3.0.
-export const ActionSchema = RawStickActionSchema;
+export const SetpointActionSchema = z.object({
+  kind: z.literal("setpoint"),
+  targetBankDeg: z.number(), // desired bank angle, degrees (+ = roll right)
+  targetPitchDeg: z.number(), // desired pitch attitude vs horizon, degrees (+ = nose up)
+  throttle: z.number(),
+  trigger: z.boolean(),
+});
+
+// Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
+export const ActionSchema = z.discriminatedUnion("kind", [RawStickActionSchema, SetpointActionSchema]);
 
 export const SelfPerceptSchema = z.object({
   airspeed: z.number(),
@@ -128,6 +136,21 @@ export const ScoreSchema = z.object({
   survived: z.boolean(),
 });
 
+// Opponent-agnostic piloting-quality metrics, per aircraft id (computed from frames + decisions).
+export const CompetenceSchema = z.object({
+  survived: z.boolean(),
+  damageDealt: z.number(),
+  damageTaken: z.number(),
+  shots: z.number(),
+  hits: z.number(),
+  fracStalled: z.number(), // fraction of frames the aircraft was stalled
+  fracOnDeck: z.number(), // fraction of frames below the low-altitude threshold
+  minAltitude: z.number(),
+  meanAirspeed: z.number(),
+  energyRetainedRatio: z.number(), // end specific-energy / start specific-energy
+  controlSmoothness: z.number(), // 1 - mean |Δ stick| between turns (1 = perfectly smooth)
+});
+
 export const MatchOutcomeSchema = z.object({
   resolved: z.boolean(),
   reason: z.enum(["destroyed", "timeout", "draw"]),
@@ -135,6 +158,13 @@ export const MatchOutcomeSchema = z.object({
   turnsRun: z.number().int().nonnegative(),
   scores: z.record(z.string(), ScoreSchema), // keyed by team
   finalHealth: z.record(z.string(), z.number()), // keyed by aircraft id
+  competence: z.record(z.string(), CompetenceSchema).optional(), // keyed by aircraft id
+});
+
+export const UsageSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  costUsd: z.number(),
 });
 
 export const TurnDecisionSchema = z.object({
@@ -146,6 +176,7 @@ export const TurnDecisionSchema = z.object({
   source: z.enum(["controller", "fallback"]),
   rationale: z.string().optional(),
   latencyMs: z.number().optional(),
+  usage: UsageSchema.optional(),
 });
 
 export const MatchReplaySchema = z.object({
@@ -160,6 +191,20 @@ export const MatchReplaySchema = z.object({
   outcome: MatchOutcomeSchema.optional(),
 });
 
+// One entry per recorded match in the browser manifest (public/matches/index.json).
+export const MatchSummarySchema = z.object({
+  id: z.string(),
+  file: z.string(), // path relative to /matches/
+  model: z.string(),
+  mode: z.string(),
+  repeat: z.number().int().nonnegative(),
+  winnerTeam: z.enum(["blue", "red"]).nullable(),
+  costUsd: z.number(),
+  fallbackRate: z.number(),
+  competence: CompetenceSchema.optional(), // the pilot seat's competence
+});
+export type MatchSummary = z.infer<typeof MatchSummarySchema>;
+
 export type Vec3 = z.infer<typeof Vec3Schema>;
 export type Quaternion = z.infer<typeof QuaternionSchema>;
 export type ControlInput = z.infer<typeof ControlInputSchema>;
@@ -169,6 +214,7 @@ export type ReplayFrame = z.infer<typeof ReplayFrameSchema>;
 export type MatchReplay = z.infer<typeof MatchReplaySchema>;
 export type StickCommand = z.infer<typeof StickCommandSchema>;
 export type RawStickAction = z.infer<typeof RawStickActionSchema>;
+export type SetpointAction = z.infer<typeof SetpointActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
 export type ContactPercept = z.infer<typeof ContactPerceptSchema>;
@@ -177,6 +223,8 @@ export type AgentMeta = z.infer<typeof AgentMetaSchema>;
 export type Score = z.infer<typeof ScoreSchema>;
 export type MatchOutcome = z.infer<typeof MatchOutcomeSchema>;
 export type TurnDecision = z.infer<typeof TurnDecisionSchema>;
+export type Usage = z.infer<typeof UsageSchema>;
+export type Competence = z.infer<typeof CompetenceSchema>;
 
 export function clampControlInput(input: ControlInput): ControlInput {
   const clampSigned = (value: number) => Math.max(-1, Math.min(1, value));

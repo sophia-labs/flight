@@ -25,12 +25,20 @@ export function usePlayback(replay: MatchReplay | null) {
     maxIndex: 0,
   });
   const clock = clockRef.current;
+  const lastReplay = useRef<MatchReplay | null>(null);
 
   useEffect(() => {
     clock.framesPerSecond = framesPerSecond;
     clock.maxIndex = maxIndex;
-    if (clock.position > maxIndex) clock.position = maxIndex;
-  }, [clock, framesPerSecond, maxIndex]);
+    if (lastReplay.current !== replay) {
+      // New match selected — rewind to the start and keep playing.
+      lastReplay.current = replay;
+      clock.position = 0;
+      setFrameIndexState(0);
+    } else if (clock.position > maxIndex) {
+      clock.position = maxIndex;
+    }
+  }, [clock, framesPerSecond, maxIndex, replay]);
 
   // Move the clock to a discrete frame (scrub / step).
   const seek = useCallback(

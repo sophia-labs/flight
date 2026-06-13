@@ -394,6 +394,134 @@ h2 {
   font-weight: 700;
 }
 
+/* --- match browser --- */
+.app-shell.with-browser {
+  grid-template-columns: 300px minmax(0, 1fr) 380px;
+}
+
+.match-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  height: 100vh;
+  padding: 18px;
+  overflow-y: auto;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--panel);
+  backdrop-filter: blur(16px);
+}
+
+.match-rail-title {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.match-list {
+  display: grid;
+  gap: 8px;
+}
+
+.match-card {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  height: auto;
+  padding: 10px 12px;
+  text-align: left;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+}
+
+.match-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.match-card.active {
+  border-color: var(--blue);
+  background: rgba(77, 163, 255, 0.14);
+}
+
+.match-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.match-model {
+  overflow: hidden;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.match-mode {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+}
+
+.match-mode.mode-setpoint {
+  background: rgba(88, 211, 140, 0.18);
+  color: var(--green);
+}
+
+.match-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.match-card-stats .result-won {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.match-card-stats .result-lost {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.match-card-stats .result-draw {
+  font-weight: 700;
+}
+
+.match-card-stats .cost {
+  margin-left: auto;
+}
+
+.match-card-stats .warn,
+.event-line.warn {
+  color: var(--yellow);
+}
+
+@media (max-width: 1100px) {
+  .app-shell.with-browser {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(420px, 60vh) auto;
+    overflow-y: auto;
+  }
+
+  .match-rail {
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
