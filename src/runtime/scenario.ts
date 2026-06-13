@@ -27,7 +27,7 @@ const INITIAL_METRICS: FlightMetrics = {
 // A forward-looking camera on the nose: 18 m ahead, boresight down the nose (-Z), 60° horizontal
 // FOV, sees out to 8 km within a ~40° cone. Its percept is recorded for the viewer; the pilot does
 // not yet fly on it. A fresh instance per aircraft (devices are mutable config).
-function noseCamera(): SensorDevice {
+export function noseCamera(): SensorDevice {
   return {
     id: "nose-cam",
     kind: "sensor",

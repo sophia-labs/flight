@@ -9,3 +9,5 @@ match.json
 match-state.json
 sweep-results.jsonl
 public/matches/
+*.mp4
+clips/
