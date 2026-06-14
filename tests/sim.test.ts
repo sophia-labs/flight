@@ -272,7 +272,7 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
     step([roller], { "blue-1": controls({ roll: 1 }) }, 6); // ~1 s
     expect(roller.angularVelocity.x).toBeGreaterThan(1.4);
     expect(roller.angularVelocity.x).toBeLessThanOrEqual(DEFAULT_MODEL.maxRollRate + 1e-6);
-    expect(roller.angularVelocity.x).toBeCloseTo(1.749, 2); // behavioural golden
+    expect(roller.angularVelocity.x).toBeCloseTo(1.737, 2); // behavioural golden (just under max: dihedral opposes)
 
     const pitcher = makeAircraft();
     step([pitcher], { "blue-1": controls({ pitch: 1 }) }, 6);
@@ -292,6 +292,15 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
     }
     expect(Number.isFinite(maxOmega)).toBe(true);
     expect(maxOmega).toBeLessThan(2.0); // ≈ maxRollRate 1.75, decisively NOT diverging
+  });
+
+  it("dihedral self-levels: a banked aircraft released with no input rolls back toward wings-level", () => {
+    const ship = makeAircraft({ velocity: vec3(0, 0, -180), position: vec3(0, 1500, 0) });
+    step([ship], { "blue-1": controls({ roll: 1 }) }, 8); // roll into a bank
+    const bankedUpY = basisFromQuat(ship.orientation).up.y; // body-up.y = 1 level, < 1 banked
+    expect(bankedUpY).toBeLessThan(0.85); // genuinely banked
+    step([ship], { "blue-1": controls({ roll: 0 }) }, 30); // release ~5 s
+    expect(basisFromQuat(ship.orientation).up.y).toBeGreaterThan(bankedUpY + 0.1); // rolled back toward level
   });
 
   it("statically stable: trims hands-off near level and a pitch disturbance decays", () => {

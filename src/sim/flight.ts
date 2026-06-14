@@ -21,14 +21,20 @@ const TERRAIN_FLOOR_M = 55;
 // Aerodynamic rotational damping per axis. These set the control time-constant τ = I/(qbar·DAMP) — and
 // ONLY τ, because the steady-state rate cancels DAMP — calibrated against the default's inertia so the
 // default's response (roll τ≈0.22 s, pitch≈0.45 s, yaw≈0.75 s at cruise) matches the old kinematic feel.
-const DAMP_ROLL = 27.0;
-const DAMP_PITCH = 56.0;
-const DAMP_YAW = 40.0;
+const DAMP_ROLL = 33.5;
+const DAMP_PITCH = 70.0;
+const DAMP_YAW = 50.0;
 
 // Static-stability gain: a stable airframe (CoM ahead of the aero centre, staticMarginM > 0) makes a
 // restoring pitch moment ∝ staticMargin·q̄·area·AoA that weathervanes the nose back toward the relative
 // wind. Tuned gentle so the plane trims hands-off without fighting a commanded turn.
 const STAB_K = 0.5;
+
+// Dihedral (roll-stability) gain: sideslip produces a rolling moment toward wings-level. A coordinated
+// turn carries ~no sideslip, so this doesn't fight commanded banking — it only damps out skidding and
+// the slow knife-edge/inverted attitudes an uncoordinated pilot falls into. The real fix for "flies like
+// a maniac" is the pilot, but this stops the airframe from happily living at any bank angle.
+const DIHEDRAL_K = 1.5;
 
 // Oswald span efficiency for the induced-drag polar cd_i = cl²/(π·AR·e). With the default AR≈7.5 this
 // lands at ≈0.053 — essentially the old constant 0.052 — so the default is undisturbed, while a stubby
@@ -136,8 +142,10 @@ function stepAircraft(
   // weathervanes back toward the relative wind. Zero at AoA 0, so it adds no standing torque in level
   // flight. Goes in the torque numerator (it doesn't depend on the rate).
   const tauStabPitch = -STAB_K * model.staticMarginM * model.wingAreaM2 * qbar * aoa;
+  // Dihedral: sideslip rolls the aircraft back toward wings-level (toward the relative wind).
+  const tauDihedralRoll = -DIHEDRAL_K * model.wingAreaM2 * qbar * sideSlip;
   const omega = aircraft.angularVelocity;
-  const wRoll = (omega.x + (dt * ctrlRoll) / model.inertia.roll) / (1 + (dt * qbar * DAMP_ROLL) / model.inertia.roll);
+  const wRoll = (omega.x + (dt * (ctrlRoll + tauDihedralRoll)) / model.inertia.roll) / (1 + (dt * qbar * DAMP_ROLL) / model.inertia.roll);
   const wPitch = (omega.y + (dt * (ctrlPitch + tauStabPitch)) / model.inertia.pitch) / (1 + (dt * qbar * DAMP_PITCH) / model.inertia.pitch);
   const wYaw = (omega.z + (dt * ctrlYaw) / model.inertia.yaw) / (1 + (dt * qbar * DAMP_YAW) / model.inertia.yaw);
   aircraft.angularVelocity = vec3(wRoll, wPitch, wYaw);

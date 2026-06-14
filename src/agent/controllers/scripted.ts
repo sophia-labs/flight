@@ -23,7 +23,9 @@ export function pursuitAction(observation: Observation, aggression: number): Raw
     kind: "raw-stick",
     pitch: clamp(targetUp * 3.2 + leadBias * 0.25, -1, 1),
     roll: clamp(targetRight * (2.35 + aggression * 0.5), -1, 1),
-    yaw: clamp(targetRight * 1.2, -1, 1),
+    // Light rudder only — a coordinated pursuit turns by banking and pulling, not by steering with the
+    // rudder (which skids, fights dihedral, and looks unhinged). Just enough for fine nose-aim.
+    yaw: clamp(targetRight * 0.25, -1, 1),
     throttle,
     trigger:
       targetForward > 0.975 &&
