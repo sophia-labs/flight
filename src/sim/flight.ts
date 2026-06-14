@@ -21,9 +21,19 @@ const TERRAIN_FLOOR_M = 55;
 // Aerodynamic rotational damping per axis. These set the control time-constant τ = I/(qbar·DAMP) — and
 // ONLY τ, because the steady-state rate cancels DAMP — calibrated against the default's inertia so the
 // default's response (roll τ≈0.22 s, pitch≈0.45 s, yaw≈0.75 s at cruise) matches the old kinematic feel.
-const DAMP_ROLL = 20.0;
-const DAMP_PITCH = 42.0;
-const DAMP_YAW = 30.0;
+const DAMP_ROLL = 27.0;
+const DAMP_PITCH = 56.0;
+const DAMP_YAW = 40.0;
+
+// Static-stability gain: a stable airframe (CoM ahead of the aero centre, staticMarginM > 0) makes a
+// restoring pitch moment ∝ staticMargin·q̄·area·AoA that weathervanes the nose back toward the relative
+// wind. Tuned gentle so the plane trims hands-off without fighting a commanded turn.
+const STAB_K = 0.5;
+
+// Oswald span efficiency for the induced-drag polar cd_i = cl²/(π·AR·e). With the default AR≈7.5 this
+// lands at ≈0.053 — essentially the old constant 0.052 — so the default is undisturbed, while a stubby
+// low-AR build now pays a real induced-drag penalty and a long-winged build is rewarded.
+const OSWALD_E = 0.8;
 
 // The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
@@ -81,7 +91,7 @@ function stepAircraft(
   const lift = scale(basis.up, qbar * model.wingAreaM2 * cl);
   const sideSlip = clamp(bodySideSpeed / Math.max(speed, 1), -1, 1);
   const sideForce = scale(basis.right, -qbar * 8.5 * sideSlip * 1.15);
-  const cd = 0.034 + cl * cl * 0.052 + stallSeverity * 0.28;
+  const cd = 0.034 + (cl * cl) / (Math.PI * model.aspectRatio * OSWALD_E) + stallSeverity * 0.28;
   const drag = scale(normalize(aircraft.velocity), -qbar * model.wingAreaM2 * cd);
   const thrust = scale(basis.forward, model.maxThrustN * (0.14 + controls.throttle * 0.86));
   const totalForce = add(add(add(lift, sideForce), drag), thrust);
@@ -109,9 +119,13 @@ function stepAircraft(
   const ctrlRoll = controls.roll * model.maxRollRate * DAMP_ROLL * qbar * stallBite;
   const ctrlPitch = controls.pitch * model.maxPitchRate * DAMP_PITCH * qbar * stallBite;
   const ctrlYaw = -controls.yaw * model.maxYawRate * DAMP_YAW * qbar * stallBite;
+  // Static restoring moment (pitch): nose-up AoA on a stable airframe produces a nose-down torque that
+  // weathervanes back toward the relative wind. Zero at AoA 0, so it adds no standing torque in level
+  // flight. Goes in the torque numerator (it doesn't depend on the rate).
+  const tauStabPitch = -STAB_K * model.staticMarginM * model.wingAreaM2 * qbar * aoa;
   const omega = aircraft.angularVelocity;
   const wRoll = (omega.x + (dt * ctrlRoll) / model.inertia.roll) / (1 + (dt * qbar * DAMP_ROLL) / model.inertia.roll);
-  const wPitch = (omega.y + (dt * ctrlPitch) / model.inertia.pitch) / (1 + (dt * qbar * DAMP_PITCH) / model.inertia.pitch);
+  const wPitch = (omega.y + (dt * (ctrlPitch + tauStabPitch)) / model.inertia.pitch) / (1 + (dt * qbar * DAMP_PITCH) / model.inertia.pitch);
   const wYaw = (omega.z + (dt * ctrlYaw) / model.inertia.yaw) / (1 + (dt * qbar * DAMP_YAW) / model.inertia.yaw);
   aircraft.angularVelocity = vec3(wRoll, wPitch, wYaw);
 

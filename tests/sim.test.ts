@@ -14,6 +14,7 @@ import {
   quatLookRotation,
   vec3,
 } from "../src/sim/math";
+import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
 import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
 import type { AircraftState, FlightMetrics } from "../src/sim/types";
 import { generateDemoMatch } from "../src/runtime/scenario";
@@ -291,5 +292,42 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
     }
     expect(Number.isFinite(maxOmega)).toBe(true);
     expect(maxOmega).toBeLessThan(2.0); // ≈ maxRollRate 1.75, decisively NOT diverging
+  });
+
+  it("statically stable: trims hands-off near level and a pitch disturbance decays", () => {
+    const cruise = makeAircraft({ velocity: vec3(0, 0, -180) });
+    step([cruise], { "blue-1": controls({ pitch: 0, throttle: 0.8 }) }, 15); // 2.4 s, stick neutral
+    expect(Math.abs(cruise.metrics.altitude - 1000)).toBeLessThan(28); // holds level (restoring + damping)
+
+    // Pull the nose up, release, and let the restoring moment weathervane it back: the pitch rate decays.
+    const disturbed = makeAircraft({ velocity: vec3(0, 0, -180) });
+    step([disturbed], { "blue-1": controls({ pitch: 1, throttle: 0.8 }) }, 3);
+    const pulledRate = Math.abs(disturbed.angularVelocity.y);
+    step([disturbed], { "blue-1": controls({ pitch: 0, throttle: 0.8 }) }, 12);
+    expect(Math.abs(disturbed.angularVelocity.y)).toBeLessThan(pulledRate * 0.3); // settled toward trim
+  });
+
+  it("CoM placement sets stability: aft mass flips the static margin negative", () => {
+    const stable = compileAirframe(defaultAirframe()).model;
+    expect(stable.staticMarginM).toBeGreaterThan(0); // default: CoM ahead of AC
+
+    const aft = defaultAirframe();
+    const fuselage = aft.parts.find((p) => p.id === "fuselage");
+    if (fuselage) fuselage.pose = { offset: vec3(0, 0, 3), rotation: fuselage.pose.rotation };
+    expect(compileAirframe(aft).model.staticMarginM).toBeLessThan(0); // mass moved aft ⇒ unstable
+  });
+
+  it("induced drag scales with aspect ratio: a stubby wing pays more", () => {
+    const def = compileAirframe(defaultAirframe()).model;
+    const stubby = defaultAirframe();
+    const wing = stubby.parts.find((p) => p.id === "main-wing");
+    if (wing && wing.kind === "wing") {
+      wing.planform = { span: wing.planform.span / 2, chord: wing.planform.chord * 2 }; // same area, ¼ AR
+    }
+    const sm = compileAirframe(stubby).model;
+    expect(sm.wingAreaM2).toBeCloseTo(def.wingAreaM2, 6); // area unchanged
+    expect(sm.aspectRatio).toBeLessThan(def.aspectRatio); // but AR dropped
+    // induced-drag factor 1/(π·AR·e) is therefore higher for the stubby wing
+    expect(1 / sm.aspectRatio).toBeGreaterThan(1 / def.aspectRatio);
   });
 });
