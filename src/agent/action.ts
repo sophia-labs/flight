@@ -31,8 +31,13 @@ export const rawStickAdapter: ActionAdapter = {
 };
 
 const DEG = Math.PI / 180;
-const KP_BANK = 2.0;
-const KP_PITCH = 2.5;
+// PD attitude hold. On the v0.6.0 rigid-body plant (stick → torque → ω → attitude is 2nd-order), a
+// pure-P loop would PIO, so each axis subtracts a rate-damping term that reads the TRUE body angular
+// velocity. KP is lowered from the old kinematic values; KD ≈ critically damps the new plant.
+const KP_BANK = 1.2;
+const KD_BANK = 0.45;
+const KP_PITCH = 1.4;
+const KD_PITCH = 0.7;
 
 // Setpoint adapter: the agent commands a target bank + pitch attitude (and throttle/trigger), and
 // this attitude-hold loop produces the stick each frame — feathering toward the setpoint and
@@ -50,8 +55,11 @@ export const setpointAdapter: ActionAdapter = {
     // Pitch attitude relative to the horizon.
     const pitchRad = Math.asin(clamp(basis.forward.y, -1, 1));
 
-    let rollCmd = clamp((a.targetBankDeg * DEG - bankRad) * KP_BANK, -1, 1);
-    let pitchCmd = clamp((a.targetPitchDeg * DEG - pitchRad) * KP_PITCH, -1, 1);
+    // Rate-damping (D) term: angularVelocity.x = body roll rate, .y = body pitch rate.
+    const rollRate = self.angularVelocity.x;
+    const pitchRate = self.angularVelocity.y;
+    let rollCmd = clamp((a.targetBankDeg * DEG - bankRad) * KP_BANK - rollRate * KD_BANK, -1, 1);
+    let pitchCmd = clamp((a.targetPitchDeg * DEG - pitchRad) * KP_PITCH - pitchRate * KD_PITCH, -1, 1);
     let throttle = a.throttle;
 
     // Anti-stall envelope protection: ease off nose-up as angle of attack nears the stall.

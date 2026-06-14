@@ -18,6 +18,13 @@ const GRAVITY = vec3(0, -9.81, 0);
 const SEA_LEVEL_DENSITY = 1.225;
 const TERRAIN_FLOOR_M = 55;
 
+// Aerodynamic rotational damping per axis. These set the control time-constant τ = I/(qbar·DAMP) — and
+// ONLY τ, because the steady-state rate cancels DAMP — calibrated against the default's inertia so the
+// default's response (roll τ≈0.22 s, pitch≈0.45 s, yaw≈0.75 s at cruise) matches the old kinematic feel.
+const DAMP_ROLL = 20.0;
+const DAMP_PITCH = 42.0;
+const DAMP_YAW = 30.0;
+
 // The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
 export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
@@ -79,7 +86,6 @@ function stepAircraft(
   const thrust = scale(basis.forward, model.maxThrustN * (0.14 + controls.throttle * 0.86));
   const totalForce = add(add(add(lift, sideForce), drag), thrust);
   const acceleration = add(scale(totalForce, 1 / model.massKg), GRAVITY);
-  const controlAuthority = clamp((speed - 38) / 118, 0.18, 1.08) * (stalled ? 0.52 : 1);
 
   aircraft.velocity = add(aircraft.velocity, scale(acceleration, dt));
   aircraft.position = add(aircraft.position, scale(aircraft.velocity, dt));
@@ -92,22 +98,27 @@ function stepAircraft(
     };
   }
 
+  // --- Rigid-body rotation (v0.6.0) ---
+  // Control surfaces make torque ∝ qbar·stick; aerodynamic damping opposes the body rate ∝ qbar·ω.
+  // Steady-state full-stick rate = model.maxRate (qbar AND damp cancel at equilibrium), so the calibrated
+  // default reproduces the old kinematic rates; speed-dependence is now EMERGENT via the time constant
+  // τ = I/(qbar·damp) — slow and sluggish when slow, snappy when fast. Damping is integrated IMPLICITLY
+  // (the ω_next = (ω + dt·τ_ctrl/I)/(1 + dt·qbar·damp/I) form), which is unconditionally stable even at
+  // this coarse 16 ms step where an explicit scheme would ring or diverge in a dive.
+  const stallBite = stalled ? 0.52 : 1; // control surfaces lose authority in the buffet (old stall feel)
+  const ctrlRoll = controls.roll * model.maxRollRate * DAMP_ROLL * qbar * stallBite;
+  const ctrlPitch = controls.pitch * model.maxPitchRate * DAMP_PITCH * qbar * stallBite;
+  const ctrlYaw = -controls.yaw * model.maxYawRate * DAMP_YAW * qbar * stallBite;
+  const omega = aircraft.angularVelocity;
+  const wRoll = (omega.x + (dt * ctrlRoll) / model.inertia.roll) / (1 + (dt * qbar * DAMP_ROLL) / model.inertia.roll);
+  const wPitch = (omega.y + (dt * ctrlPitch) / model.inertia.pitch) / (1 + (dt * qbar * DAMP_PITCH) / model.inertia.pitch);
+  const wYaw = (omega.z + (dt * ctrlYaw) / model.inertia.yaw) / (1 + (dt * qbar * DAMP_YAW) / model.inertia.yaw);
+  aircraft.angularVelocity = vec3(wRoll, wPitch, wYaw);
+
   let orientation = aircraft.orientation;
-  orientation = rotateAroundWorldAxis(
-    orientation,
-    basis.forward,
-    controls.roll * model.maxRollRate * controlAuthority * dt,
-  );
-  orientation = rotateAroundWorldAxis(
-    orientation,
-    basis.right,
-    controls.pitch * model.maxPitchRate * controlAuthority * dt,
-  );
-  orientation = rotateAroundWorldAxis(
-    orientation,
-    basis.up,
-    -(controls.yaw * model.maxYawRate + controls.roll * 0.055) * controlAuthority * dt,
-  );
+  orientation = rotateAroundWorldAxis(orientation, basis.forward, wRoll * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.right, wPitch * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.up, wYaw * dt);
   aircraft.orientation = orientation;
   aircraft.weaponCooldown = Math.max(0, aircraft.weaponCooldown - dt);
 

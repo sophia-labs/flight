@@ -263,3 +263,33 @@ describe("flight physics characterization", () => {
     }
   });
 });
+
+describe("rigid-body rotation (v0.6.0 physics)", () => {
+  it("full stick spools the rate toward the steady value — not instant, not past it", () => {
+    // The kinematic puppet jumped to maxRate in one frame; the rigid body integrates up over τ.
+    const roller = makeAircraft();
+    step([roller], { "blue-1": controls({ roll: 1 }) }, 6); // ~1 s
+    expect(roller.angularVelocity.x).toBeGreaterThan(1.4);
+    expect(roller.angularVelocity.x).toBeLessThanOrEqual(DEFAULT_MODEL.maxRollRate + 1e-6);
+    expect(roller.angularVelocity.x).toBeCloseTo(1.749, 2); // behavioural golden
+
+    const pitcher = makeAircraft();
+    step([pitcher], { "blue-1": controls({ pitch: 1 }) }, 6);
+    expect(pitcher.angularVelocity.y).toBeGreaterThan(0.5);
+    expect(pitcher.angularVelocity.y).toBeLessThanOrEqual(DEFAULT_MODEL.maxPitchRate + 1e-6);
+  });
+
+  it("stays bounded at high speed under full deflection (implicit damping is unconditionally stable)", () => {
+    // The explicit integration the design review rejected exploded to ~2459 rad/s in this exact case;
+    // the implicit scheme caps angular velocity at the steady rate even at a 280 m/s dive's huge qbar.
+    const diver = makeAircraft({ velocity: vec3(0, 0, -280) });
+    let maxOmega = 0;
+    for (let i = 0; i < 25; i += 1) {
+      step([diver], { "blue-1": controls({ pitch: 1, roll: 1, yaw: 1, throttle: 1 }) }, 1);
+      const w = diver.angularVelocity;
+      maxOmega = Math.max(maxOmega, Math.abs(w.x), Math.abs(w.y), Math.abs(w.z));
+    }
+    expect(Number.isFinite(maxOmega)).toBe(true);
+    expect(maxOmega).toBeLessThan(2.0); // ≈ maxRollRate 1.75, decisively NOT diverging
+  });
+});
