@@ -1,8 +1,7 @@
-import type { Airframe, Part } from "../protocol/schema";
-import { DEFAULT_MODEL } from "./flight";
+import type { Airframe, Part, Vec3 } from "../protocol/schema";
 import { quatIdentity, vec3 } from "./math";
 import type { SensorDevice } from "./parts";
-import type { AircraftModel } from "./types";
+import type { AircraftModel, Inertia } from "./types";
 
 // The aircraft builder's keystone: a PURE fold from a parts list to the flat 7-scalar AircraftModel the
 // physics already reads (src/sim/flight.ts → stepAircraft) plus the mounted SensorDevices. The physics
@@ -106,6 +105,16 @@ function authorities(parts: Part[]): Authorities {
 // Computed once from the default. The anchor that makes the default's rate ratio exactly 1.0.
 const DEFAULT_AUTHORITY = authorities(defaultAirframe().parts);
 
+// The default's reference full-stick steady rates (rad/s) and stall AoA — the ratio anchors to these so
+// the default compiles to exactly these values (see rateFor). These WERE DEFAULT_MODEL's literals; they
+// live here now so flight.ts can define DEFAULT_MODEL = compileAirframe(defaultAirframe()).model without
+// an import cycle.
+const BASE_PITCH_RATE = 0.92;
+const BASE_ROLL_RATE = 1.75;
+const BASE_YAW_RATE = 0.34;
+const STALL_AOA_RAD = 0.42;
+const WING_THICKNESS_M = 0.1; // nominal slab thickness for a wing's box-inertia/mesh extents
+
 // A build with no surface on an axis still gets some authority (floor), and no build can exceed 3×, so
 // the compiler never emits a dead or absurd rate. The default's ratio is 1.0 — inside the band, untouched.
 const RATE_RATIO_MIN = 0.2;
@@ -122,13 +131,67 @@ export interface CompiledAirframe {
   devices: SensorDevice[];
 }
 
+interface PartBox {
+  mass: number;
+  offset: Vec3;
+  dimX: number; // body lateral extent (m)
+  dimY: number; // body vertical extent
+  dimZ: number; // body longitudinal extent
+}
+
+// A massive part's mass, body-frame position, and bounding-box extents — the inputs to CoM + box
+// inertia. Sensors are treated as massless structure and contribute nothing. (Tanks: fuel milestone.)
+function partBox(part: Part): PartBox | null {
+  switch (part.kind) {
+    case "fuselage":
+      return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.width, dimY: part.dims.height, dimZ: part.dims.length };
+    case "wing": {
+      const vertical = part.control?.axis === "yaw"; // a fin's span runs up the Y axis
+      return vertical
+        ? { mass: part.massKg, offset: part.pose.offset, dimX: WING_THICKNESS_M, dimY: part.planform.span, dimZ: part.planform.chord }
+        : { mass: part.massKg, offset: part.pose.offset, dimX: part.planform.span, dimY: WING_THICKNESS_M, dimZ: part.planform.chord };
+    }
+    case "engine":
+      return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
+    default:
+      return null; // sensor
+  }
+}
+
+// Solid-box inertia about the part's own centroid + parallel-axis transfer to the aircraft CoM.
+// roll = about body Z (forward); pitch = about body X (right); yaw = about body Y (up). The box self
+// term is what gives a long fuselage its real pitch/yaw inertia (m·L²/12) — a point mass would miss it.
+function addBoxInertia(acc: Inertia, box: PartBox, com: Vec3): void {
+  const { mass: m, dimX, dimY, dimZ } = box;
+  const dx = box.offset.x - com.x;
+  const dy = box.offset.y - com.y;
+  const dz = box.offset.z - com.z;
+  acc.roll += (m * (dimX * dimX + dimY * dimY)) / 12 + m * (dx * dx + dy * dy);
+  acc.pitch += (m * (dimY * dimY + dimZ * dimZ)) / 12 + m * (dy * dy + dz * dz);
+  acc.yaw += (m * (dimX * dimX + dimZ * dimZ)) / 12 + m * (dx * dx + dz * dz);
+}
+
 export function compileAirframe(airframe: Airframe): CompiledAirframe {
   let massKg = 0;
   let wingAreaM2 = 0;
   let maxThrustN = 0;
+  const fuelCapacityKg = 0; // milestone 4 (tanks) sums this; no tanks today ⇒ effectively infinite fuel
+  let liftArea = 0;
+  let liftAreaZ = 0;
+  let maxLiftSpan = 0;
   const devices: SensorDevice[] = [];
 
+  // Pass 1: scalar sums, lift geometry, and mass-weighted CoM accumulation.
+  let comMassX = 0;
+  let comMassY = 0;
+  let comMassZ = 0;
   for (const part of airframe.parts) {
+    const box = partBox(part);
+    if (box) {
+      comMassX += box.mass * box.offset.x;
+      comMassY += box.mass * box.offset.y;
+      comMassZ += box.mass * box.offset.z;
+    }
     switch (part.kind) {
       case "fuselage":
         massKg += part.massKg;
@@ -136,7 +199,13 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
       case "wing":
         massKg += part.massKg;
         // Vertical (yaw) surfaces drive yaw but make no lift, so they don't add to the lift area.
-        if (part.control?.axis !== "yaw") wingAreaM2 += part.planform.span * part.planform.chord;
+        if (part.control?.axis !== "yaw") {
+          const area = part.planform.span * part.planform.chord;
+          wingAreaM2 += area;
+          liftArea += area;
+          liftAreaZ += area * part.pose.offset.z;
+          if (part.planform.span > maxLiftSpan) maxLiftSpan = part.planform.span;
+        }
         break;
       case "engine":
         massKg += part.massKg;
@@ -148,15 +217,39 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     }
   }
 
+  const com: Vec3 = massKg > 0 ? vec3(comMassX / massKg, comMassY / massKg, comMassZ / massKg) : vec3(0, 0, 0);
+
+  // Pass 2: inertia about the CoM. Floor each axis so a degenerate (massless) build can't divide by 0.
+  const inertia: Inertia = { roll: 0, pitch: 0, yaw: 0 };
+  for (const part of airframe.parts) {
+    const box = partBox(part);
+    if (box) addBoxInertia(inertia, box, com);
+  }
+  inertia.roll = Math.max(inertia.roll, 1);
+  inertia.pitch = Math.max(inertia.pitch, 1);
+  inertia.yaw = Math.max(inertia.yaw, 1);
+
+  // Aerodynamic centre = area-weighted longitudinal centre of the lifting surfaces; aspect ratio from
+  // the widest lifting span. Both fall back to safe values for a wingless build.
+  const aeroCenterZ = liftArea > 0 ? liftAreaZ / liftArea : com.z;
+  const aspectRatio = liftArea > 0 && maxLiftSpan > 0 ? (maxLiftSpan * maxLiftSpan) / liftArea : 6;
+
   const auth = authorities(airframe.parts);
   const model: AircraftModel = {
     massKg,
     wingAreaM2,
     maxThrustN,
-    maxPitchRate: rateFor(DEFAULT_MODEL.maxPitchRate, auth.pitch, DEFAULT_AUTHORITY.pitch),
-    maxRollRate: rateFor(DEFAULT_MODEL.maxRollRate, auth.roll, DEFAULT_AUTHORITY.roll),
-    maxYawRate: rateFor(DEFAULT_MODEL.maxYawRate, auth.yaw, DEFAULT_AUTHORITY.yaw),
-    stallAoARad: DEFAULT_MODEL.stallAoARad, // no part drives stall yet (reserved: wing camber)
+    maxPitchRate: rateFor(BASE_PITCH_RATE, auth.pitch, DEFAULT_AUTHORITY.pitch),
+    maxRollRate: rateFor(BASE_ROLL_RATE, auth.roll, DEFAULT_AUTHORITY.roll),
+    maxYawRate: rateFor(BASE_YAW_RATE, auth.yaw, DEFAULT_AUTHORITY.yaw),
+    stallAoARad: STALL_AOA_RAD,
+    inertia,
+    com,
+    aeroCenterZ,
+    staticMarginM: aeroCenterZ - com.z, // > 0 ⇒ CoM ahead of AC ⇒ statically stable
+    aspectRatio,
+    dryMassKg: massKg - fuelCapacityKg,
+    fuelCapacityKg,
   };
 
   return { model, devices };
@@ -190,9 +283,9 @@ export function airframeReport(model: AircraftModel): AirframeReport {
   const flagRate = (axis: string, rate: number, base: number) => {
     if (rate < base * 0.3) warnings.push(`barely controllable in ${axis} (<0.3× default rate)`);
   };
-  flagRate("roll", model.maxRollRate, DEFAULT_MODEL.maxRollRate);
-  flagRate("pitch", model.maxPitchRate, DEFAULT_MODEL.maxPitchRate);
-  flagRate("yaw", model.maxYawRate, DEFAULT_MODEL.maxYawRate);
+  flagRate("roll", model.maxRollRate, BASE_ROLL_RATE);
+  flagRate("pitch", model.maxPitchRate, BASE_PITCH_RATE);
+  flagRate("yaw", model.maxYawRate, BASE_YAW_RATE);
 
   return {
     thrustToWeight,

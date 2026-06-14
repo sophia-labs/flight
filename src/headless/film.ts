@@ -96,6 +96,8 @@ function fromSnapshot(s: AircraftSnapshot): AircraftState {
     weaponCooldown: s.weaponCooldown,
     model: DEFAULT_MODEL,
     metrics: { airspeed: s.airspeed, altitude: s.altitude, aoaDeg: s.aoaDeg, gLoad: s.gLoad, stalled: s.stalled },
+    angularVelocity: { x: 0, y: 0, z: 0 },
+    fuelKg: DEFAULT_MODEL.fuelCapacityKg,
     devices: [noseCamera()],
   };
 }

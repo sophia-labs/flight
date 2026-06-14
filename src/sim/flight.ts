@@ -1,4 +1,5 @@
 import { clampControlInput, type ControlInput, type ReplayEvent } from "../protocol/schema";
+import { compileAirframe, defaultAirframe } from "./airframe";
 import {
   add,
   basisFromQuat,
@@ -11,21 +12,15 @@ import {
   sub,
   vec3,
 } from "./math";
-import type { AircraftState, FlightMetrics, StepResult } from "./types";
+import type { AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
 
 const GRAVITY = vec3(0, -9.81, 0);
 const SEA_LEVEL_DENSITY = 1.225;
 const TERRAIN_FLOOR_M = 55;
 
-export const DEFAULT_MODEL = {
-  massKg: 9_200,
-  wingAreaM2: 22.5,
-  maxThrustN: 74_000,
-  maxPitchRate: 0.92,
-  maxRollRate: 1.75,
-  maxYawRate: 0.34,
-  stallAoARad: 0.42,
-};
+// The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
+// source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
+export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
 
 export function stepSimulation(
   aircraft: AircraftState[],

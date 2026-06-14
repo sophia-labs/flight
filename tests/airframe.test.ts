@@ -9,9 +9,26 @@ import {
 import { DEFAULT_MODEL } from "../src/sim/flight";
 
 describe("airframe compiler", () => {
-  it("compiles the default airframe to EXACTLY DEFAULT_MODEL (byte-identity anchor)", () => {
-    // This is the determinism guarantee: same model ⇒ same physics ⇒ all existing replays byte-identical.
-    expect(compileAirframe(defaultAirframe()).model).toEqual(DEFAULT_MODEL);
+  it("compiles the default airframe to the calibration baseline + frozen derived rigid-body fields", () => {
+    const m = compileAirframe(defaultAirframe()).model;
+    // Base scalars — the intended calibration values (the rate ratio anchors the default to these).
+    expect(m.massKg).toBe(9_200);
+    expect(m.wingAreaM2).toBeCloseTo(22.5, 9);
+    expect(m.maxThrustN).toBe(74_000);
+    expect(m.maxRollRate).toBeCloseTo(1.75, 9);
+    expect(m.maxPitchRate).toBeCloseTo(0.92, 9);
+    expect(m.maxYawRate).toBeCloseTo(0.34, 9);
+    expect(m.stallAoARad).toBeCloseTo(0.42, 9);
+    // Derived rigid-body fields — frozen so a change to the geometry fold is caught (determinism anchor).
+    expect(Math.round(m.inertia.roll)).toBe(23_605);
+    expect(Math.round(m.inertia.pitch)).toBe(100_714);
+    expect(Math.round(m.inertia.yaw)).toBe(122_032);
+    expect(Number(m.staticMarginM.toFixed(4))).toBe(0.0625); // > 0 ⇒ CoM ahead of AC ⇒ statically stable
+    expect(m.aspectRatio).toBeCloseTo(7.511, 3);
+    expect(m.dryMassKg).toBe(9_200);
+    expect(m.fuelCapacityKg).toBe(0);
+    // DEFAULT_MODEL is the compiled default, so it carries these too.
+    expect(DEFAULT_MODEL.staticMarginM).toBe(m.staticMarginM);
   });
 
   it("mounts the default airframe's sensor part as a device", () => {

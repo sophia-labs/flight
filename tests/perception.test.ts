@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { senseAndEncode } from "../src/agent/perception";
 import { PerceptSchema } from "../src/protocol/schema";
+import { DEFAULT_MODEL } from "../src/sim/flight";
 import { quatLookRotation, vec3 } from "../src/sim/math";
 import type { SensorDevice } from "../src/sim/parts";
 import type { AircraftState } from "../src/sim/types";
@@ -34,16 +35,10 @@ function ac(o: {
     controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.8, trigger: false },
     health: o.health ?? 100,
     weaponCooldown: 0,
-    model: {
-      massKg: 1,
-      wingAreaM2: 1,
-      maxThrustN: 1,
-      maxPitchRate: 1,
-      maxRollRate: 1,
-      maxYawRate: 1,
-      stallAoARad: 0.4,
-    },
+    model: DEFAULT_MODEL,
     metrics: { airspeed: 180, altitude: o.position.y, aoaDeg: 0, gLoad: 1, stalled: false },
+    angularVelocity: vec3(0, 0, 0),
+    fuelKg: 0,
   };
 }
 

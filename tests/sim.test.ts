@@ -75,6 +75,8 @@ function makeAircraft(o: Partial<AircraftState> = {}): AircraftState {
     weaponCooldown: o.weaponCooldown ?? 0,
     model: o.model ?? DEFAULT_MODEL,
     metrics: o.metrics ?? { ...ZERO_METRICS, airspeed: length(velocity), altitude: position.y },
+    angularVelocity: o.angularVelocity ?? vec3(0, 0, 0),
+    fuelKg: o.fuelKg ?? 0,
   };
 }
 
