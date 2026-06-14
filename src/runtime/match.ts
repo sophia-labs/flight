@@ -76,11 +76,10 @@ async function decide(
   }
 }
 
-// The generalized match runner: today's generateDemoMatch with the four fused concerns
-// (decide / step / outcome / assemble) inverted into injected config. The physics substrate
-// (stepSimulation + the per-turn step loop) is unchanged.
+// The generalized match runner: config is reusable data, so the mutable physics state is cloned before
+// the first frame. This matters for sweeps/evals that may intentionally replay the same config.
 export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
-  const aircraft = config.initialAircraft;
+  const aircraft = structuredClone(config.initialAircraft) as AircraftState[];
   const stepsPerTurn = Math.round(config.turnDuration / config.frameDt);
   const frames: ReplayFrame[] = [];
   const decisions: TurnDecision[] = [];
@@ -160,7 +159,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
 
   return MatchReplaySchema.parse({
     id: config.id,
-    schemaVersion: 2,
+    schemaVersion: 3,
     turnDuration: config.turnDuration,
     frameDt: config.frameDt,
     frames,

@@ -1,18 +1,16 @@
 import type { Airframe, Part, Vec3 } from "../protocol/schema";
-import { quatIdentity, vec3 } from "./math";
+import { add, clamp, normalize, quatIdentity, rotateVec, scale, vec3 } from "./math";
 import type { SensorDevice } from "./parts";
-import type { AircraftModel, Inertia } from "./types";
+import type { AeroSurface, AircraftModel, ControlAxis, Inertia, ThrustPoint } from "./types";
 
-// The aircraft builder's keystone: a PURE fold from a parts list to the flat 7-scalar AircraftModel the
-// physics already reads (src/sim/flight.ts → stepAircraft) plus the mounted SensorDevices. The physics
-// is UNCHANGED — the compiler's whole job is to PRODUCE its inputs from geometry. A sensor is a part,
-// so "place a camera" and "fly from a camera" are one data path.
+// The aircraft builder's keystone: a PURE fold from a parts list to the physical AircraftModel that
+// stepAircraft consumes. Wings become aerodynamic surfaces with local axes and optional moving control
+// panels; engines become thrust points; massful parts set CoM + inertia. A sensor is still a part, so
+// "place a camera" and "fly from a camera" are one data path.
 //
-// Determinism is load-bearing (byte-identical replays). The rates anchor to the DEFAULT airframe's own
-// computed authority: rate = BASE * clamp(authority / DEFAULT_AUTHORITY). For the default that ratio is
-// x/x = 1.0 EXACTLY in IEEE754, so compileAirframe(defaultAirframe()).model === DEFAULT_MODEL to the
-// bit and every existing match stays byte-identical; for a user build it scales. Mass/area/thrust are
-// plain sums; the default's part values are chosen to land on 9200 / 22.5 / 74000 exactly.
+// Determinism is load-bearing. The legacy handling ratings still anchor to the DEFAULT airframe's own
+// computed authority (so reports stay stable), but the v0.7 physics no longer reads those ratings as
+// torque motors. The plane now handles because surfaces push on air at their placed locations.
 
 // The forward nose camera, expressed as a part so it serializes inside the airframe. Lives here (not in
 // runtime/scenario) so the default airframe — the determinism anchor — can include it with no import
@@ -105,19 +103,17 @@ function authorities(parts: Part[]): Authorities {
 // Computed once from the default. The anchor that makes the default's rate ratio exactly 1.0.
 const DEFAULT_AUTHORITY = authorities(defaultAirframe().parts);
 
-// The default's reference full-stick steady rates (rad/s) and stall AoA — the ratio anchors to these so
-// the default compiles to exactly these values (see rateFor). These WERE DEFAULT_MODEL's literals; they
-// live here now so flight.ts can define DEFAULT_MODEL = compileAirframe(defaultAirframe()).model without
-// an import cycle.
+// The default's reference handling ratings (rad/s) and stall AoA. These remain useful UI/reporting
+// numbers, but surface-force physics reads model.aeroSurfaces.
 const BASE_PITCH_RATE = 0.92;
 const BASE_ROLL_RATE = 1.75;
 const BASE_YAW_RATE = 0.34;
 const STALL_AOA_RAD = 0.42;
 const WING_THICKNESS_M = 0.1; // nominal slab thickness for a wing's box-inertia/mesh extents
+const DEFAULT_DIHEDRAL_RAD = 0.075;
 
-// A build with no surface on an axis still gets some authority (floor), and no build can exceed 3×, so
-// the compiler never emits a dead or absurd rate. The default's ratio is 1.0 — inside the band, untouched.
-const RATE_RATIO_MIN = 0.2;
+// No hidden safety floor: a control-surface-free build really has no control authority on that axis.
+const RATE_RATIO_MIN = 0;
 const RATE_RATIO_MAX = 3.0;
 
 function rateFor(base: number, authority: number, defaultAuthority: number): number {
@@ -137,6 +133,115 @@ interface PartBox {
   dimX: number; // body lateral extent (m)
   dimY: number; // body vertical extent
   dimZ: number; // body longitudinal extent
+}
+
+function normalizedAreaFraction(controlArea: number | undefined, totalArea: number): number {
+  if (!controlArea || totalArea <= 0) return 0;
+  return clamp(controlArea / totalArea, 0, 1.4);
+}
+
+function controlFor(axis: ControlAxis, sign: number, fraction: number): AeroSurface["control"] {
+  if (fraction <= 0) return undefined;
+  return {
+    axis,
+    sign,
+    maxDeflectionRad: 0.24,
+    // A small aileron should matter, and a huge full-span surface should saturate rather than explode.
+    effectiveness: clamp(0.06 + fraction * 0.24, 0.06, 0.34),
+  };
+}
+
+function makeSurface(
+  part: Extract<Part, { kind: "wing" }>,
+  opts: {
+    id: string;
+    areaM2: number;
+    spanM: number;
+    offset: Vec3;
+    forward: Vec3;
+    up: Vec3;
+    kind: AeroSurface["kind"];
+    control?: AeroSurface["control"];
+  },
+): AeroSurface {
+  const aspectRatio = opts.areaM2 > 0 ? (opts.spanM * opts.spanM) / opts.areaM2 : 1;
+  const vertical = opts.kind === "vertical";
+  return {
+    id: opts.id,
+    areaM2: opts.areaM2,
+    spanM: opts.spanM,
+    chordM: part.planform.chord,
+    aspectRatio: Math.max(aspectRatio, 0.2),
+    localOffset: opts.offset,
+    localForward: opts.forward,
+    localUp: opts.up,
+    kind: opts.kind,
+    liftSlope: vertical ? 3.8 : 4.7,
+    zeroLiftCl: vertical ? 0 : 0.24,
+    cd0: vertical ? 0.018 : 0.026,
+    stallAoARad: STALL_AOA_RAD,
+    ...(opts.control ? { control: opts.control } : {}),
+  };
+}
+
+function wingSurfaces(part: Extract<Part, { kind: "wing" }>): AeroSurface[] {
+  const area = part.planform.span * part.planform.chord;
+  if (area <= 0) return [];
+
+  const yawSurface = part.control?.axis === "yaw";
+  const forward = rotateVec(part.pose.rotation, vec3(0, 0, -1));
+  const up = rotateVec(part.pose.rotation, yawSurface ? vec3(1, 0, 0) : vec3(0, 1, 0));
+  const spanAxis = rotateVec(part.pose.rotation, yawSurface ? vec3(0, 1, 0) : vec3(1, 0, 0));
+  const fraction = normalizedAreaFraction(part.control?.area, area);
+
+  if (part.control?.axis === "roll") {
+    const halfArea = area / 2;
+    const halfSpan = part.planform.span / 2;
+    return [-1, 1].map((side) =>
+      {
+        const panelUp = normalize(add(up, scale(spanAxis, -side * Math.sin(DEFAULT_DIHEDRAL_RAD))), up);
+        return makeSurface(part, {
+          id: `${part.id}-${side < 0 ? "left" : "right"}`,
+          areaM2: halfArea,
+          spanM: halfSpan,
+          offset: add(part.pose.offset, scale(spanAxis, side * part.planform.span * 0.25)),
+          forward,
+          up: panelUp,
+          kind: "horizontal",
+          control: controlFor("roll", -side, fraction),
+        });
+      },
+    );
+  }
+
+  const control =
+    part.control?.axis === "pitch"
+      ? controlFor("pitch", -1, fraction)
+      : part.control?.axis === "yaw"
+        ? controlFor("yaw", -1, fraction)
+        : undefined;
+
+  return [
+    makeSurface(part, {
+      id: part.id,
+      areaM2: area,
+      spanM: part.planform.span,
+      offset: part.pose.offset,
+      forward,
+      up,
+      kind: yawSurface ? "vertical" : "horizontal",
+      control,
+    }),
+  ];
+}
+
+function thrustPoint(part: Extract<Part, { kind: "engine" }>): ThrustPoint {
+  return {
+    id: part.id,
+    maxThrustN: part.thrustN,
+    localOffset: part.pose.offset,
+    localForward: rotateVec(part.pose.rotation, vec3(0, 0, -1)),
+  };
 }
 
 // A massive part's mass, body-frame position, and bounding-box extents — the inputs to CoM + box
@@ -178,11 +283,14 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   let massKg = 0;
   let wingAreaM2 = 0;
   let maxThrustN = 0;
+  let parasiteDragAreaM2 = 0;
   let fuelCapacityKg = 0; // Σ tank fuel; 0 (no tanks) ⇒ effectively infinite fuel (no burn)
   let liftArea = 0;
   let liftAreaZ = 0;
   let maxLiftSpan = 0;
   const devices: SensorDevice[] = [];
+  const aeroSurfaces: AeroSurface[] = [];
+  const thrustPoints: ThrustPoint[] = [];
 
   // Pass 1: scalar sums, lift geometry, and mass-weighted CoM accumulation.
   let comMassX = 0;
@@ -198,9 +306,11 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     switch (part.kind) {
       case "fuselage":
         massKg += part.massKg;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.25;
         break;
       case "wing":
         massKg += part.massKg;
+        aeroSurfaces.push(...wingSurfaces(part));
         // Vertical (yaw) surfaces drive yaw but make no lift, so they don't add to the lift area.
         if (part.control?.axis !== "yaw") {
           const area = part.planform.span * part.planform.chord;
@@ -213,10 +323,13 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
       case "engine":
         massKg += part.massKg;
         maxThrustN += part.thrustN;
+        thrustPoints.push(thrustPoint(part));
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.25;
         break;
       case "tank":
         massKg += part.dryMassKg + part.fuelKg; // full mass; the fuel portion is burnable
         fuelCapacityKg += part.fuelKg;
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.2;
         break;
       case "sensor":
         devices.push(part);
@@ -242,6 +355,11 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   const aspectRatio = liftArea > 0 && maxLiftSpan > 0 ? (maxLiftSpan * maxLiftSpan) / liftArea : 6;
 
   const auth = authorities(airframe.parts);
+  const controlAuthority: Record<ControlAxis, number> = {
+    roll: auth.roll,
+    pitch: auth.pitch,
+    yaw: auth.yaw,
+  };
   const model: AircraftModel = {
     massKg,
     wingAreaM2,
@@ -255,6 +373,10 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     aeroCenterZ,
     staticMarginM: aeroCenterZ - com.z, // > 0 ⇒ CoM ahead of AC ⇒ statically stable
     aspectRatio,
+    aeroSurfaces,
+    thrustPoints,
+    controlAuthority,
+    parasiteDragAreaM2,
     dryMassKg: massKg - fuelCapacityKg,
     fuelCapacityKg,
   };
@@ -268,6 +390,9 @@ export interface AirframeReport {
   maxPitchRate: number;
   maxRollRate: number;
   maxYawRate: number;
+  surfaceCount: number;
+  thrustPointCount: number;
+  controlAuthority: Record<ControlAxis, number>;
   warnings: string[];
 }
 
@@ -287,8 +412,17 @@ export function airframeReport(model: AircraftModel): AirframeReport {
   if (thrustToWeight < 0.3) {
     warnings.push("low thrust-to-weight (<0.3): may not accelerate past the 62 m/s stall floor");
   }
+  if (model.aeroSurfaces.length === 0) {
+    warnings.push("no aerodynamic surfaces: the aircraft is ballistic");
+  }
+  if (model.thrustPoints.length === 0 && model.maxThrustN > 0) {
+    warnings.push("thrust has no mounted engine point");
+  }
+  for (const axis of ["roll", "pitch", "yaw"] as const) {
+    if (model.controlAuthority[axis] <= 0) warnings.push(`no ${axis} control surface`);
+  }
   const flagRate = (axis: string, rate: number, base: number) => {
-    if (rate < base * 0.3) warnings.push(`barely controllable in ${axis} (<0.3× default rate)`);
+    if (rate > 0 && rate < base * 0.3) warnings.push(`weak ${axis} authority (<0.3× default rating)`);
   };
   flagRate("roll", model.maxRollRate, BASE_ROLL_RATE);
   flagRate("pitch", model.maxPitchRate, BASE_PITCH_RATE);
@@ -300,6 +434,9 @@ export function airframeReport(model: AircraftModel): AirframeReport {
     maxPitchRate: model.maxPitchRate,
     maxRollRate: model.maxRollRate,
     maxYawRate: model.maxYawRate,
+    surfaceCount: model.aeroSurfaces.length,
+    thrustPointCount: model.thrustPoints.length,
+    controlAuthority: model.controlAuthority,
     warnings,
   };
 }

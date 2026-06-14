@@ -12,7 +12,7 @@
 //   npm run film -- --scripted --cinema                 # free dev pass (3D), no API key
 //   npm run film -- deepseek/deepseek-v4-flash --cinema  # live; writes film.mp4
 //   npm run film -- <model> --cinema --out clips/run.mp4
-//   env: FILM_TURNS (16), FILM_FPS (30), FILM_MODE (raw-stick|setpoint, default setpoint)
+//   env: FILM_TURNS (16), FILM_FPS (30), FILM_MODE (raw-stick|setpoint|flight-director, default flight-director)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync } from "node:fs";
@@ -54,7 +54,7 @@ const model =
   "deepseek/deepseek-chat-v3.1";
 const turns = Number(process.env.FILM_TURNS ?? 16);
 const fps = Number(process.env.FILM_FPS ?? 30);
-const mode = (process.env.FILM_MODE ?? "setpoint") as ActionMode;
+const mode = (process.env.FILM_MODE ?? "flight-director") as ActionMode;
 const label = scripted ? "Pursuit" : (model.split("/").pop() ?? model);
 
 function buildConfig(): MatchConfig {

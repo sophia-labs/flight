@@ -67,5 +67,40 @@ export const setpointSpec: ActionSpec = {
   }),
 };
 
-export const actionSpecs = { "raw-stick": rawStickSpec, setpoint: setpointSpec } as const;
+export const flightDirectorSpec: ActionSpec = {
+  name: "set_flight_director",
+  description: "Command bank, pull/load, and energy priority; the flight controller protects the envelope.",
+  toolSchema: Type.Object({
+    reason: Type.String({ description: "one short phrase: your tactical intent this turn" }),
+    targetBankDeg: Type.Number({ description: "desired bank angle, -90..90 (+ = roll right)" }),
+    targetLoadG: Type.Number({ description: "desired pull/load, 0.2..7.0 G" }),
+    throttle: Type.Number({ description: "0 (idle) .. 1 (full)" }),
+    speedPriority: Type.String({ description: "gain, hold, or bleed" }),
+    trigger: Type.Boolean({ description: "fire guns this turn" }),
+  }),
+  rules: [
+    "ACTION (flight-director): command targetBankDeg (-90..90, + = right), targetLoadG (0.2..7.0), throttle, speedPriority, and trigger.",
+    "Use bank to choose turn direction and loadG to choose how hard to pull. Higher load turns harder but bleeds energy and can approach stall.",
+    "Set speedPriority='gain' when slow or extending, 'hold' in most turns, and 'bleed' only to force an overshoot or tighten briefly.",
+  ].join("\n"),
+  toAction: (a) => {
+    const rawPriority = typeof a.speedPriority === "string" ? a.speedPriority : "hold";
+    const speedPriority =
+      rawPriority === "gain" || rawPriority === "bleed" || rawPriority === "hold" ? rawPriority : "hold";
+    return {
+      kind: "flight-director",
+      targetBankDeg: clamp(num(a.targetBankDeg, "targetBankDeg"), -90, 90),
+      targetLoadG: clamp(num(a.targetLoadG, "targetLoadG"), 0.2, 7.0),
+      throttle: clamp(num(a.throttle, "throttle"), 0, 1),
+      speedPriority,
+      trigger: Boolean(a.trigger),
+    };
+  },
+};
+
+export const actionSpecs = {
+  "raw-stick": rawStickSpec,
+  setpoint: setpointSpec,
+  "flight-director": flightDirectorSpec,
+} as const;
 export type ActionMode = keyof typeof actionSpecs;

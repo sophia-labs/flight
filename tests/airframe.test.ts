@@ -7,6 +7,7 @@ import {
   noseCamera,
 } from "../src/sim/airframe";
 import { DEFAULT_MODEL } from "../src/sim/flight";
+import { quatFromAxisAngle, vec3 } from "../src/sim/math";
 
 describe("airframe compiler", () => {
   it("compiles the default airframe to the calibration baseline + frozen derived rigid-body fields", () => {
@@ -27,6 +28,15 @@ describe("airframe compiler", () => {
     expect(m.aspectRatio).toBeCloseTo(7.511, 3);
     expect(m.dryMassKg).toBe(9_200);
     expect(m.fuelCapacityKg).toBe(0);
+    expect(m.aeroSurfaces.map((s) => s.id)).toEqual([
+      "main-wing-left",
+      "main-wing-right",
+      "tailplane",
+      "fin",
+    ]);
+    expect(m.thrustPoints.map((p) => p.id)).toEqual(["engine"]);
+    expect(m.aeroSurfaces.find((s) => s.id === "main-wing-left")!.localOffset.x).toBeLessThan(0);
+    expect(m.aeroSurfaces.find((s) => s.id === "main-wing-right")!.localOffset.x).toBeGreaterThan(0);
     // DEFAULT_MODEL is the compiled default, so it carries these too.
     expect(DEFAULT_MODEL.staticMarginM).toBe(m.staticMarginM);
   });
@@ -44,9 +54,9 @@ describe("airframe compiler", () => {
     expect(() => SensorDeviceSchema.parse(noseCamera())).not.toThrow();
   });
 
-  // The levers must move the way the EXISTING sim actually rewards (per the design review): handling
-  // comes from control-surface size + thrust, NOT from wing area (which only adds drag).
-  it("bigger ailerons → faster roll; more thrust adds up; smaller wing → less lift area", () => {
+  // The levers must move the way the surface-force sim rewards: handling comes from placed control
+  // surfaces, thrust comes from mounted thrust points, and lift area remains real wing geometry.
+  it("bigger ailerons → more roll authority; more thrust adds up; smaller wing → less lift area", () => {
     const base = compileAirframe(defaultAirframe()).model;
 
     const biggerAilerons = defaultAirframe();
@@ -65,12 +75,26 @@ describe("airframe compiler", () => {
     expect(compileAirframe(stubby).model.wingAreaM2).toBeLessThan(base.wingAreaM2);
   });
 
-  it("floors rate ratios so a control-surface-free build is sluggish but not dead", () => {
+  it("does not invent control authority for a control-surface-free build", () => {
     const noControl = defaultAirframe();
     for (const p of noControl.parts) if (p.kind === "wing") p.control = undefined;
     const model = compileAirframe(noControl).model;
-    expect(model.maxRollRate).toBeGreaterThan(0); // not zeroed
-    expect(model.maxRollRate).toBeLessThan(DEFAULT_MODEL.maxRollRate); // but clearly worse
+    expect(model.maxRollRate).toBe(0);
+    expect(model.maxPitchRate).toBe(0);
+    expect(model.maxYawRate).toBe(0);
+    expect(model.controlAuthority).toEqual({ roll: 0, pitch: 0, yaw: 0 });
+    expect(model.aeroSurfaces.every((surface) => surface.control === undefined)).toBe(true);
+  });
+
+  it("honors part pose rotation when compiling aerodynamic surfaces", () => {
+    const angled = defaultAirframe();
+    const wing = angled.parts.find((p) => p.id === "main-wing") as WingPart;
+    wing.pose = { ...wing.pose, rotation: quatFromAxisAngle(vec3(1, 0, 0), (6 * Math.PI) / 180) };
+
+    const surface = compileAirframe(angled).model.aeroSurfaces.find((s) => s.id === "main-wing-left");
+    expect(surface).toBeDefined();
+    expect(Math.abs(surface!.localForward.y)).toBeGreaterThan(0.05);
+    expect(surface!.localUp.z).toBeGreaterThan(0.05);
   });
 
   it("reports flyability against the real sim constants and flags broken builds", () => {

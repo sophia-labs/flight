@@ -11,7 +11,7 @@
 // Blue (PILOT_ID) is the external pilot; every other aircraft flies the scripted defensive
 // controller; physics is the same stepSimulation the in-process runtime uses.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { rawStickAdapter } from "../agent/action";
+import { adapterFor, rawStickAdapter } from "../agent/action";
 import { defensiveController } from "../agent/controllers/scripted";
 import { perfectSensor, toObservation } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
@@ -154,7 +154,7 @@ async function step(actionJson: string): Promise<void> {
       deadlineMs: 5_000,
       signal: new AbortController().signal,
     });
-    const controlInput = rawStickAdapter.controlFor(decision.action, ship);
+    const controlInput = adapterFor(decision.action.kind).controlFor(decision.action, ship);
     controlsById[ship.id] = controlInput;
     const record: TurnDecision = {
       turn: nextTurn,
@@ -199,7 +199,7 @@ function finish(): void {
   ];
   const replay: MatchReplay = MatchReplaySchema.parse({
     id: state.id,
-    schemaVersion: 2,
+    schemaVersion: 3,
     turnDuration: TURN_DURATION,
     frameDt: FRAME_DT,
     frames: state.frames,

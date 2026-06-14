@@ -17,7 +17,8 @@ import {
 import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
 import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
 import type { AircraftState, FlightMetrics } from "../src/sim/types";
-import { generateDemoMatch } from "../src/runtime/scenario";
+import { buildScriptedMatchConfig, generateDemoMatch } from "../src/runtime/scenario";
+import { runMatch } from "../src/runtime/match";
 
 describe("flight sim replay generation", () => {
   it("produces deterministic replay data", async () => {
@@ -25,11 +26,24 @@ describe("flight sim replay generation", () => {
     const second = await generateDemoMatch(8);
 
     expect(first).toEqual(second);
+    expect(first.schemaVersion).toBe(3);
     expect(first.frames.length).toBeGreaterThan(20);
+  });
+
+  it("does not mutate MatchConfig.initialAircraft while running", async () => {
+    const config = buildScriptedMatchConfig(2);
+    const before = structuredClone(config.initialAircraft);
+
+    const first = await runMatch(config);
+    const second = await runMatch(config);
+
+    expect(config.initialAircraft).toEqual(before);
+    expect(first).toEqual(second);
   });
 
   it("keeps every generated control input inside the public protocol", async () => {
     const replay = await generateDemoMatch(10);
+    expect(replay.decisions?.some((d) => d.action.kind === "flight-director")).toBe(true);
 
     for (const frame of replay.frames) {
       for (const aircraft of frame.aircraft) {
@@ -265,24 +279,21 @@ describe("flight physics characterization", () => {
   });
 });
 
-describe("rigid-body rotation (v0.6.0 physics)", () => {
-  it("full stick spools the rate toward the steady value — not instant, not past it", () => {
-    // The kinematic puppet jumped to maxRate in one frame; the rigid body integrates up over τ.
+describe("surface-force rigid-body rotation (v0.7 physics)", () => {
+  it("full stick rolls and pitches through surface moments — not instant, not a scalar rate cap", () => {
     const roller = makeAircraft();
     step([roller], { "blue-1": controls({ roll: 1 }) }, 6); // ~1 s
-    expect(roller.angularVelocity.x).toBeGreaterThan(1.4);
-    expect(roller.angularVelocity.x).toBeLessThanOrEqual(DEFAULT_MODEL.maxRollRate + 1e-6);
-    expect(roller.angularVelocity.x).toBeCloseTo(1.737, 2); // behavioural golden (just under max: dihedral opposes)
+    expect(roller.angularVelocity.x).toBeGreaterThan(0.9);
+    expect(roller.angularVelocity.x).toBeLessThan(1.8);
+    expect(Math.abs(roller.angularVelocity.z)).toBeGreaterThan(0.005); // adverse-yaw coupling from drag asymmetry
 
     const pitcher = makeAircraft();
     step([pitcher], { "blue-1": controls({ pitch: 1 }) }, 6);
-    expect(pitcher.angularVelocity.y).toBeGreaterThan(0.5);
-    expect(pitcher.angularVelocity.y).toBeLessThanOrEqual(DEFAULT_MODEL.maxPitchRate + 1e-6);
+    expect(pitcher.angularVelocity.y).toBeGreaterThan(0.35);
+    expect(pitcher.metrics.gLoad).toBeGreaterThan(3.5);
   });
 
-  it("stays bounded at high speed under full deflection (implicit damping is unconditionally stable)", () => {
-    // The explicit integration the design review rejected exploded to ~2459 rad/s in this exact case;
-    // the implicit scheme caps angular velocity at the steady rate even at a 280 m/s dive's huge qbar.
+  it("stays bounded at high speed under full deflection", () => {
     const diver = makeAircraft({ velocity: vec3(0, 0, -280) });
     let maxOmega = 0;
     for (let i = 0; i < 25; i += 1) {
@@ -291,16 +302,46 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
       maxOmega = Math.max(maxOmega, Math.abs(w.x), Math.abs(w.y), Math.abs(w.z));
     }
     expect(Number.isFinite(maxOmega)).toBe(true);
-    expect(maxOmega).toBeLessThan(2.0); // ≈ maxRollRate 1.75, decisively NOT diverging
+    expect(maxOmega).toBeLessThan(3.5);
   });
 
-  it("dihedral self-levels: a banked aircraft released with no input rolls back toward wings-level", () => {
+  it("released control surfaces damp roll rate instead of integrating forever", () => {
     const ship = makeAircraft({ velocity: vec3(0, 0, -180), position: vec3(0, 1500, 0) });
     step([ship], { "blue-1": controls({ roll: 1 }) }, 8); // roll into a bank
     const bankedUpY = basisFromQuat(ship.orientation).up.y; // body-up.y = 1 level, < 1 banked
+    const bankedRate = Math.abs(ship.angularVelocity.x);
     expect(bankedUpY).toBeLessThan(0.85); // genuinely banked
     step([ship], { "blue-1": controls({ roll: 0 }) }, 30); // release ~5 s
-    expect(basisFromQuat(ship.orientation).up.y).toBeGreaterThan(bankedUpY + 0.1); // rolled back toward level
+    expect(Math.abs(ship.angularVelocity.x)).toBeLessThan(bankedRate * 0.2);
+    expect(Number.isFinite(basisFromQuat(ship.orientation).up.y)).toBe(true);
+  });
+
+  it("a build with no moving surfaces cannot roll on command", () => {
+    const noControl = defaultAirframe();
+    for (const p of noControl.parts) if (p.kind === "wing") p.control = undefined;
+    const dead = makeAircraft({ model: compileAirframe(noControl).model });
+    const live = makeAircraft();
+
+    step([dead], { "blue-1": controls({ roll: 1 }) }, 8);
+    step([live], { "blue-1": controls({ roll: 1 }) }, 8);
+
+    expect(Math.abs(dead.angularVelocity.x)).toBeLessThan(0.05);
+    expect(Math.abs(live.angularVelocity.x)).toBeGreaterThan(0.9);
+  });
+
+  it("offset engines create thrust moments around the centre of mass", () => {
+    const offsetEngine = defaultAirframe();
+    const engine = offsetEngine.parts.find((p) => p.id === "engine");
+    if (engine && engine.kind === "engine") {
+      engine.pose = { ...engine.pose, offset: vec3(3, 0, 4) };
+    }
+    const centered = makeAircraft();
+    const offset = makeAircraft({ model: compileAirframe(offsetEngine).model });
+
+    step([centered], { "blue-1": controls({ throttle: 1 }) }, 3);
+    step([offset], { "blue-1": controls({ throttle: 1 }) }, 3);
+
+    expect(Math.abs(offset.angularVelocity.z)).toBeGreaterThan(Math.abs(centered.angularVelocity.z) + 0.05);
   });
 
   it("statically stable: trims hands-off near level and a pitch disturbance decays", () => {
@@ -341,7 +382,7 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
   });
 });
 
-describe("fuel as consumable mass (v0.6.0 physics)", () => {
+describe("fuel as consumable mass", () => {
   function tankedAirframe(fuelKg = 1_500) {
     const a = defaultAirframe();
     a.parts.push({

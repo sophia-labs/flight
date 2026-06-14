@@ -1,69 +1,44 @@
 ================================================================================
-FLIGHT — simulation / aircraft / control code bundle
-Conceptual checkpoint: v0.6.0 (rigid-body flight dynamics). For external review.
+FLIGHT - simulation / aircraft / control code bundle
+Conceptual checkpoint: v0.7.0 (surface-force aircraft + flight-director control). For external review.
 ================================================================================
 
 WHAT THIS IS
-  A turn-based, DETERMINISTIC, headless physics flight-combat sim whose real goal is to be an
+  A turn-based, deterministic, headless physics flight-combat sim whose real goal is to be an
   interface an LLM can fly and fight through. Each turn a controller (scripted or LLM) sees an
-  Observation and returns an Action (an INTENT, not a raw control); a deterministic inner loop
-  tracks that intent across ~15 physics frames (turnDuration 2.4s, frameDt 0.16s); the result is a
-  serializable replay. Models fly via OpenRouter through the pi-ai SDK.
+  Observation and returns an Action (an intent, not a raw control); a deterministic inner loop
+  tracks that intent across physics frames; the result is a serializable replay.
 
 ARCHITECTURE (the seams)
-  protocol/schema.ts  serializable contracts (Zod, single source of truth): Observation, Action
-                      (raw-stick | setpoint), Part/Airframe, Percept, ReplayFrame, MatchReplay.
-  sim/                pure physics substrate.
-                        flight.ts   stepSimulation: forces (lift/drag/thrust/gravity) + rigid-body
-                                    rotation (torque/inertia, IMPLICIT damping) + weapons.
-                        airframe.ts compileAirframe(parts) -> AircraftModel: the builder's pure
-                                    fold (mass, wing area, thrust, control rates, and derived
-                                    inertia/CoM/aero-centre/static-margin/aspect-ratio).
-                        math.ts, types.ts, parts.ts (device/part defs).
-  agent/              the CONTROL seam.
-                        controller.ts   Controller = (Observation, ctx) => Promise<decision>.
-                        observation.ts  world -> ego-relative Observation (+ SensorModel).
-                        action.ts       ActionAdapter: intent -> ControlInput PER FRAME. raw-stick
-                                        passthrough + the SETPOINT PD attitude-hold inner loop.
-                        actionSpec.ts   model-facing tool schema + prompt fragment per vocabulary.
-                        controllers/    scripted (geometric pursuit/defensive) + pi (LLM via pi-ai).
-                        perception.ts + encoders/  sensor -> SenseFrame -> Percept (analytic,
-                                        pixel-free camera -> ASCII viewport; recorded, not operative).
-  runtime/            match.ts (runMatch loop), config.ts (MatchConfig), scenario.ts (the duel +
-                      createInitialAircraft + compileAirframe wiring), batch.ts.
-  eval/outcome.ts     opponent-agnostic competence metrics.
+  protocol/schema.ts  Serializable contracts: Observation, Action (raw-stick | setpoint |
+  flight-director), Part/Airframe, Percept, ReplayFrame, MatchReplay.
+  sim/                Pure physics substrate. compileAirframe folds parts into mass/inertia,
+  aerodynamic surfaces, thrust points, sensors, and builder ratings. stepSimulation integrates
+  per-surface lift/drag forces, thrust moments, gravity, fuel, terrain, and weapons.
+  agent/              Control seam. ActionAdapter turns intent into ControlInput per frame;
+  flight-director commands bank + load/G + throttle/energy priority while protecting AoA/energy.
+  runtime/            Deterministic match loop, reusable configs, batch/scenario helpers.
+  eval/outcome.ts     Opponent-agnostic competence metrics.
 
 KEY FINDINGS / STATE
-  - Action abstraction is the highest-leverage knob: LLMs fly incoherently on raw-stick but fly
-    competently via the SETPOINT adapter (command bank + pitch; a PD inner loop flies it). Proven
-    across Haiku / Gemini / DeepSeek / gpt-4o-mini.
-  - Sensors are first-class mounted devices; an analytic camera produces an ASCII percept that is
-    RECORDED (viewer + capability proof) but pilots still fly the numeric Observation.
-  - KSP-style aircraft builder: compileAirframe folds a parts list into the flat AircraftModel that
-    stepAircraft consumes; a hangar UI (omitted here) edits and flies it.
-  - v0.6.0 rigid-body flight dynamics: torque/inertia rotation with IMPLICIT damping (unconditionally
-    stable at the coarse dt=0.16s, where explicit Euler diverges in a dive); static pitch stability
-    + dihedral roll stability; aspect-ratio induced drag; fuel as consumable mass. Calibrated so the
-    default flies ~like the prior kinematic model and the scripted duel still engages.
+  - The aircraft are now surface-force machines: elevators, ailerons, rudders, wing incidence,
+    CoM, local angular velocity, and engine offsets all feed forces and moments.
+  - There is no hidden control-authority floor. A build without moving surfaces is physically bad,
+    not silently rescued by scalar max-rate motors.
+  - The LLM-facing seam remains intent-first. raw-stick and pitch setpoint still exist, but the
+    preferred vocabulary is flight-director: bank, target load, throttle, speed priority, trigger.
+  - Replays are schemaVersion 3, and runMatch clones initialAircraft so configs are reusable data.
 
 INVARIANTS
-  Determinism (byte-identical replays: pure controllers + pure physics, no wall-clock/random in the
-  loop). Headless + fast batch (scripted needs no browser/credentials). Additive replay schema.
+  Determinism, headless/batch execution, additive replay schema, and strict separation between
+  perception, control intent, adapter, and physics substrate.
 
-NOT INCLUDED (presentation layer, deliberately): src/viewer/* (React-three-fiber replay viewer),
-  src/App.tsx, the hangar builder UI (HangarScreen.tsx), the mp4/cinema exporter (headless/film.ts).
-
-OPEN QUESTIONS FOR YOUR REFLECTION (next steps)
-  1. Physics fidelity vs. the goal: deliberate cuts include no adverse yaw / Dutch roll / spiral
-     coupling, no compressibility/Mach, CoM & inertia held at wet value as fuel burns (no trim
-     drift), thrust flat with altitude/speed. Which matter for an LLM-flyable, skill-expressive sim?
-  2. Control vocabulary: setpoint (bank/pitch) works. What richer surface (energy management, BFM
-     primitives) adds skill expression without re-coupling the seam?
-  3. Perception: making the camera OPERATIVE (fly from the ASCII picture, or a real pixel render +
-     vision model) is the hard research goal; radar/IR are next behind the same seam.
-  4. Baselines: the scripted bots are crude raw-stick geometry chasers and look unnatural under
-     momentum. A coordinated lead-pursuit bot would be a better sparring partner / gate.
-  5. Evaluation: the right opponent-agnostic "competent flying" metric for cross-model study.
+OPEN QUESTIONS FOR NEXT REVIEW
+  1. Aerodynamic fidelity: surface model is still arcade-tuned; next knobs are better stall curves,
+     lateral/spiral modes, trim/fuel CoM drift, and propulsive effects across speed/altitude.
+  2. Control vocabulary: whether flight-director is the right tactical granularity for BFM studies.
+  3. Perception: making camera/radar/IR operative inputs rather than recorded audit artifacts.
+  4. Baselines: stronger non-LLM BFM pilots and richer evaluation gates.
 
 ================================================================================
 FILE INDEX
@@ -94,10 +69,9 @@ FILE INDEX
   tests/airframe.test.ts
   tests/perception.test.ts
 
-
-########################################################################
+================================================================================
 # FILE: src/protocol/schema.ts
-########################################################################
+================================================================================
 
 import { z } from "zod";
 
@@ -191,8 +165,21 @@ export const SetpointActionSchema = z.object({
   trigger: z.boolean(),
 });
 
+export const FlightDirectorActionSchema = z.object({
+  kind: z.literal("flight-director"),
+  targetBankDeg: z.number(), // tactical turn direction, degrees (+ = bank right)
+  targetLoadG: z.number(), // commanded pull/load; adapter protects AoA and low energy
+  throttle: z.number(),
+  speedPriority: z.enum(["gain", "hold", "bleed"]),
+  trigger: z.boolean(),
+});
+
 // Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
-export const ActionSchema = z.discriminatedUnion("kind", [RawStickActionSchema, SetpointActionSchema]);
+export const ActionSchema = z.discriminatedUnion("kind", [
+  RawStickActionSchema,
+  SetpointActionSchema,
+  FlightDirectorActionSchema,
+]);
 
 export const SelfPerceptSchema = z.object({
   airspeed: z.number(),
@@ -314,12 +301,11 @@ export const TurnDecisionSchema = z.object({
   percepts: z.array(PerceptSchema).optional(), // v0.4.0: recorded sensor output (camera, …)
 });
 
-// --- aircraft builder: an Airframe is a list of Parts that COMPILE into the flat AircraftModel ---
-// compileAirframe (src/sim/airframe.ts) folds these parts into the 7 scalars the physics reads plus
-// the mounted SensorDevices. The Airframe is recorded on the replay (additive/optional) so the viewer
-// can render the plane you built and a build round-trips. This is the first time a Part serializes,
-// so the shapes live here in Zod (single source); src/sim/airframe.ts imports the inferred types.
-// Numeric fields use finiteNumber: an airframe rides in a JSON replay, and NaN/±Infinity can't.
+// --- aircraft builder: an Airframe is a list of Parts that COMPILE into a physical AircraftModel ---
+// compileAirframe (src/sim/airframe.ts) folds these parts into mass/inertia, aerodynamic surfaces,
+// thrust points, and mounted SensorDevices. The Airframe is recorded on the replay (additive/optional)
+// so the viewer can render the plane you built and a build round-trips. Numeric fields use
+// finiteNumber: an airframe rides in a JSON replay, and NaN/±Infinity can't.
 
 export const PartPoseSchema = z.object({
   offset: Vec3Schema, // metres, body frame (forward = -Z)
@@ -352,9 +338,8 @@ export const WingPartSchema = z.object({
   pose: PartPoseSchema,
   planform: z.object({ span: finiteNumber, chord: finiteNumber }), // area = span * chord (rectangular)
   massKg: finiteNumber,
-  // A moving control surface on this wing + the axis it drives; area (m²) becomes control authority
-  // (→ a max rate). Omit for a plain lifting surface. A "yaw" surface is vertical: it drives yaw but
-  // contributes no lift area.
+  // A moving control surface on this wing + the axis it drives; area (m²) changes the surface's
+  // deflection effectiveness. Omit for a plain lifting surface. A "yaw" surface is vertical.
   control: z.object({ axis: z.enum(["roll", "pitch", "yaw"]), area: finiteNumber }).optional(),
 });
 
@@ -395,7 +380,7 @@ export const MatchReplaySchema = z.object({
   frameDt: z.number(),
   frames: z.array(ReplayFrameSchema).min(1),
   // All optional ⇒ v0.1.0 replays still validate and the viewer (reads only `frames`) is unchanged.
-  schemaVersion: z.literal(2).optional(),
+  schemaVersion: z.union([z.literal(2), z.literal(3)]).optional(),
   agents: z.array(AgentMetaSchema).optional(),
   decisions: z.array(TurnDecisionSchema).optional(),
   outcome: MatchOutcomeSchema.optional(),
@@ -426,6 +411,7 @@ export type MatchReplay = z.infer<typeof MatchReplaySchema>;
 export type StickCommand = z.infer<typeof StickCommandSchema>;
 export type RawStickAction = z.infer<typeof RawStickActionSchema>;
 export type SetpointAction = z.infer<typeof SetpointActionSchema>;
+export type FlightDirectorAction = z.infer<typeof FlightDirectorActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
 export type ContactPercept = z.infer<typeof ContactPerceptSchema>;
@@ -459,10 +445,9 @@ export function clampControlInput(input: ControlInput): ControlInput {
   });
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/sim/math.ts
-########################################################################
+================================================================================
 
 import type { Quaternion, Vec3 } from "../protocol/schema";
 
@@ -652,10 +637,9 @@ export function quatLookRotation(forwardInput: Vec3, upInput: Vec3 = WORLD_UP): 
   });
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/sim/types.ts
-########################################################################
+================================================================================
 
 import type {
   Airframe,
@@ -677,21 +661,60 @@ export interface Inertia {
   yaw: number;
 }
 
+export type ControlAxis = "pitch" | "roll" | "yaw";
+
+export interface AeroSurfaceControl {
+  axis: ControlAxis;
+  sign: number;
+  maxDeflectionRad: number;
+  effectiveness: number;
+}
+
+export interface AeroSurface {
+  id: string;
+  areaM2: number;
+  spanM: number;
+  chordM: number;
+  aspectRatio: number;
+  localOffset: Vec3;
+  localForward: Vec3;
+  localUp: Vec3;
+  kind: "horizontal" | "vertical";
+  liftSlope: number;
+  zeroLiftCl: number;
+  cd0: number;
+  stallAoARad: number;
+  control?: AeroSurfaceControl;
+}
+
+export interface ThrustPoint {
+  id: string;
+  maxThrustN: number;
+  localOffset: Vec3;
+  localForward: Vec3;
+}
+
 export interface AircraftModel {
-  // --- base scalars (the calibration anchors; maxRates are the full-stick steady rates) ---
+  // --- builder summary scalars and compatibility ratings ---
   massKg: number;
   wingAreaM2: number;
   maxThrustN: number;
+  // Handling ratings derived from control area and lever arms. They are displayed/reported but the
+  // v0.7 surface-force physics below reads aeroSurfaces instead of treating rates as torque motors.
   maxPitchRate: number;
   maxRollRate: number;
   maxYawRate: number;
   stallAoARad: number;
-  // --- v0.6.0 rigid-body physics: derived from the airframe geometry by compileAirframe ---
+  // --- v0.7 surface-force rigid body: derived from airframe geometry by compileAirframe ---
   inertia: Inertia; // resists angular acceleration; from part masses + layout (box self + parallel axis)
   com: Vec3; // centre of mass, body frame (m); the point moment arms + inertia are measured from
   aeroCenterZ: number; // area-weighted longitudinal centre of the lifting surfaces (m, body Z)
   staticMarginM: number; // aeroCenterZ − com.z; > 0 = CoM ahead of AC = statically stable
   aspectRatio: number; // span²/area of the lifting surfaces; drives induced drag
+  aeroSurfaces: AeroSurface[];
+  thrustPoints: ThrustPoint[];
+  controlAuthority: Record<ControlAxis, number>;
+  parasiteDragAreaM2: number;
   dryMassKg: number; // massKg − fuelCapacityKg (structure + payload, no fuel)
   fuelCapacityKg: number; // total fuel a full airframe carries (0 = no tanks ⇒ effectively infinite)
 }
@@ -709,7 +732,7 @@ export interface AircraftState {
   weaponCooldown: number;
   model: AircraftModel;
   metrics: FlightMetrics;
-  // v0.6.0 rigid-body state: body-frame angular velocity (rad/s; x=roll, y=pitch, z=yaw) carried
+  // Rigid-body state: body-frame angular velocity (rad/s; x=roll, y=pitch, z=yaw) carried
   // between frames — the momentum the kinematic puppet never had — and remaining fuel mass (kg).
   angularVelocity: Vec3;
   fuelKg: number;
@@ -753,10 +776,9 @@ export function toSnapshot(aircraft: AircraftState): AircraftSnapshot {
   };
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/sim/parts.ts
-########################################################################
+================================================================================
 
 import type { Quaternion, Vec3 } from "../protocol/schema";
 
@@ -794,26 +816,23 @@ export interface SensorDevice {
   optics?: { hFovRad: number; aspect: number };
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/sim/airframe.ts
-########################################################################
+================================================================================
 
 import type { Airframe, Part, Vec3 } from "../protocol/schema";
-import { quatIdentity, vec3 } from "./math";
+import { add, clamp, normalize, quatIdentity, rotateVec, scale, vec3 } from "./math";
 import type { SensorDevice } from "./parts";
-import type { AircraftModel, Inertia } from "./types";
+import type { AeroSurface, AircraftModel, ControlAxis, Inertia, ThrustPoint } from "./types";
 
-// The aircraft builder's keystone: a PURE fold from a parts list to the flat 7-scalar AircraftModel the
-// physics already reads (src/sim/flight.ts → stepAircraft) plus the mounted SensorDevices. The physics
-// is UNCHANGED — the compiler's whole job is to PRODUCE its inputs from geometry. A sensor is a part,
-// so "place a camera" and "fly from a camera" are one data path.
+// The aircraft builder's keystone: a PURE fold from a parts list to the physical AircraftModel that
+// stepAircraft consumes. Wings become aerodynamic surfaces with local axes and optional moving control
+// panels; engines become thrust points; massful parts set CoM + inertia. A sensor is still a part, so
+// "place a camera" and "fly from a camera" are one data path.
 //
-// Determinism is load-bearing (byte-identical replays). The rates anchor to the DEFAULT airframe's own
-// computed authority: rate = BASE * clamp(authority / DEFAULT_AUTHORITY). For the default that ratio is
-// x/x = 1.0 EXACTLY in IEEE754, so compileAirframe(defaultAirframe()).model === DEFAULT_MODEL to the
-// bit and every existing match stays byte-identical; for a user build it scales. Mass/area/thrust are
-// plain sums; the default's part values are chosen to land on 9200 / 22.5 / 74000 exactly.
+// Determinism is load-bearing. The legacy handling ratings still anchor to the DEFAULT airframe's own
+// computed authority (so reports stay stable), but the v0.7 physics no longer reads those ratings as
+// torque motors. The plane now handles because surfaces push on air at their placed locations.
 
 // The forward nose camera, expressed as a part so it serializes inside the airframe. Lives here (not in
 // runtime/scenario) so the default airframe — the determinism anchor — can include it with no import
@@ -906,19 +925,17 @@ function authorities(parts: Part[]): Authorities {
 // Computed once from the default. The anchor that makes the default's rate ratio exactly 1.0.
 const DEFAULT_AUTHORITY = authorities(defaultAirframe().parts);
 
-// The default's reference full-stick steady rates (rad/s) and stall AoA — the ratio anchors to these so
-// the default compiles to exactly these values (see rateFor). These WERE DEFAULT_MODEL's literals; they
-// live here now so flight.ts can define DEFAULT_MODEL = compileAirframe(defaultAirframe()).model without
-// an import cycle.
+// The default's reference handling ratings (rad/s) and stall AoA. These remain useful UI/reporting
+// numbers, but surface-force physics reads model.aeroSurfaces.
 const BASE_PITCH_RATE = 0.92;
 const BASE_ROLL_RATE = 1.75;
 const BASE_YAW_RATE = 0.34;
 const STALL_AOA_RAD = 0.42;
 const WING_THICKNESS_M = 0.1; // nominal slab thickness for a wing's box-inertia/mesh extents
+const DEFAULT_DIHEDRAL_RAD = 0.075;
 
-// A build with no surface on an axis still gets some authority (floor), and no build can exceed 3×, so
-// the compiler never emits a dead or absurd rate. The default's ratio is 1.0 — inside the band, untouched.
-const RATE_RATIO_MIN = 0.2;
+// No hidden safety floor: a control-surface-free build really has no control authority on that axis.
+const RATE_RATIO_MIN = 0;
 const RATE_RATIO_MAX = 3.0;
 
 function rateFor(base: number, authority: number, defaultAuthority: number): number {
@@ -938,6 +955,115 @@ interface PartBox {
   dimX: number; // body lateral extent (m)
   dimY: number; // body vertical extent
   dimZ: number; // body longitudinal extent
+}
+
+function normalizedAreaFraction(controlArea: number | undefined, totalArea: number): number {
+  if (!controlArea || totalArea <= 0) return 0;
+  return clamp(controlArea / totalArea, 0, 1.4);
+}
+
+function controlFor(axis: ControlAxis, sign: number, fraction: number): AeroSurface["control"] {
+  if (fraction <= 0) return undefined;
+  return {
+    axis,
+    sign,
+    maxDeflectionRad: 0.24,
+    // A small aileron should matter, and a huge full-span surface should saturate rather than explode.
+    effectiveness: clamp(0.06 + fraction * 0.24, 0.06, 0.34),
+  };
+}
+
+function makeSurface(
+  part: Extract<Part, { kind: "wing" }>,
+  opts: {
+    id: string;
+    areaM2: number;
+    spanM: number;
+    offset: Vec3;
+    forward: Vec3;
+    up: Vec3;
+    kind: AeroSurface["kind"];
+    control?: AeroSurface["control"];
+  },
+): AeroSurface {
+  const aspectRatio = opts.areaM2 > 0 ? (opts.spanM * opts.spanM) / opts.areaM2 : 1;
+  const vertical = opts.kind === "vertical";
+  return {
+    id: opts.id,
+    areaM2: opts.areaM2,
+    spanM: opts.spanM,
+    chordM: part.planform.chord,
+    aspectRatio: Math.max(aspectRatio, 0.2),
+    localOffset: opts.offset,
+    localForward: opts.forward,
+    localUp: opts.up,
+    kind: opts.kind,
+    liftSlope: vertical ? 3.8 : 4.7,
+    zeroLiftCl: vertical ? 0 : 0.24,
+    cd0: vertical ? 0.018 : 0.026,
+    stallAoARad: STALL_AOA_RAD,
+    ...(opts.control ? { control: opts.control } : {}),
+  };
+}
+
+function wingSurfaces(part: Extract<Part, { kind: "wing" }>): AeroSurface[] {
+  const area = part.planform.span * part.planform.chord;
+  if (area <= 0) return [];
+
+  const yawSurface = part.control?.axis === "yaw";
+  const forward = rotateVec(part.pose.rotation, vec3(0, 0, -1));
+  const up = rotateVec(part.pose.rotation, yawSurface ? vec3(1, 0, 0) : vec3(0, 1, 0));
+  const spanAxis = rotateVec(part.pose.rotation, yawSurface ? vec3(0, 1, 0) : vec3(1, 0, 0));
+  const fraction = normalizedAreaFraction(part.control?.area, area);
+
+  if (part.control?.axis === "roll") {
+    const halfArea = area / 2;
+    const halfSpan = part.planform.span / 2;
+    return [-1, 1].map((side) =>
+      {
+        const panelUp = normalize(add(up, scale(spanAxis, -side * Math.sin(DEFAULT_DIHEDRAL_RAD))), up);
+        return makeSurface(part, {
+          id: `${part.id}-${side < 0 ? "left" : "right"}`,
+          areaM2: halfArea,
+          spanM: halfSpan,
+          offset: add(part.pose.offset, scale(spanAxis, side * part.planform.span * 0.25)),
+          forward,
+          up: panelUp,
+          kind: "horizontal",
+          control: controlFor("roll", -side, fraction),
+        });
+      },
+    );
+  }
+
+  const control =
+    part.control?.axis === "pitch"
+      ? controlFor("pitch", -1, fraction)
+      : part.control?.axis === "yaw"
+        ? controlFor("yaw", -1, fraction)
+        : undefined;
+
+  return [
+    makeSurface(part, {
+      id: part.id,
+      areaM2: area,
+      spanM: part.planform.span,
+      offset: part.pose.offset,
+      forward,
+      up,
+      kind: yawSurface ? "vertical" : "horizontal",
+      control,
+    }),
+  ];
+}
+
+function thrustPoint(part: Extract<Part, { kind: "engine" }>): ThrustPoint {
+  return {
+    id: part.id,
+    maxThrustN: part.thrustN,
+    localOffset: part.pose.offset,
+    localForward: rotateVec(part.pose.rotation, vec3(0, 0, -1)),
+  };
 }
 
 // A massive part's mass, body-frame position, and bounding-box extents — the inputs to CoM + box
@@ -979,11 +1105,14 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   let massKg = 0;
   let wingAreaM2 = 0;
   let maxThrustN = 0;
+  let parasiteDragAreaM2 = 0;
   let fuelCapacityKg = 0; // Σ tank fuel; 0 (no tanks) ⇒ effectively infinite fuel (no burn)
   let liftArea = 0;
   let liftAreaZ = 0;
   let maxLiftSpan = 0;
   const devices: SensorDevice[] = [];
+  const aeroSurfaces: AeroSurface[] = [];
+  const thrustPoints: ThrustPoint[] = [];
 
   // Pass 1: scalar sums, lift geometry, and mass-weighted CoM accumulation.
   let comMassX = 0;
@@ -999,9 +1128,11 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     switch (part.kind) {
       case "fuselage":
         massKg += part.massKg;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.25;
         break;
       case "wing":
         massKg += part.massKg;
+        aeroSurfaces.push(...wingSurfaces(part));
         // Vertical (yaw) surfaces drive yaw but make no lift, so they don't add to the lift area.
         if (part.control?.axis !== "yaw") {
           const area = part.planform.span * part.planform.chord;
@@ -1014,10 +1145,13 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
       case "engine":
         massKg += part.massKg;
         maxThrustN += part.thrustN;
+        thrustPoints.push(thrustPoint(part));
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.25;
         break;
       case "tank":
         massKg += part.dryMassKg + part.fuelKg; // full mass; the fuel portion is burnable
         fuelCapacityKg += part.fuelKg;
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.2;
         break;
       case "sensor":
         devices.push(part);
@@ -1043,6 +1177,11 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   const aspectRatio = liftArea > 0 && maxLiftSpan > 0 ? (maxLiftSpan * maxLiftSpan) / liftArea : 6;
 
   const auth = authorities(airframe.parts);
+  const controlAuthority: Record<ControlAxis, number> = {
+    roll: auth.roll,
+    pitch: auth.pitch,
+    yaw: auth.yaw,
+  };
   const model: AircraftModel = {
     massKg,
     wingAreaM2,
@@ -1056,6 +1195,10 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     aeroCenterZ,
     staticMarginM: aeroCenterZ - com.z, // > 0 ⇒ CoM ahead of AC ⇒ statically stable
     aspectRatio,
+    aeroSurfaces,
+    thrustPoints,
+    controlAuthority,
+    parasiteDragAreaM2,
     dryMassKg: massKg - fuelCapacityKg,
     fuelCapacityKg,
   };
@@ -1069,6 +1212,9 @@ export interface AirframeReport {
   maxPitchRate: number;
   maxRollRate: number;
   maxYawRate: number;
+  surfaceCount: number;
+  thrustPointCount: number;
+  controlAuthority: Record<ControlAxis, number>;
   warnings: string[];
 }
 
@@ -1088,8 +1234,17 @@ export function airframeReport(model: AircraftModel): AirframeReport {
   if (thrustToWeight < 0.3) {
     warnings.push("low thrust-to-weight (<0.3): may not accelerate past the 62 m/s stall floor");
   }
+  if (model.aeroSurfaces.length === 0) {
+    warnings.push("no aerodynamic surfaces: the aircraft is ballistic");
+  }
+  if (model.thrustPoints.length === 0 && model.maxThrustN > 0) {
+    warnings.push("thrust has no mounted engine point");
+  }
+  for (const axis of ["roll", "pitch", "yaw"] as const) {
+    if (model.controlAuthority[axis] <= 0) warnings.push(`no ${axis} control surface`);
+  }
   const flagRate = (axis: string, rate: number, base: number) => {
-    if (rate < base * 0.3) warnings.push(`barely controllable in ${axis} (<0.3× default rate)`);
+    if (rate > 0 && rate < base * 0.3) warnings.push(`weak ${axis} authority (<0.3× default rating)`);
   };
   flagRate("roll", model.maxRollRate, BASE_ROLL_RATE);
   flagRate("pitch", model.maxPitchRate, BASE_PITCH_RATE);
@@ -1101,14 +1256,16 @@ export function airframeReport(model: AircraftModel): AirframeReport {
     maxPitchRate: model.maxPitchRate,
     maxRollRate: model.maxRollRate,
     maxYawRate: model.maxYawRate,
+    surfaceCount: model.aeroSurfaces.length,
+    thrustPointCount: model.thrustPoints.length,
+    controlAuthority: model.controlAuthority,
     warnings,
   };
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/sim/flight.ts
-########################################################################
+================================================================================
 
 import { clampControlInput, type ControlInput, type ReplayEvent } from "../protocol/schema";
 import { compileAirframe, defaultAirframe } from "./airframe";
@@ -1116,42 +1273,30 @@ import {
   add,
   basisFromQuat,
   clamp,
+  cross,
   dot,
   length,
   normalize,
   rotateAroundWorldAxis,
+  rotateVec,
   scale,
   sub,
   vec3,
 } from "./math";
-import type { AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
+import type { AeroSurface, AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
 
 const GRAVITY = vec3(0, -9.81, 0);
 const SEA_LEVEL_DENSITY = 1.225;
 const TERRAIN_FLOOR_M = 55;
 
-// Aerodynamic rotational damping per axis. These set the control time-constant τ = I/(qbar·DAMP) — and
-// ONLY τ, because the steady-state rate cancels DAMP — calibrated against the default's inertia so the
-// default's response (roll τ≈0.22 s, pitch≈0.45 s, yaw≈0.75 s at cruise) matches the old kinematic feel.
-const DAMP_ROLL = 33.5;
-const DAMP_PITCH = 70.0;
-const DAMP_YAW = 50.0;
-
-// Static-stability gain: a stable airframe (CoM ahead of the aero centre, staticMarginM > 0) makes a
-// restoring pitch moment ∝ staticMargin·q̄·area·AoA that weathervanes the nose back toward the relative
-// wind. Tuned gentle so the plane trims hands-off without fighting a commanded turn.
-const STAB_K = 0.5;
-
-// Dihedral (roll-stability) gain: sideslip produces a rolling moment toward wings-level. A coordinated
-// turn carries ~no sideslip, so this doesn't fight commanded banking — it only damps out skidding and
-// the slow knife-edge/inverted attitudes an uncoordinated pilot falls into. The real fix for "flies like
-// a maniac" is the pilot, but this stops the airframe from happily living at any bank angle.
-const DIHEDRAL_K = 1.5;
-
 // Oswald span efficiency for the induced-drag polar cd_i = cl²/(π·AR·e). With the default AR≈7.5 this
 // lands at ≈0.053 — essentially the old constant 0.052 — so the default is undisturbed, while a stubby
 // low-AR build now pays a real induced-drag penalty and a long-winged build is rewarded.
 const OSWALD_E = 0.8;
+
+// Numerical guardrail, not an authority model: forces still decide the acceleration, but absurd builds
+// and high-speed stalls cannot integrate to unbounded spin rates in one coarse replay frame.
+const MAX_BODY_RATE_RAD_S = 5.5;
 
 // Specific fuel consumption (kg burned per N of thrust per second). Sized so an ~1800 kg tank gives
 // ~400 s of full-throttle endurance — visible drain over a long fight, not match-ending in a short one.
@@ -1160,6 +1305,87 @@ const SFC = 6e-5;
 // The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
 export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
+
+function densityAtAltitude(altitudeM: number): number {
+  return SEA_LEVEL_DENSITY * Math.exp(-Math.max(altitudeM, 0) / 8_800);
+}
+
+function bodyOmegaWorld(aircraft: AircraftState) {
+  const basis = basisFromQuat(aircraft.orientation);
+  return add(
+    add(scale(basis.forward, aircraft.angularVelocity.x), scale(basis.right, aircraft.angularVelocity.y)),
+    scale(basis.up, aircraft.angularVelocity.z),
+  );
+}
+
+function controlDeflection(surface: AeroSurface, controls: ControlInput): number {
+  if (!surface.control) return 0;
+  return (
+    controls[surface.control.axis] *
+    surface.control.sign *
+    surface.control.maxDeflectionRad *
+    surface.control.effectiveness
+  );
+}
+
+interface SurfaceSample {
+  force: ReturnType<typeof vec3>;
+  liftForce: ReturnType<typeof vec3>;
+  torque: ReturnType<typeof vec3>;
+  alpha: number;
+  stallSeverity: number;
+}
+
+function sampleSurface(
+  surface: AeroSurface,
+  aircraft: AircraftState,
+  controls: ControlInput,
+  density: number,
+  omegaWorld: ReturnType<typeof vec3>,
+): SurfaceSample {
+  const basis = basisFromQuat(aircraft.orientation);
+  const rWorld = rotateVec(aircraft.orientation, sub(surface.localOffset, aircraft.model.com));
+  const surfaceVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
+  const surfaceSpeed = length(surfaceVelocity);
+  if (surfaceSpeed < 0.5 || surface.areaM2 <= 0) {
+    const zero = vec3(0, 0, 0);
+    return { force: zero, liftForce: zero, torque: zero, alpha: 0, stallSeverity: 0 };
+  }
+
+  const forward = normalize(rotateVec(aircraft.orientation, surface.localForward), basis.forward);
+  const up = normalize(rotateVec(aircraft.orientation, surface.localUp), basis.up);
+  const vForward = dot(surfaceVelocity, forward);
+  const vLift = dot(surfaceVelocity, up);
+  const alpha = Math.atan2(-vLift, Math.max(Math.abs(vForward), 1));
+  const deflection = controlDeflection(surface, controls);
+  const alphaEffective = alpha + deflection;
+  const stallSeverity = clamp(
+    (Math.abs(alphaEffective) - surface.stallAoARad) / Math.max(surface.stallAoARad * 0.85, 1e-3),
+    0,
+    1,
+  );
+
+  const clLinear = surface.zeroLiftCl + surface.liftSlope * alphaEffective;
+  const cl = clamp(clLinear, -1.28, 1.55) * (1 - stallSeverity * 0.78);
+  const inducedDrag = (cl * cl) / (Math.PI * Math.max(surface.aspectRatio, 0.3) * OSWALD_E);
+  const aileronDrag = surface.control?.axis === "roll" ? Math.max(0, -deflection) * 0.11 : 0;
+  const cd =
+    surface.cd0 + inducedDrag + stallSeverity * 0.38 + Math.abs(deflection) * 0.035 + aileronDrag;
+  const qbar = 0.5 * density * surfaceSpeed * surfaceSpeed;
+
+  const vhat = normalize(surfaceVelocity, forward);
+  const liftDir = normalize(sub(up, scale(vhat, dot(up, vhat))), up);
+  const liftForce = scale(liftDir, qbar * surface.areaM2 * cl);
+  const dragForce = scale(vhat, -qbar * surface.areaM2 * cd);
+  const force = add(liftForce, dragForce);
+  return {
+    force,
+    liftForce,
+    torque: cross(rWorld, force),
+    alpha,
+    stallSeverity,
+  };
+}
 
 export function stepSimulation(
   aircraft: AircraftState[],
@@ -1173,7 +1399,7 @@ export function stepSimulation(
     ship.controls = controls;
     ship.metrics = stepAircraft(ship, controls, dt);
 
-    if (ship.position.y <= TERRAIN_FLOOR_M + 0.01 && length(ship.velocity) > 55) {
+    if (ship.position.y <= TERRAIN_FLOOR_M + 0.5 && length(ship.velocity) > 55) {
       ship.health = clamp(ship.health - 4.5 * dt, 0, 100);
       if (Math.round(ship.health) % 9 === 0) {
         events.push({
@@ -1201,31 +1427,60 @@ function stepAircraft(
   const speed = length(aircraft.velocity);
   const forwardSpeed = dot(aircraft.velocity, basis.forward);
   const bodyVerticalSpeed = dot(aircraft.velocity, basis.up);
-  const bodySideSpeed = dot(aircraft.velocity, basis.right);
   const aoa = Math.atan2(-bodyVerticalSpeed, Math.max(Math.abs(forwardSpeed), 1));
-  const density = SEA_LEVEL_DENSITY * Math.exp(-Math.max(aircraft.position.y, 0) / 8_800);
+  const density = densityAtAltitude(aircraft.position.y);
   const qbar = 0.5 * density * speed * speed;
-  const aoaAbs = Math.abs(aoa);
-  const stallSeverity = clamp((aoaAbs - model.stallAoARad) / 0.28, 0, 1);
-  const stalled = speed < 62 || stallSeverity > 0.2;
-  const liftEfficiency = 1 - stallSeverity * 0.72;
-  const cl = clamp(0.21 + 3.05 * aoa + controls.pitch * 0.12, -1.05, 1.48) * liftEfficiency;
-  const lift = scale(basis.up, qbar * model.wingAreaM2 * cl);
-  const sideSlip = clamp(bodySideSpeed / Math.max(speed, 1), -1, 1);
-  const sideForce = scale(basis.right, -qbar * 8.5 * sideSlip * 1.15);
-  const cd = 0.034 + (cl * cl) / (Math.PI * model.aspectRatio * OSWALD_E) + stallSeverity * 0.28;
-  const drag = scale(normalize(aircraft.velocity), -qbar * model.wingAreaM2 * cd);
+
   // Fuel: a tanked airframe (fuelCapacityKg > 0) burns ∝ thrust and cuts thrust when dry; a tankless
   // one has infinite fuel. effectiveMass shrinks as fuel burns, so the aircraft accelerates/climbs
   // better light. (CoM + inertia are held at the wet value — a stated cut.)
   const tanked = model.fuelCapacityKg > 0;
   const hasFuel = !tanked || aircraft.fuelKg > 0;
-  const thrustN = hasFuel ? model.maxThrustN * (0.14 + controls.throttle * 0.86) : 0;
-  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * thrustN * dt);
+  const thrustSetting = hasFuel ? 0.14 + controls.throttle * 0.86 : 0;
+  const commandedThrustN = model.maxThrustN * thrustSetting;
+  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * commandedThrustN * dt);
   const effectiveMassKg = Math.max(model.dryMassKg + aircraft.fuelKg, 1); // floor guards a fully-empty build
 
-  const thrust = scale(basis.forward, thrustN);
-  const totalForce = add(add(add(lift, sideForce), drag), thrust);
+  const omegaWorld = bodyOmegaWorld(aircraft);
+  let totalForce = vec3(0, 0, 0);
+  let totalTorque = vec3(0, 0, 0);
+  let loadForce = vec3(0, 0, 0);
+  let maxSurfaceStall = 0;
+  let horizontalAlphaArea = 0;
+  let horizontalArea = 0;
+
+  for (const surface of model.aeroSurfaces) {
+    const sample = sampleSurface(surface, aircraft, controls, density, omegaWorld);
+    totalForce = add(totalForce, sample.force);
+    totalTorque = add(totalTorque, sample.torque);
+    loadForce = add(loadForce, sample.liftForce);
+    maxSurfaceStall = Math.max(maxSurfaceStall, sample.stallSeverity);
+    if (surface.kind === "horizontal") {
+      horizontalAlphaArea += sample.alpha * surface.areaM2;
+      horizontalArea += surface.areaM2;
+    }
+  }
+
+  if (speed > 0.5 && model.parasiteDragAreaM2 > 0) {
+    totalForce = add(
+      totalForce,
+      scale(normalize(aircraft.velocity), -qbar * model.parasiteDragAreaM2),
+    );
+  }
+
+  if (commandedThrustN > 0) {
+    if (model.thrustPoints.length > 0) {
+      for (const point of model.thrustPoints) {
+        const force = scale(rotateVec(aircraft.orientation, point.localForward), point.maxThrustN * thrustSetting);
+        const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+        totalForce = add(totalForce, force);
+        totalTorque = add(totalTorque, cross(rWorld, force));
+      }
+    } else {
+      totalForce = add(totalForce, scale(basis.forward, commandedThrustN));
+    }
+  }
+
   const acceleration = add(scale(totalForce, 1 / effectiveMassKg), GRAVITY);
 
   aircraft.velocity = add(aircraft.velocity, scale(acceleration, dt));
@@ -1239,43 +1494,31 @@ function stepAircraft(
     };
   }
 
-  // --- Rigid-body rotation (v0.6.0) ---
-  // Control surfaces make torque ∝ qbar·stick; aerodynamic damping opposes the body rate ∝ qbar·ω.
-  // Steady-state full-stick rate = model.maxRate (qbar AND damp cancel at equilibrium), so the calibrated
-  // default reproduces the old kinematic rates; speed-dependence is now EMERGENT via the time constant
-  // τ = I/(qbar·damp) — slow and sluggish when slow, snappy when fast. Damping is integrated IMPLICITLY
-  // (the ω_next = (ω + dt·τ_ctrl/I)/(1 + dt·qbar·damp/I) form), which is unconditionally stable even at
-  // this coarse 16 ms step where an explicit scheme would ring or diverge in a dive.
-  const stallBite = stalled ? 0.52 : 1; // control surfaces lose authority in the buffet (old stall feel)
-  const ctrlRoll = controls.roll * model.maxRollRate * DAMP_ROLL * qbar * stallBite;
-  const ctrlPitch = controls.pitch * model.maxPitchRate * DAMP_PITCH * qbar * stallBite;
-  const ctrlYaw = -controls.yaw * model.maxYawRate * DAMP_YAW * qbar * stallBite;
-  // Static restoring moment (pitch): nose-up AoA on a stable airframe produces a nose-down torque that
-  // weathervanes back toward the relative wind. Zero at AoA 0, so it adds no standing torque in level
-  // flight. Goes in the torque numerator (it doesn't depend on the rate).
-  const tauStabPitch = -STAB_K * model.staticMarginM * model.wingAreaM2 * qbar * aoa;
-  // Dihedral: sideslip rolls the aircraft back toward wings-level (toward the relative wind).
-  const tauDihedralRoll = -DIHEDRAL_K * model.wingAreaM2 * qbar * sideSlip;
   const omega = aircraft.angularVelocity;
-  const wRoll = (omega.x + (dt * (ctrlRoll + tauDihedralRoll)) / model.inertia.roll) / (1 + (dt * qbar * DAMP_ROLL) / model.inertia.roll);
-  const wPitch = (omega.y + (dt * (ctrlPitch + tauStabPitch)) / model.inertia.pitch) / (1 + (dt * qbar * DAMP_PITCH) / model.inertia.pitch);
-  const wYaw = (omega.z + (dt * ctrlYaw) / model.inertia.yaw) / (1 + (dt * qbar * DAMP_YAW) / model.inertia.yaw);
-  aircraft.angularVelocity = vec3(wRoll, wPitch, wYaw);
+  const nextRoll = omega.x + (dot(totalTorque, basis.forward) / model.inertia.roll) * dt;
+  const nextPitch = omega.y + (dot(totalTorque, basis.right) / model.inertia.pitch) * dt;
+  const nextYaw = omega.z + (dot(totalTorque, basis.up) / model.inertia.yaw) * dt;
+  aircraft.angularVelocity = vec3(
+    clamp(Number.isFinite(nextRoll) ? nextRoll : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextPitch) ? nextPitch : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextYaw) ? nextYaw : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+  );
 
   let orientation = aircraft.orientation;
-  orientation = rotateAroundWorldAxis(orientation, basis.forward, wRoll * dt);
-  orientation = rotateAroundWorldAxis(orientation, basis.right, wPitch * dt);
-  orientation = rotateAroundWorldAxis(orientation, basis.up, wYaw * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.forward, aircraft.angularVelocity.x * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.right, aircraft.angularVelocity.y * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.up, aircraft.angularVelocity.z * dt);
   aircraft.orientation = orientation;
   aircraft.weaponCooldown = Math.max(0, aircraft.weaponCooldown - dt);
 
-  const loadForce = length(add(lift, sideForce));
-  const gLoad = loadForce / (effectiveMassKg * 9.81);
+  const metricAoa = horizontalArea > 0 ? horizontalAlphaArea / horizontalArea : aoa;
+  const stalled = speed < 62 || maxSurfaceStall > 0.2;
+  const gLoad = length(loadForce) / (effectiveMassKg * 9.81);
 
   return {
     airspeed: length(aircraft.velocity),
     altitude: aircraft.position.y,
-    aoaDeg: (aoa * 180) / Math.PI,
+    aoaDeg: (metricAoa * 180) / Math.PI,
     gLoad,
     stalled,
   };
@@ -1347,10 +1590,9 @@ function nearestOpponent(shooter: AircraftState, aircraft: AircraftState[]) {
     )[0];
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/controller.ts
-########################################################################
+================================================================================
 
 import type { Action, AgentMeta, Observation, Usage } from "../protocol/schema";
 
@@ -1379,10 +1621,9 @@ export type Controller = (
   context: ControllerContext,
 ) => Promise<ControllerDecision>;
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/observation.ts
-########################################################################
+================================================================================
 
 import { ObservationSchema, type ContactPercept, type Observation } from "../protocol/schema";
 import { basisFromQuat, dot, length, normalize, sub } from "../sim/math";
@@ -1456,15 +1697,15 @@ export function toObservation(
   });
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/action.ts
-########################################################################
+================================================================================
 
 import {
   clampControlInput,
   type Action,
   type ControlInput,
+  type FlightDirectorAction,
   type RawStickAction,
   type SetpointAction,
 } from "../protocol/schema";
@@ -1494,13 +1735,57 @@ export const rawStickAdapter: ActionAdapter = {
 };
 
 const DEG = Math.PI / 180;
-// PD attitude hold. On the v0.6.0 rigid-body plant (stick → torque → ω → attitude is 2nd-order), a
-// pure-P loop would PIO, so each axis subtracts a rate-damping term that reads the TRUE body angular
-// velocity. KP is lowered from the old kinematic values; KD ≈ critically damps the new plant.
+// PD attitude hold. On the v0.7.0 surface-force plant (stick -> surface force -> torque -> omega ->
+// attitude is 2nd-order), a pure-P loop would PIO, so each axis subtracts a rate-damping term that
+// reads the true body angular velocity.
 const KP_BANK = 1.2;
 const KD_BANK = 0.45;
 const KP_PITCH = 1.4;
 const KD_PITCH = 0.7;
+const KP_LOAD = 0.34;
+const KD_LOAD = 0.28;
+
+function attitude(self: AircraftState) {
+  const basis = basisFromQuat(self.orientation);
+  const worldUp = vec3(0, 1, 0);
+
+  // Bank: signed angle (about the nose) from the level reference-up to the body up.
+  const refUp = normalize(sub(worldUp, scale(basis.forward, dot(worldUp, basis.forward))), basis.up);
+  const bankRad = Math.atan2(dot(cross(refUp, basis.up), basis.forward), dot(refUp, basis.up));
+  // Pitch attitude relative to the horizon.
+  const pitchRad = Math.asin(clamp(basis.forward.y, -1, 1));
+  return { basis, bankRad, pitchRad };
+}
+
+function protectPitchCommand(pitchCmd: number, throttle: number, self: AircraftState) {
+  const { basis } = attitude(self);
+  const speed = length(self.velocity);
+  const forwardSpeed = dot(self.velocity, basis.forward);
+  const bodyVertical = dot(self.velocity, basis.up);
+  const aoa = Math.atan2(-bodyVertical, Math.max(Math.abs(forwardSpeed), 1));
+  const stall = self.model.stallAoARad;
+  const margin = stall * 0.82;
+  let protectedPitch = pitchCmd;
+  let protectedThrottle = throttle;
+
+  if (protectedPitch > 0 && aoa > margin) {
+    protectedPitch *= clamp(1 - (aoa - margin) / Math.max(stall - margin, 1e-3), 0, 1);
+  }
+  if (aoa > stall * 1.05 || self.metrics.stalled) {
+    protectedPitch = Math.min(protectedPitch, -0.38);
+    protectedThrottle = Math.max(protectedThrottle, 0.95);
+  }
+  // Low-energy recovery: if slow, stop pulling and add power to rebuild speed.
+  if (speed < 68) {
+    protectedPitch = Math.min(protectedPitch, 0.08);
+    protectedThrottle = Math.max(protectedThrottle, 0.92);
+  } else if (speed < 112) {
+    protectedPitch = Math.min(protectedPitch, 0.18);
+    protectedThrottle = Math.max(protectedThrottle, 0.9);
+  }
+
+  return { pitch: protectedPitch, throttle: protectedThrottle };
+}
 
 // Setpoint adapter: the agent commands a target bank + pitch attitude (and throttle/trigger), and
 // this attitude-hold loop produces the stick each frame — feathering toward the setpoint and
@@ -1509,14 +1794,7 @@ export const setpointAdapter: ActionAdapter = {
   vocabulary: "setpoint",
   controlFor(action, self) {
     const a = action as SetpointAction;
-    const basis = basisFromQuat(self.orientation);
-    const worldUp = vec3(0, 1, 0);
-
-    // Bank: signed angle (about the nose) from the level reference-up to the body up.
-    const refUp = normalize(sub(worldUp, scale(basis.forward, dot(worldUp, basis.forward))), basis.up);
-    const bankRad = Math.atan2(dot(cross(refUp, basis.up), basis.forward), dot(refUp, basis.up));
-    // Pitch attitude relative to the horizon.
-    const pitchRad = Math.asin(clamp(basis.forward.y, -1, 1));
+    const { bankRad, pitchRad } = attitude(self);
 
     // Rate-damping (D) term: angularVelocity.x = body roll rate, .y = body pitch rate.
     const rollRate = self.angularVelocity.x;
@@ -1525,21 +1803,30 @@ export const setpointAdapter: ActionAdapter = {
     let pitchCmd = clamp((a.targetPitchDeg * DEG - pitchRad) * KP_PITCH - pitchRate * KD_PITCH, -1, 1);
     let throttle = a.throttle;
 
-    // Anti-stall envelope protection: ease off nose-up as angle of attack nears the stall.
-    const speed = length(self.velocity);
-    const forwardSpeed = dot(self.velocity, basis.forward);
-    const bodyVertical = dot(self.velocity, basis.up);
-    const aoa = Math.atan2(-bodyVertical, Math.max(Math.abs(forwardSpeed), 1));
-    const stall = self.model.stallAoARad;
-    const margin = stall * 0.85;
-    if (pitchCmd > 0 && aoa > margin) {
-      pitchCmd *= clamp(1 - (aoa - margin) / Math.max(stall - margin, 1e-3), 0, 1);
-    }
-    // Low-energy recovery: if slow, stop pulling and add power to rebuild speed.
-    if (speed < 65) {
-      pitchCmd = Math.min(pitchCmd, 0.1);
-      throttle = Math.max(throttle, 0.9);
-    }
+    ({ pitch: pitchCmd, throttle } = protectPitchCommand(pitchCmd, throttle, self));
+
+    return clampControlInput({ pitch: pitchCmd, roll: rollCmd, yaw: 0, throttle, trigger: a.trigger });
+  },
+};
+
+export const flightDirectorAdapter: ActionAdapter = {
+  vocabulary: "flight-director",
+  controlFor(action, self) {
+    const a = action as FlightDirectorAction;
+    const { bankRad } = attitude(self);
+    const rollRate = self.angularVelocity.x;
+    const pitchRate = self.angularVelocity.y;
+    const rollCmd = clamp((a.targetBankDeg * DEG - bankRad) * KP_BANK - rollRate * KD_BANK, -1, 1);
+    const loadError = clamp(a.targetLoadG, -0.5, 7.5) - self.metrics.gLoad;
+    let pitchCmd = clamp(loadError * KP_LOAD - pitchRate * KD_LOAD, -1, 1);
+    let throttle =
+      a.speedPriority === "gain"
+        ? Math.max(a.throttle, 0.92)
+        : a.speedPriority === "bleed"
+          ? Math.min(a.throttle, 0.48)
+          : a.throttle;
+
+    ({ pitch: pitchCmd, throttle } = protectPitchCommand(pitchCmd, throttle, self));
 
     return clampControlInput({ pitch: pitchCmd, roll: rollCmd, yaw: 0, throttle, trigger: a.trigger });
   },
@@ -1548,16 +1835,16 @@ export const setpointAdapter: ActionAdapter = {
 const ADAPTERS: Record<Action["kind"], ActionAdapter> = {
   "raw-stick": rawStickAdapter,
   setpoint: setpointAdapter,
+  "flight-director": flightDirectorAdapter,
 };
 
 export function adapterFor(kind: Action["kind"]): ActionAdapter {
   return ADAPTERS[kind];
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/actionSpec.ts
-########################################################################
+================================================================================
 
 import { Type, type TSchema } from "@earendil-works/pi-ai";
 import type { Action } from "../protocol/schema";
@@ -1628,25 +1915,68 @@ export const setpointSpec: ActionSpec = {
   }),
 };
 
-export const actionSpecs = { "raw-stick": rawStickSpec, setpoint: setpointSpec } as const;
+export const flightDirectorSpec: ActionSpec = {
+  name: "set_flight_director",
+  description: "Command bank, pull/load, and energy priority; the flight controller protects the envelope.",
+  toolSchema: Type.Object({
+    reason: Type.String({ description: "one short phrase: your tactical intent this turn" }),
+    targetBankDeg: Type.Number({ description: "desired bank angle, -90..90 (+ = roll right)" }),
+    targetLoadG: Type.Number({ description: "desired pull/load, 0.2..7.0 G" }),
+    throttle: Type.Number({ description: "0 (idle) .. 1 (full)" }),
+    speedPriority: Type.String({ description: "gain, hold, or bleed" }),
+    trigger: Type.Boolean({ description: "fire guns this turn" }),
+  }),
+  rules: [
+    "ACTION (flight-director): command targetBankDeg (-90..90, + = right), targetLoadG (0.2..7.0), throttle, speedPriority, and trigger.",
+    "Use bank to choose turn direction and loadG to choose how hard to pull. Higher load turns harder but bleeds energy and can approach stall.",
+    "Set speedPriority='gain' when slow or extending, 'hold' in most turns, and 'bleed' only to force an overshoot or tighten briefly.",
+  ].join("\n"),
+  toAction: (a) => {
+    const rawPriority = typeof a.speedPriority === "string" ? a.speedPriority : "hold";
+    const speedPriority =
+      rawPriority === "gain" || rawPriority === "bleed" || rawPriority === "hold" ? rawPriority : "hold";
+    return {
+      kind: "flight-director",
+      targetBankDeg: clamp(num(a.targetBankDeg, "targetBankDeg"), -90, 90),
+      targetLoadG: clamp(num(a.targetLoadG, "targetLoadG"), 0.2, 7.0),
+      throttle: clamp(num(a.throttle, "throttle"), 0, 1),
+      speedPriority,
+      trigger: Boolean(a.trigger),
+    };
+  },
+};
+
+export const actionSpecs = {
+  "raw-stick": rawStickSpec,
+  setpoint: setpointSpec,
+  "flight-director": flightDirectorSpec,
+} as const;
 export type ActionMode = keyof typeof actionSpecs;
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/controllers/scripted.ts
-########################################################################
+================================================================================
 
 import { clamp } from "../../sim/math";
-import type { Action, Observation, RawStickAction } from "../../protocol/schema";
+import type { Action, FlightDirectorAction, Observation } from "../../protocol/schema";
 import type { Controller } from "../controller";
+
+const RAD2DEG = 180 / Math.PI;
 
 // Geometric pursuit, ported verbatim from the old src/sim/agents.ts but now reading the
 // ego-relative Observation instead of omniscient AircraftState. The direction cosines
 // (bearingForward/right/up) and closureRate are exactly the dot products the original took.
-export function pursuitAction(observation: Observation, aggression: number): RawStickAction {
+export function pursuitAction(observation: Observation, aggression: number): FlightDirectorAction {
   const enemy = observation.contacts[0];
   if (!enemy) {
-    return { kind: "raw-stick", pitch: 0, roll: 0, yaw: 0, throttle: 0.7, trigger: false };
+    return {
+      kind: "flight-director",
+      targetBankDeg: 0,
+      targetLoadG: 1,
+      throttle: 0.7,
+      speedPriority: "hold",
+      trigger: false,
+    };
   }
 
   const targetForward = enemy.bearingForward;
@@ -1654,22 +1984,29 @@ export function pursuitAction(observation: Observation, aggression: number): Raw
   const targetUp = enemy.bearingUp;
   const closure = enemy.closureRate; // range rate (matches the old `closure`)
   const range = enemy.range;
-  const leadBias = clamp(closure / 180, -0.28, 0.28);
   const throttle = range > 850 ? 0.97 : range < 420 && closure < -25 ? 0.46 : 0.76;
+  const liftVectorBank = Math.atan2(targetRight, Math.max(targetUp, 0.08)) * RAD2DEG;
+  const bankDemand =
+    targetForward < -0.2
+      ? clamp((targetRight >= 0 ? 1 : -1) * (68 + aggression * 14), -88, 88)
+      : clamp(liftVectorBank * (0.82 + aggression * 0.18), -88, 88);
+  const angularError = Math.acos(clamp(targetForward, -1, 1)) / Math.PI;
+  const speedLimit =
+    observation.self.airspeed < 115 ? 1.8 : observation.self.airspeed < 145 ? 2.6 : observation.self.airspeed < 175 ? 3.3 : 4.1;
+  const loadDemand = clamp(1.02 + aggression * 0.85 + angularError * 1.65 + Math.max(targetUp, 0) * 0.4, 0.7, speedLimit);
+  const speedPriority = range > 900 || observation.self.airspeed < 118 ? "gain" : range < 420 ? "bleed" : "hold";
 
   return {
-    kind: "raw-stick",
-    pitch: clamp(targetUp * 3.2 + leadBias * 0.25, -1, 1),
-    roll: clamp(targetRight * (2.35 + aggression * 0.5), -1, 1),
-    // Light rudder only — a coordinated pursuit turns by banking and pulling, not by steering with the
-    // rudder (which skids, fights dihedral, and looks unhinged). Just enough for fine nose-aim.
-    yaw: clamp(targetRight * 0.25, -1, 1),
+    kind: "flight-director",
+    targetBankDeg: bankDemand,
+    targetLoadG: loadDemand,
     throttle,
+    speedPriority,
     trigger:
       targetForward > 0.975 &&
-      Math.abs(targetRight) < 0.13 &&
-      Math.abs(targetUp) < 0.13 &&
-      range < 1_050,
+      Math.abs(targetRight) < 0.17 &&
+      Math.abs(targetUp) < 0.17 &&
+      range < 1_140,
   };
 }
 
@@ -1684,15 +2021,15 @@ export function defensiveController(aggression = 0.64): Controller {
   return async (observation, context) => {
     const base = pursuitAction(observation, aggression);
     const phase = context.turn;
-    const weave = Math.sin(phase * 0.9) * 0.34;
-    const vertical = Math.cos(phase * 0.7) * 0.22;
+    const weave = Math.sin(phase * 0.9) * 10;
+    const unload = Math.cos(phase * 0.7) * 0.35;
     return {
       action: {
-        kind: "raw-stick",
-        pitch: clamp(base.pitch + vertical, -1, 1),
-        roll: clamp(base.roll + weave, -1, 1),
-        yaw: base.yaw,
+        kind: "flight-director",
+        targetBankDeg: clamp(base.targetBankDeg + weave, -88, 88),
+        targetLoadG: clamp(base.targetLoadG + unload, 0.6, 5.8),
         throttle: Math.max(0.68, base.throttle),
+        speedPriority: base.speedPriority,
         trigger: base.trigger,
       },
       rationale: "defensive",
@@ -1705,10 +2042,9 @@ export function pursuitFallback(observation: Observation): Action {
   return pursuitAction(observation, 0.82);
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/controllers/pi.ts
-########################################################################
+================================================================================
 
 import { complete, getModels, type TextContent, type ToolCall } from "@earendil-works/pi-ai";
 import type { ActionSpec } from "../actionSpec";
@@ -1805,10 +2141,9 @@ export function piController(options: PiControllerOptions): Controller {
   };
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/perception.ts
-########################################################################
+================================================================================
 
 import type { Percept, Vec3 } from "../protocol/schema";
 import {
@@ -1997,10 +2332,9 @@ export function senseAndEncode(
   return encoderFor(defaultEncoderId(device.modality)).encode(frame);
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/agent/encoders/cameraAscii.ts
-########################################################################
+================================================================================
 
 import type { Percept, PerceptContact } from "../../protocol/schema";
 import type { Encoder, SenseFrame } from "../perception";
@@ -2139,10 +2473,9 @@ export const cameraAsciiEncoder: Encoder = {
   },
 };
 
-
-########################################################################
+================================================================================
 # FILE: src/runtime/config.ts
-########################################################################
+================================================================================
 
 import type { Controller } from "../agent/controller";
 import type { SensorModel } from "../agent/observation";
@@ -2170,10 +2503,9 @@ export interface MatchConfig {
   fallback: (observation: Observation) => Action;
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/runtime/match.ts
-########################################################################
+================================================================================
 
 import { adapterFor } from "../agent/action";
 import { toObservation } from "../agent/observation";
@@ -2253,11 +2585,10 @@ async function decide(
   }
 }
 
-// The generalized match runner: today's generateDemoMatch with the four fused concerns
-// (decide / step / outcome / assemble) inverted into injected config. The physics substrate
-// (stepSimulation + the per-turn step loop) is unchanged.
+// The generalized match runner: config is reusable data, so the mutable physics state is cloned before
+// the first frame. This matters for sweeps/evals that may intentionally replay the same config.
 export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
-  const aircraft = config.initialAircraft;
+  const aircraft = structuredClone(config.initialAircraft) as AircraftState[];
   const stepsPerTurn = Math.round(config.turnDuration / config.frameDt);
   const frames: ReplayFrame[] = [];
   const decisions: TurnDecision[] = [];
@@ -2337,7 +2668,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
 
   return MatchReplaySchema.parse({
     id: config.id,
-    schemaVersion: 2,
+    schemaVersion: 3,
     turnDuration: config.turnDuration,
     frameDt: config.frameDt,
     frames,
@@ -2348,10 +2679,9 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
   });
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/runtime/scenario.ts
-########################################################################
+================================================================================
 
 import {
   defensiveController,
@@ -2477,10 +2807,9 @@ export function generateAirframeMatch(blueAirframe: Airframe, turnCount = 28): P
   return runMatch(buildAirframeMatchConfig(blueAirframe, turnCount));
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/runtime/batch.ts
-########################################################################
+================================================================================
 
 import type { MatchReplay } from "../protocol/schema";
 import type { MatchConfig } from "./config";
@@ -2533,10 +2862,9 @@ export async function runBatch<K>(
   return results;
 }
 
-
-########################################################################
+================================================================================
 # FILE: src/eval/outcome.ts
-########################################################################
+================================================================================
 
 import {
   MatchOutcomeSchema,
@@ -2668,10 +2996,9 @@ export const competenceEvaluator: Evaluator = {
   },
 };
 
-
-########################################################################
+================================================================================
 # FILE: src/headless/turn.ts
-########################################################################
+================================================================================
 
 // Resumable stepping CLI — exposes the turn loop as a file-backed state machine so ANY external
 // pilot (a Claude subagent, or a human) can fly one seat without an API key or the SDK. The
@@ -2686,7 +3013,7 @@ export const competenceEvaluator: Evaluator = {
 // Blue (PILOT_ID) is the external pilot; every other aircraft flies the scripted defensive
 // controller; physics is the same stepSimulation the in-process runtime uses.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { rawStickAdapter } from "../agent/action";
+import { adapterFor, rawStickAdapter } from "../agent/action";
 import { defensiveController } from "../agent/controllers/scripted";
 import { perfectSensor, toObservation } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
@@ -2829,7 +3156,7 @@ async function step(actionJson: string): Promise<void> {
       deadlineMs: 5_000,
       signal: new AbortController().signal,
     });
-    const controlInput = rawStickAdapter.controlFor(decision.action, ship);
+    const controlInput = adapterFor(decision.action.kind).controlFor(decision.action, ship);
     controlsById[ship.id] = controlInput;
     const record: TurnDecision = {
       turn: nextTurn,
@@ -2874,7 +3201,7 @@ function finish(): void {
   ];
   const replay: MatchReplay = MatchReplaySchema.parse({
     id: state.id,
-    schemaVersion: 2,
+    schemaVersion: 3,
     turnDuration: TURN_DURATION,
     frameDt: FRAME_DT,
     frames: state.frames,
@@ -2920,10 +3247,9 @@ const actionArg = process.argv[3];
   process.exit(1);
 });
 
-
-########################################################################
+================================================================================
 # FILE: src/headless/runMatch.ts
-########################################################################
+================================================================================
 
 // Headless full-match runner (credential-free). Runs the all-scripted demo in-process and
 // writes the replay JSON to stdout (a brief summary goes to stderr so the redirect stays clean):
@@ -2958,10 +3284,9 @@ main().catch((err) => {
   process.exit(1);
 });
 
-
-########################################################################
+================================================================================
 # FILE: src/headless/sweep.ts
-########################################################################
+================================================================================
 
 // Cross-model competence sweep. Runs (model × action-mode × repeats) matches against the scripted
 // bot through a concurrency pool, streams per-match results to JSONL, and prints an aggregate
@@ -2999,7 +3324,7 @@ const MODELS = SCRIPTED
       "google/gemini-2.5-flash",
       "deepseek/deepseek-chat-v3.1",
     ];
-const MODES: ActionMode[] = SCRIPTED ? ["raw-stick"] : ["raw-stick", "setpoint"];
+const MODES: ActionMode[] = SCRIPTED ? ["flight-director"] : ["raw-stick", "setpoint", "flight-director"];
 const REPEATS = Number(process.env.SWEEP_REPEATS ?? 3);
 const CONCURRENCY = Number(process.env.SWEEP_CONCURRENCY ?? 12);
 const MAX_TURNS = Number(process.env.SWEEP_TURNS ?? 28);
@@ -3167,10 +3492,9 @@ main().catch((err) => {
   process.exit(1);
 });
 
-
-########################################################################
+================================================================================
 # FILE: tests/sim.test.ts
-########################################################################
+================================================================================
 
 import { describe, expect, it } from "vitest";
 import {
@@ -3191,7 +3515,8 @@ import {
 import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
 import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
 import type { AircraftState, FlightMetrics } from "../src/sim/types";
-import { generateDemoMatch } from "../src/runtime/scenario";
+import { buildScriptedMatchConfig, generateDemoMatch } from "../src/runtime/scenario";
+import { runMatch } from "../src/runtime/match";
 
 describe("flight sim replay generation", () => {
   it("produces deterministic replay data", async () => {
@@ -3199,11 +3524,24 @@ describe("flight sim replay generation", () => {
     const second = await generateDemoMatch(8);
 
     expect(first).toEqual(second);
+    expect(first.schemaVersion).toBe(3);
     expect(first.frames.length).toBeGreaterThan(20);
+  });
+
+  it("does not mutate MatchConfig.initialAircraft while running", async () => {
+    const config = buildScriptedMatchConfig(2);
+    const before = structuredClone(config.initialAircraft);
+
+    const first = await runMatch(config);
+    const second = await runMatch(config);
+
+    expect(config.initialAircraft).toEqual(before);
+    expect(first).toEqual(second);
   });
 
   it("keeps every generated control input inside the public protocol", async () => {
     const replay = await generateDemoMatch(10);
+    expect(replay.decisions?.some((d) => d.action.kind === "flight-director")).toBe(true);
 
     for (const frame of replay.frames) {
       for (const aircraft of frame.aircraft) {
@@ -3439,24 +3777,21 @@ describe("flight physics characterization", () => {
   });
 });
 
-describe("rigid-body rotation (v0.6.0 physics)", () => {
-  it("full stick spools the rate toward the steady value — not instant, not past it", () => {
-    // The kinematic puppet jumped to maxRate in one frame; the rigid body integrates up over τ.
+describe("surface-force rigid-body rotation (v0.7 physics)", () => {
+  it("full stick rolls and pitches through surface moments — not instant, not a scalar rate cap", () => {
     const roller = makeAircraft();
     step([roller], { "blue-1": controls({ roll: 1 }) }, 6); // ~1 s
-    expect(roller.angularVelocity.x).toBeGreaterThan(1.4);
-    expect(roller.angularVelocity.x).toBeLessThanOrEqual(DEFAULT_MODEL.maxRollRate + 1e-6);
-    expect(roller.angularVelocity.x).toBeCloseTo(1.737, 2); // behavioural golden (just under max: dihedral opposes)
+    expect(roller.angularVelocity.x).toBeGreaterThan(0.9);
+    expect(roller.angularVelocity.x).toBeLessThan(1.8);
+    expect(Math.abs(roller.angularVelocity.z)).toBeGreaterThan(0.005); // adverse-yaw coupling from drag asymmetry
 
     const pitcher = makeAircraft();
     step([pitcher], { "blue-1": controls({ pitch: 1 }) }, 6);
-    expect(pitcher.angularVelocity.y).toBeGreaterThan(0.5);
-    expect(pitcher.angularVelocity.y).toBeLessThanOrEqual(DEFAULT_MODEL.maxPitchRate + 1e-6);
+    expect(pitcher.angularVelocity.y).toBeGreaterThan(0.35);
+    expect(pitcher.metrics.gLoad).toBeGreaterThan(3.5);
   });
 
-  it("stays bounded at high speed under full deflection (implicit damping is unconditionally stable)", () => {
-    // The explicit integration the design review rejected exploded to ~2459 rad/s in this exact case;
-    // the implicit scheme caps angular velocity at the steady rate even at a 280 m/s dive's huge qbar.
+  it("stays bounded at high speed under full deflection", () => {
     const diver = makeAircraft({ velocity: vec3(0, 0, -280) });
     let maxOmega = 0;
     for (let i = 0; i < 25; i += 1) {
@@ -3465,16 +3800,46 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
       maxOmega = Math.max(maxOmega, Math.abs(w.x), Math.abs(w.y), Math.abs(w.z));
     }
     expect(Number.isFinite(maxOmega)).toBe(true);
-    expect(maxOmega).toBeLessThan(2.0); // ≈ maxRollRate 1.75, decisively NOT diverging
+    expect(maxOmega).toBeLessThan(3.5);
   });
 
-  it("dihedral self-levels: a banked aircraft released with no input rolls back toward wings-level", () => {
+  it("released control surfaces damp roll rate instead of integrating forever", () => {
     const ship = makeAircraft({ velocity: vec3(0, 0, -180), position: vec3(0, 1500, 0) });
     step([ship], { "blue-1": controls({ roll: 1 }) }, 8); // roll into a bank
     const bankedUpY = basisFromQuat(ship.orientation).up.y; // body-up.y = 1 level, < 1 banked
+    const bankedRate = Math.abs(ship.angularVelocity.x);
     expect(bankedUpY).toBeLessThan(0.85); // genuinely banked
     step([ship], { "blue-1": controls({ roll: 0 }) }, 30); // release ~5 s
-    expect(basisFromQuat(ship.orientation).up.y).toBeGreaterThan(bankedUpY + 0.1); // rolled back toward level
+    expect(Math.abs(ship.angularVelocity.x)).toBeLessThan(bankedRate * 0.2);
+    expect(Number.isFinite(basisFromQuat(ship.orientation).up.y)).toBe(true);
+  });
+
+  it("a build with no moving surfaces cannot roll on command", () => {
+    const noControl = defaultAirframe();
+    for (const p of noControl.parts) if (p.kind === "wing") p.control = undefined;
+    const dead = makeAircraft({ model: compileAirframe(noControl).model });
+    const live = makeAircraft();
+
+    step([dead], { "blue-1": controls({ roll: 1 }) }, 8);
+    step([live], { "blue-1": controls({ roll: 1 }) }, 8);
+
+    expect(Math.abs(dead.angularVelocity.x)).toBeLessThan(0.05);
+    expect(Math.abs(live.angularVelocity.x)).toBeGreaterThan(0.9);
+  });
+
+  it("offset engines create thrust moments around the centre of mass", () => {
+    const offsetEngine = defaultAirframe();
+    const engine = offsetEngine.parts.find((p) => p.id === "engine");
+    if (engine && engine.kind === "engine") {
+      engine.pose = { ...engine.pose, offset: vec3(3, 0, 4) };
+    }
+    const centered = makeAircraft();
+    const offset = makeAircraft({ model: compileAirframe(offsetEngine).model });
+
+    step([centered], { "blue-1": controls({ throttle: 1 }) }, 3);
+    step([offset], { "blue-1": controls({ throttle: 1 }) }, 3);
+
+    expect(Math.abs(offset.angularVelocity.z)).toBeGreaterThan(Math.abs(centered.angularVelocity.z) + 0.05);
   });
 
   it("statically stable: trims hands-off near level and a pitch disturbance decays", () => {
@@ -3515,7 +3880,7 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
   });
 });
 
-describe("fuel as consumable mass (v0.6.0 physics)", () => {
+describe("fuel as consumable mass", () => {
   function tankedAirframe(fuelKg = 1_500) {
     const a = defaultAirframe();
     a.parts.push({
@@ -3570,10 +3935,9 @@ describe("fuel as consumable mass (v0.6.0 physics)", () => {
   });
 });
 
-
-########################################################################
+================================================================================
 # FILE: tests/airframe.test.ts
-########################################################################
+================================================================================
 
 import { describe, expect, it } from "vitest";
 import { AirframeSchema, SensorDeviceSchema, type WingPart } from "../src/protocol/schema";
@@ -3584,6 +3948,7 @@ import {
   noseCamera,
 } from "../src/sim/airframe";
 import { DEFAULT_MODEL } from "../src/sim/flight";
+import { quatFromAxisAngle, vec3 } from "../src/sim/math";
 
 describe("airframe compiler", () => {
   it("compiles the default airframe to the calibration baseline + frozen derived rigid-body fields", () => {
@@ -3604,6 +3969,15 @@ describe("airframe compiler", () => {
     expect(m.aspectRatio).toBeCloseTo(7.511, 3);
     expect(m.dryMassKg).toBe(9_200);
     expect(m.fuelCapacityKg).toBe(0);
+    expect(m.aeroSurfaces.map((s) => s.id)).toEqual([
+      "main-wing-left",
+      "main-wing-right",
+      "tailplane",
+      "fin",
+    ]);
+    expect(m.thrustPoints.map((p) => p.id)).toEqual(["engine"]);
+    expect(m.aeroSurfaces.find((s) => s.id === "main-wing-left")!.localOffset.x).toBeLessThan(0);
+    expect(m.aeroSurfaces.find((s) => s.id === "main-wing-right")!.localOffset.x).toBeGreaterThan(0);
     // DEFAULT_MODEL is the compiled default, so it carries these too.
     expect(DEFAULT_MODEL.staticMarginM).toBe(m.staticMarginM);
   });
@@ -3621,9 +3995,9 @@ describe("airframe compiler", () => {
     expect(() => SensorDeviceSchema.parse(noseCamera())).not.toThrow();
   });
 
-  // The levers must move the way the EXISTING sim actually rewards (per the design review): handling
-  // comes from control-surface size + thrust, NOT from wing area (which only adds drag).
-  it("bigger ailerons → faster roll; more thrust adds up; smaller wing → less lift area", () => {
+  // The levers must move the way the surface-force sim rewards: handling comes from placed control
+  // surfaces, thrust comes from mounted thrust points, and lift area remains real wing geometry.
+  it("bigger ailerons → more roll authority; more thrust adds up; smaller wing → less lift area", () => {
     const base = compileAirframe(defaultAirframe()).model;
 
     const biggerAilerons = defaultAirframe();
@@ -3642,12 +4016,26 @@ describe("airframe compiler", () => {
     expect(compileAirframe(stubby).model.wingAreaM2).toBeLessThan(base.wingAreaM2);
   });
 
-  it("floors rate ratios so a control-surface-free build is sluggish but not dead", () => {
+  it("does not invent control authority for a control-surface-free build", () => {
     const noControl = defaultAirframe();
     for (const p of noControl.parts) if (p.kind === "wing") p.control = undefined;
     const model = compileAirframe(noControl).model;
-    expect(model.maxRollRate).toBeGreaterThan(0); // not zeroed
-    expect(model.maxRollRate).toBeLessThan(DEFAULT_MODEL.maxRollRate); // but clearly worse
+    expect(model.maxRollRate).toBe(0);
+    expect(model.maxPitchRate).toBe(0);
+    expect(model.maxYawRate).toBe(0);
+    expect(model.controlAuthority).toEqual({ roll: 0, pitch: 0, yaw: 0 });
+    expect(model.aeroSurfaces.every((surface) => surface.control === undefined)).toBe(true);
+  });
+
+  it("honors part pose rotation when compiling aerodynamic surfaces", () => {
+    const angled = defaultAirframe();
+    const wing = angled.parts.find((p) => p.id === "main-wing") as WingPart;
+    wing.pose = { ...wing.pose, rotation: quatFromAxisAngle(vec3(1, 0, 0), (6 * Math.PI) / 180) };
+
+    const surface = compileAirframe(angled).model.aeroSurfaces.find((s) => s.id === "main-wing-left");
+    expect(surface).toBeDefined();
+    expect(Math.abs(surface!.localForward.y)).toBeGreaterThan(0.05);
+    expect(surface!.localUp.z).toBeGreaterThan(0.05);
   });
 
   it("reports flyability against the real sim constants and flags broken builds", () => {
@@ -3662,10 +4050,9 @@ describe("airframe compiler", () => {
   });
 });
 
-
-########################################################################
+================================================================================
 # FILE: tests/perception.test.ts
-########################################################################
+================================================================================
 
 import { describe, expect, it } from "vitest";
 import { senseAndEncode } from "../src/agent/perception";

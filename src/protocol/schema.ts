@@ -90,8 +90,21 @@ export const SetpointActionSchema = z.object({
   trigger: z.boolean(),
 });
 
+export const FlightDirectorActionSchema = z.object({
+  kind: z.literal("flight-director"),
+  targetBankDeg: z.number(), // tactical turn direction, degrees (+ = bank right)
+  targetLoadG: z.number(), // commanded pull/load; adapter protects AoA and low energy
+  throttle: z.number(),
+  speedPriority: z.enum(["gain", "hold", "bleed"]),
+  trigger: z.boolean(),
+});
+
 // Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
-export const ActionSchema = z.discriminatedUnion("kind", [RawStickActionSchema, SetpointActionSchema]);
+export const ActionSchema = z.discriminatedUnion("kind", [
+  RawStickActionSchema,
+  SetpointActionSchema,
+  FlightDirectorActionSchema,
+]);
 
 export const SelfPerceptSchema = z.object({
   airspeed: z.number(),
@@ -213,12 +226,11 @@ export const TurnDecisionSchema = z.object({
   percepts: z.array(PerceptSchema).optional(), // v0.4.0: recorded sensor output (camera, …)
 });
 
-// --- aircraft builder: an Airframe is a list of Parts that COMPILE into the flat AircraftModel ---
-// compileAirframe (src/sim/airframe.ts) folds these parts into the 7 scalars the physics reads plus
-// the mounted SensorDevices. The Airframe is recorded on the replay (additive/optional) so the viewer
-// can render the plane you built and a build round-trips. This is the first time a Part serializes,
-// so the shapes live here in Zod (single source); src/sim/airframe.ts imports the inferred types.
-// Numeric fields use finiteNumber: an airframe rides in a JSON replay, and NaN/±Infinity can't.
+// --- aircraft builder: an Airframe is a list of Parts that COMPILE into a physical AircraftModel ---
+// compileAirframe (src/sim/airframe.ts) folds these parts into mass/inertia, aerodynamic surfaces,
+// thrust points, and mounted SensorDevices. The Airframe is recorded on the replay (additive/optional)
+// so the viewer can render the plane you built and a build round-trips. Numeric fields use
+// finiteNumber: an airframe rides in a JSON replay, and NaN/±Infinity can't.
 
 export const PartPoseSchema = z.object({
   offset: Vec3Schema, // metres, body frame (forward = -Z)
@@ -251,9 +263,8 @@ export const WingPartSchema = z.object({
   pose: PartPoseSchema,
   planform: z.object({ span: finiteNumber, chord: finiteNumber }), // area = span * chord (rectangular)
   massKg: finiteNumber,
-  // A moving control surface on this wing + the axis it drives; area (m²) becomes control authority
-  // (→ a max rate). Omit for a plain lifting surface. A "yaw" surface is vertical: it drives yaw but
-  // contributes no lift area.
+  // A moving control surface on this wing + the axis it drives; area (m²) changes the surface's
+  // deflection effectiveness. Omit for a plain lifting surface. A "yaw" surface is vertical.
   control: z.object({ axis: z.enum(["roll", "pitch", "yaw"]), area: finiteNumber }).optional(),
 });
 
@@ -294,7 +305,7 @@ export const MatchReplaySchema = z.object({
   frameDt: z.number(),
   frames: z.array(ReplayFrameSchema).min(1),
   // All optional ⇒ v0.1.0 replays still validate and the viewer (reads only `frames`) is unchanged.
-  schemaVersion: z.literal(2).optional(),
+  schemaVersion: z.union([z.literal(2), z.literal(3)]).optional(),
   agents: z.array(AgentMetaSchema).optional(),
   decisions: z.array(TurnDecisionSchema).optional(),
   outcome: MatchOutcomeSchema.optional(),
@@ -325,6 +336,7 @@ export type MatchReplay = z.infer<typeof MatchReplaySchema>;
 export type StickCommand = z.infer<typeof StickCommandSchema>;
 export type RawStickAction = z.infer<typeof RawStickActionSchema>;
 export type SetpointAction = z.infer<typeof SetpointActionSchema>;
+export type FlightDirectorAction = z.infer<typeof FlightDirectorActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
 export type ContactPercept = z.infer<typeof ContactPerceptSchema>;

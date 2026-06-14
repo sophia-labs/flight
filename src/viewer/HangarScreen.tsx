@@ -4,7 +4,7 @@ import { useMemo, useState, type CSSProperties } from "react";
 import type { Airframe, EnginePart, FuselagePart, MatchReplay, Part, TankPart, WingPart } from "../protocol/schema";
 import { generateAirframeMatch } from "../runtime/scenario";
 import { airframeReport, compileAirframe, defaultAirframe, noseCamera } from "../sim/airframe";
-import { quatIdentity, vec3 } from "../sim/math";
+import { quatFromAxisAngle, quatIdentity, vec3 } from "../sim/math";
 import { PartMeshes } from "./airframeMesh";
 
 const BLUE = "#4da3ff";
@@ -112,6 +112,8 @@ export function HangarScreen({
               ratio={compiled.model.maxThrustN / base.maxThrustN}
             />
             <Stat label="wing area" value={`${compiled.model.wingAreaM2.toFixed(1)} m²`} />
+            <Stat label="surfaces" value={`${compiled.model.aeroSurfaces.length}`} />
+            <Stat label="engines" value={`${compiled.model.thrustPoints.length}`} />
             <Stat label="thrust : weight" value={report.thrustToWeight.toFixed(2)} />
             <Stat
               label="roll"
@@ -214,6 +216,7 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
         <Slider label="width" value={part.dims.width} min={0.4} max={4} step={0.1} onChange={(v) => set("width", v)} />
         <Slider label="height" value={part.dims.height} min={0.4} max={4} step={0.1} onChange={(v) => set("height", v)} />
         <MassSlider part={part} onChange={onChange} max={12000} />
+        <PoseSliders part={part} onChange={onChange} />
       </>
     );
   }
@@ -227,6 +230,20 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
         <Slider label="span" value={wing.planform.span} min={1} max={24} step={0.5} onChange={(v) => setPlan("span", v)} />
         <Slider label="chord" value={wing.planform.chord} min={0.3} max={4} step={0.1} onChange={(v) => setPlan("chord", v)} />
         <MassSlider part={part} onChange={onChange} max={4000} />
+        <PoseSliders part={part} onChange={onChange} />
+        <Slider
+          label="incidence"
+          value={wingIncidenceDeg(wing)}
+          min={-8}
+          max={8}
+          step={0.5}
+          onChange={(v) =>
+            onChange((p) => {
+              const w = p as WingPart;
+              return { ...w, pose: { ...w.pose, rotation: quatFromAxisAngle(vec3(1, 0, 0), (v * Math.PI) / 180) } };
+            })
+          }
+        />
         <div style={S.fieldRow}>
           <span style={S.fieldLabel}>control</span>
           <select
@@ -277,6 +294,7 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
           onChange={(v) => onChange((p) => ({ ...(p as EnginePart), thrustN: v * 1000 }))}
         />
         <MassSlider part={part} onChange={onChange} max={4000} />
+        <PoseSliders part={part} onChange={onChange} />
       </>
     );
   }
@@ -286,12 +304,35 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
       <>
         <Slider label="fuel (kg)" value={part.fuelKg} min={0} max={5000} step={50} onChange={(v) => onChange((p) => ({ ...(p as TankPart), fuelKg: v }))} />
         <Slider label="tank mass" value={part.dryMassKg} min={0} max={1000} step={25} onChange={(v) => onChange((p) => ({ ...(p as TankPart), dryMassKg: v }))} />
+        <PoseSliders part={part} onChange={onChange} />
       </>
     );
   }
 
   // sensor — pose/optics editing is advanced; show its identity for now.
   return <div style={S.sensorNote}>{part.modality} sensor · range {Math.round(part.for.maxRangeM)} m</div>;
+}
+
+function wingIncidenceDeg(part: WingPart): number {
+  return (2 * Math.atan2(part.pose.rotation.x, part.pose.rotation.w) * 180) / Math.PI;
+}
+
+function PoseSliders({
+  part,
+  onChange,
+}: {
+  part: Exclude<Part, { kind: "sensor" }>;
+  onChange: (fn: (p: Part) => Part) => void;
+}) {
+  const setOffset = (axis: "x" | "y" | "z", value: number) =>
+    onChange((p) => ({ ...p, pose: { ...p.pose, offset: { ...p.pose.offset, [axis]: value } } }) as Part);
+  return (
+    <>
+      <Slider label="x offset" value={part.pose.offset.x} min={-8} max={8} step={0.25} onChange={(v) => setOffset("x", v)} />
+      <Slider label="y offset" value={part.pose.offset.y} min={-3} max={5} step={0.25} onChange={(v) => setOffset("y", v)} />
+      <Slider label="z offset" value={part.pose.offset.z} min={-8} max={8} step={0.25} onChange={(v) => setOffset("z", v)} />
+    </>
+  );
 }
 
 function MassSlider({
@@ -420,7 +461,7 @@ const S: Record<string, CSSProperties> = {
   statValue: { fontSize: 16, fontWeight: 600 },
   statRatio: { fontSize: 11, fontWeight: 600 },
   warnings: { padding: "10px 16px", fontSize: 13, display: "flex", flexDirection: "column", gap: 4, background: "#0e1418" },
-  card: { background: panel, borderRadius: 10, padding: 12, border: "1px solid rgba(255,255,255,0.06)" },
+  card: { background: panel, borderRadius: 8, padding: 12, border: "1px solid rgba(255,255,255,0.06)" },
   cardHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
   cardKind: { fontSize: 12, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: BLUE },
   cardId: { fontSize: 12, color: "#8aa0ad" },

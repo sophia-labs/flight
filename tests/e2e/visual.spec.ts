@@ -65,3 +65,15 @@ test("renders a nonblank flight scene and usable replay controls", async ({ page
   expect(stats.total).toBeGreaterThan(0);
   expect(stats.swatches).toBeGreaterThanOrEqual(2);
 });
+
+test("opens the hangar with physical surface controls", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Hangar" }).click();
+  await expect(page.getByRole("heading", { name: "Build your aircraft" })).toBeVisible();
+  await expect(page.getByText("surfaces")).toBeVisible();
+  await expect(page.getByText("engines")).toBeVisible();
+  await expect(page.getByText("incidence").first()).toBeVisible();
+  await expect(page.getByText("x offset").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Fly this ▶" })).toBeVisible();
+});

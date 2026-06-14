@@ -34,7 +34,7 @@ const MODELS = SCRIPTED
       "google/gemini-2.5-flash",
       "deepseek/deepseek-chat-v3.1",
     ];
-const MODES: ActionMode[] = SCRIPTED ? ["raw-stick"] : ["raw-stick", "setpoint"];
+const MODES: ActionMode[] = SCRIPTED ? ["flight-director"] : ["raw-stick", "setpoint", "flight-director"];
 const REPEATS = Number(process.env.SWEEP_REPEATS ?? 3);
 const CONCURRENCY = Number(process.env.SWEEP_CONCURRENCY ?? 12);
 const MAX_TURNS = Number(process.env.SWEEP_TURNS ?? 28);

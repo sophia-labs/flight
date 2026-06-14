@@ -4,42 +4,30 @@ import {
   add,
   basisFromQuat,
   clamp,
+  cross,
   dot,
   length,
   normalize,
   rotateAroundWorldAxis,
+  rotateVec,
   scale,
   sub,
   vec3,
 } from "./math";
-import type { AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
+import type { AeroSurface, AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
 
 const GRAVITY = vec3(0, -9.81, 0);
 const SEA_LEVEL_DENSITY = 1.225;
 const TERRAIN_FLOOR_M = 55;
 
-// Aerodynamic rotational damping per axis. These set the control time-constant τ = I/(qbar·DAMP) — and
-// ONLY τ, because the steady-state rate cancels DAMP — calibrated against the default's inertia so the
-// default's response (roll τ≈0.22 s, pitch≈0.45 s, yaw≈0.75 s at cruise) matches the old kinematic feel.
-const DAMP_ROLL = 33.5;
-const DAMP_PITCH = 70.0;
-const DAMP_YAW = 50.0;
-
-// Static-stability gain: a stable airframe (CoM ahead of the aero centre, staticMarginM > 0) makes a
-// restoring pitch moment ∝ staticMargin·q̄·area·AoA that weathervanes the nose back toward the relative
-// wind. Tuned gentle so the plane trims hands-off without fighting a commanded turn.
-const STAB_K = 0.5;
-
-// Dihedral (roll-stability) gain: sideslip produces a rolling moment toward wings-level. A coordinated
-// turn carries ~no sideslip, so this doesn't fight commanded banking — it only damps out skidding and
-// the slow knife-edge/inverted attitudes an uncoordinated pilot falls into. The real fix for "flies like
-// a maniac" is the pilot, but this stops the airframe from happily living at any bank angle.
-const DIHEDRAL_K = 1.5;
-
 // Oswald span efficiency for the induced-drag polar cd_i = cl²/(π·AR·e). With the default AR≈7.5 this
 // lands at ≈0.053 — essentially the old constant 0.052 — so the default is undisturbed, while a stubby
 // low-AR build now pays a real induced-drag penalty and a long-winged build is rewarded.
 const OSWALD_E = 0.8;
+
+// Numerical guardrail, not an authority model: forces still decide the acceleration, but absurd builds
+// and high-speed stalls cannot integrate to unbounded spin rates in one coarse replay frame.
+const MAX_BODY_RATE_RAD_S = 5.5;
 
 // Specific fuel consumption (kg burned per N of thrust per second). Sized so an ~1800 kg tank gives
 // ~400 s of full-throttle endurance — visible drain over a long fight, not match-ending in a short one.
@@ -48,6 +36,87 @@ const SFC = 6e-5;
 // The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
 export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
+
+function densityAtAltitude(altitudeM: number): number {
+  return SEA_LEVEL_DENSITY * Math.exp(-Math.max(altitudeM, 0) / 8_800);
+}
+
+function bodyOmegaWorld(aircraft: AircraftState) {
+  const basis = basisFromQuat(aircraft.orientation);
+  return add(
+    add(scale(basis.forward, aircraft.angularVelocity.x), scale(basis.right, aircraft.angularVelocity.y)),
+    scale(basis.up, aircraft.angularVelocity.z),
+  );
+}
+
+function controlDeflection(surface: AeroSurface, controls: ControlInput): number {
+  if (!surface.control) return 0;
+  return (
+    controls[surface.control.axis] *
+    surface.control.sign *
+    surface.control.maxDeflectionRad *
+    surface.control.effectiveness
+  );
+}
+
+interface SurfaceSample {
+  force: ReturnType<typeof vec3>;
+  liftForce: ReturnType<typeof vec3>;
+  torque: ReturnType<typeof vec3>;
+  alpha: number;
+  stallSeverity: number;
+}
+
+function sampleSurface(
+  surface: AeroSurface,
+  aircraft: AircraftState,
+  controls: ControlInput,
+  density: number,
+  omegaWorld: ReturnType<typeof vec3>,
+): SurfaceSample {
+  const basis = basisFromQuat(aircraft.orientation);
+  const rWorld = rotateVec(aircraft.orientation, sub(surface.localOffset, aircraft.model.com));
+  const surfaceVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
+  const surfaceSpeed = length(surfaceVelocity);
+  if (surfaceSpeed < 0.5 || surface.areaM2 <= 0) {
+    const zero = vec3(0, 0, 0);
+    return { force: zero, liftForce: zero, torque: zero, alpha: 0, stallSeverity: 0 };
+  }
+
+  const forward = normalize(rotateVec(aircraft.orientation, surface.localForward), basis.forward);
+  const up = normalize(rotateVec(aircraft.orientation, surface.localUp), basis.up);
+  const vForward = dot(surfaceVelocity, forward);
+  const vLift = dot(surfaceVelocity, up);
+  const alpha = Math.atan2(-vLift, Math.max(Math.abs(vForward), 1));
+  const deflection = controlDeflection(surface, controls);
+  const alphaEffective = alpha + deflection;
+  const stallSeverity = clamp(
+    (Math.abs(alphaEffective) - surface.stallAoARad) / Math.max(surface.stallAoARad * 0.85, 1e-3),
+    0,
+    1,
+  );
+
+  const clLinear = surface.zeroLiftCl + surface.liftSlope * alphaEffective;
+  const cl = clamp(clLinear, -1.28, 1.55) * (1 - stallSeverity * 0.78);
+  const inducedDrag = (cl * cl) / (Math.PI * Math.max(surface.aspectRatio, 0.3) * OSWALD_E);
+  const aileronDrag = surface.control?.axis === "roll" ? Math.max(0, -deflection) * 0.11 : 0;
+  const cd =
+    surface.cd0 + inducedDrag + stallSeverity * 0.38 + Math.abs(deflection) * 0.035 + aileronDrag;
+  const qbar = 0.5 * density * surfaceSpeed * surfaceSpeed;
+
+  const vhat = normalize(surfaceVelocity, forward);
+  const liftDir = normalize(sub(up, scale(vhat, dot(up, vhat))), up);
+  const liftForce = scale(liftDir, qbar * surface.areaM2 * cl);
+  const dragForce = scale(vhat, -qbar * surface.areaM2 * cd);
+  const force = add(liftForce, dragForce);
+  return {
+    force,
+    liftForce,
+    torque: cross(rWorld, force),
+    alpha,
+    stallSeverity,
+  };
+}
 
 export function stepSimulation(
   aircraft: AircraftState[],
@@ -61,7 +130,7 @@ export function stepSimulation(
     ship.controls = controls;
     ship.metrics = stepAircraft(ship, controls, dt);
 
-    if (ship.position.y <= TERRAIN_FLOOR_M + 0.01 && length(ship.velocity) > 55) {
+    if (ship.position.y <= TERRAIN_FLOOR_M + 0.5 && length(ship.velocity) > 55) {
       ship.health = clamp(ship.health - 4.5 * dt, 0, 100);
       if (Math.round(ship.health) % 9 === 0) {
         events.push({
@@ -89,31 +158,60 @@ function stepAircraft(
   const speed = length(aircraft.velocity);
   const forwardSpeed = dot(aircraft.velocity, basis.forward);
   const bodyVerticalSpeed = dot(aircraft.velocity, basis.up);
-  const bodySideSpeed = dot(aircraft.velocity, basis.right);
   const aoa = Math.atan2(-bodyVerticalSpeed, Math.max(Math.abs(forwardSpeed), 1));
-  const density = SEA_LEVEL_DENSITY * Math.exp(-Math.max(aircraft.position.y, 0) / 8_800);
+  const density = densityAtAltitude(aircraft.position.y);
   const qbar = 0.5 * density * speed * speed;
-  const aoaAbs = Math.abs(aoa);
-  const stallSeverity = clamp((aoaAbs - model.stallAoARad) / 0.28, 0, 1);
-  const stalled = speed < 62 || stallSeverity > 0.2;
-  const liftEfficiency = 1 - stallSeverity * 0.72;
-  const cl = clamp(0.21 + 3.05 * aoa + controls.pitch * 0.12, -1.05, 1.48) * liftEfficiency;
-  const lift = scale(basis.up, qbar * model.wingAreaM2 * cl);
-  const sideSlip = clamp(bodySideSpeed / Math.max(speed, 1), -1, 1);
-  const sideForce = scale(basis.right, -qbar * 8.5 * sideSlip * 1.15);
-  const cd = 0.034 + (cl * cl) / (Math.PI * model.aspectRatio * OSWALD_E) + stallSeverity * 0.28;
-  const drag = scale(normalize(aircraft.velocity), -qbar * model.wingAreaM2 * cd);
+
   // Fuel: a tanked airframe (fuelCapacityKg > 0) burns ∝ thrust and cuts thrust when dry; a tankless
   // one has infinite fuel. effectiveMass shrinks as fuel burns, so the aircraft accelerates/climbs
   // better light. (CoM + inertia are held at the wet value — a stated cut.)
   const tanked = model.fuelCapacityKg > 0;
   const hasFuel = !tanked || aircraft.fuelKg > 0;
-  const thrustN = hasFuel ? model.maxThrustN * (0.14 + controls.throttle * 0.86) : 0;
-  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * thrustN * dt);
+  const thrustSetting = hasFuel ? 0.14 + controls.throttle * 0.86 : 0;
+  const commandedThrustN = model.maxThrustN * thrustSetting;
+  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * commandedThrustN * dt);
   const effectiveMassKg = Math.max(model.dryMassKg + aircraft.fuelKg, 1); // floor guards a fully-empty build
 
-  const thrust = scale(basis.forward, thrustN);
-  const totalForce = add(add(add(lift, sideForce), drag), thrust);
+  const omegaWorld = bodyOmegaWorld(aircraft);
+  let totalForce = vec3(0, 0, 0);
+  let totalTorque = vec3(0, 0, 0);
+  let loadForce = vec3(0, 0, 0);
+  let maxSurfaceStall = 0;
+  let horizontalAlphaArea = 0;
+  let horizontalArea = 0;
+
+  for (const surface of model.aeroSurfaces) {
+    const sample = sampleSurface(surface, aircraft, controls, density, omegaWorld);
+    totalForce = add(totalForce, sample.force);
+    totalTorque = add(totalTorque, sample.torque);
+    loadForce = add(loadForce, sample.liftForce);
+    maxSurfaceStall = Math.max(maxSurfaceStall, sample.stallSeverity);
+    if (surface.kind === "horizontal") {
+      horizontalAlphaArea += sample.alpha * surface.areaM2;
+      horizontalArea += surface.areaM2;
+    }
+  }
+
+  if (speed > 0.5 && model.parasiteDragAreaM2 > 0) {
+    totalForce = add(
+      totalForce,
+      scale(normalize(aircraft.velocity), -qbar * model.parasiteDragAreaM2),
+    );
+  }
+
+  if (commandedThrustN > 0) {
+    if (model.thrustPoints.length > 0) {
+      for (const point of model.thrustPoints) {
+        const force = scale(rotateVec(aircraft.orientation, point.localForward), point.maxThrustN * thrustSetting);
+        const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+        totalForce = add(totalForce, force);
+        totalTorque = add(totalTorque, cross(rWorld, force));
+      }
+    } else {
+      totalForce = add(totalForce, scale(basis.forward, commandedThrustN));
+    }
+  }
+
   const acceleration = add(scale(totalForce, 1 / effectiveMassKg), GRAVITY);
 
   aircraft.velocity = add(aircraft.velocity, scale(acceleration, dt));
@@ -127,43 +225,31 @@ function stepAircraft(
     };
   }
 
-  // --- Rigid-body rotation (v0.6.0) ---
-  // Control surfaces make torque ∝ qbar·stick; aerodynamic damping opposes the body rate ∝ qbar·ω.
-  // Steady-state full-stick rate = model.maxRate (qbar AND damp cancel at equilibrium), so the calibrated
-  // default reproduces the old kinematic rates; speed-dependence is now EMERGENT via the time constant
-  // τ = I/(qbar·damp) — slow and sluggish when slow, snappy when fast. Damping is integrated IMPLICITLY
-  // (the ω_next = (ω + dt·τ_ctrl/I)/(1 + dt·qbar·damp/I) form), which is unconditionally stable even at
-  // this coarse 16 ms step where an explicit scheme would ring or diverge in a dive.
-  const stallBite = stalled ? 0.52 : 1; // control surfaces lose authority in the buffet (old stall feel)
-  const ctrlRoll = controls.roll * model.maxRollRate * DAMP_ROLL * qbar * stallBite;
-  const ctrlPitch = controls.pitch * model.maxPitchRate * DAMP_PITCH * qbar * stallBite;
-  const ctrlYaw = -controls.yaw * model.maxYawRate * DAMP_YAW * qbar * stallBite;
-  // Static restoring moment (pitch): nose-up AoA on a stable airframe produces a nose-down torque that
-  // weathervanes back toward the relative wind. Zero at AoA 0, so it adds no standing torque in level
-  // flight. Goes in the torque numerator (it doesn't depend on the rate).
-  const tauStabPitch = -STAB_K * model.staticMarginM * model.wingAreaM2 * qbar * aoa;
-  // Dihedral: sideslip rolls the aircraft back toward wings-level (toward the relative wind).
-  const tauDihedralRoll = -DIHEDRAL_K * model.wingAreaM2 * qbar * sideSlip;
   const omega = aircraft.angularVelocity;
-  const wRoll = (omega.x + (dt * (ctrlRoll + tauDihedralRoll)) / model.inertia.roll) / (1 + (dt * qbar * DAMP_ROLL) / model.inertia.roll);
-  const wPitch = (omega.y + (dt * (ctrlPitch + tauStabPitch)) / model.inertia.pitch) / (1 + (dt * qbar * DAMP_PITCH) / model.inertia.pitch);
-  const wYaw = (omega.z + (dt * ctrlYaw) / model.inertia.yaw) / (1 + (dt * qbar * DAMP_YAW) / model.inertia.yaw);
-  aircraft.angularVelocity = vec3(wRoll, wPitch, wYaw);
+  const nextRoll = omega.x + (dot(totalTorque, basis.forward) / model.inertia.roll) * dt;
+  const nextPitch = omega.y + (dot(totalTorque, basis.right) / model.inertia.pitch) * dt;
+  const nextYaw = omega.z + (dot(totalTorque, basis.up) / model.inertia.yaw) * dt;
+  aircraft.angularVelocity = vec3(
+    clamp(Number.isFinite(nextRoll) ? nextRoll : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextPitch) ? nextPitch : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextYaw) ? nextYaw : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+  );
 
   let orientation = aircraft.orientation;
-  orientation = rotateAroundWorldAxis(orientation, basis.forward, wRoll * dt);
-  orientation = rotateAroundWorldAxis(orientation, basis.right, wPitch * dt);
-  orientation = rotateAroundWorldAxis(orientation, basis.up, wYaw * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.forward, aircraft.angularVelocity.x * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.right, aircraft.angularVelocity.y * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.up, aircraft.angularVelocity.z * dt);
   aircraft.orientation = orientation;
   aircraft.weaponCooldown = Math.max(0, aircraft.weaponCooldown - dt);
 
-  const loadForce = length(add(lift, sideForce));
-  const gLoad = loadForce / (effectiveMassKg * 9.81);
+  const metricAoa = horizontalArea > 0 ? horizontalAlphaArea / horizontalArea : aoa;
+  const stalled = speed < 62 || maxSurfaceStall > 0.2;
+  const gLoad = length(loadForce) / (effectiveMassKg * 9.81);
 
   return {
     airspeed: length(aircraft.velocity),
     altitude: aircraft.position.y,
-    aoaDeg: (aoa * 180) / Math.PI,
+    aoaDeg: (metricAoa * 180) / Math.PI,
     gLoad,
     stalled,
   };
