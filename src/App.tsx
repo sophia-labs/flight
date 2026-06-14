@@ -10,6 +10,7 @@ import {
   StepBack,
   StepForward,
   Volume2,
+  Wrench,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
@@ -22,6 +23,7 @@ import {
 import { generateDemoMatch } from "./runtime/scenario";
 import { ControlsPanel } from "./viewer/ControlsPanel";
 import { FlightScene, type CameraMode } from "./viewer/FlightScene";
+import { HangarScreen } from "./viewer/HangarScreen";
 import { MatchBrowser } from "./viewer/MatchBrowser";
 import { MatchStats } from "./viewer/MatchStats";
 import { StatusPanel } from "./viewer/StatusPanel";
@@ -34,6 +36,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [replay, setReplay] = useState<MatchReplay | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
+  const [screen, setScreen] = useState<"flight" | "hangar">("flight");
   const [captionsOn, setCaptionsOn] = useState(true);
   const [soundOn, setSoundOn] = useState(false);
   const [voiceOn, setVoiceOn] = useState(false);
@@ -89,6 +92,13 @@ export function App() {
         if (requestRef.current === req) setReplay(MatchReplaySchema.parse(json));
       })
       .catch(() => {});
+  }, []);
+
+  // A freshly-built airframe was flown in the hangar: show its replay (a one-off, not from the browser).
+  const onFlyBuild = useCallback((built: MatchReplay) => {
+    setSelectedId(null);
+    setReplay(built);
+    setScreen("flight");
   }, []);
 
   const playback = usePlayback(replay);
@@ -147,6 +157,10 @@ export function App() {
   }
 
   return (
+    <>
+    {screen === "hangar" ? (
+      <HangarScreen onExit={() => setScreen("flight")} onFly={onFlyBuild} />
+    ) : null}
     <main className={`app-shell${hasBrowser ? " with-browser" : ""}`}>
       {hasBrowser ? (
         <MatchBrowser matches={matches} selectedId={selectedId} onSelect={selectMatch} />
@@ -183,7 +197,17 @@ export function App() {
             <p className="eyebrow">Flight Duel</p>
             <h1>Physics Turn Lab</h1>
           </div>
-          <div className="turn-pill">Turn {frame.turn}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button
+              type="button"
+              className="hangar-open"
+              onClick={() => setScreen("hangar")}
+              title="Build your own aircraft"
+            >
+              <Wrench size={15} /> Hangar
+            </button>
+            <div className="turn-pill">Turn {frame.turn}</div>
+          </div>
         </header>
 
         <div className="transport" aria-label="Replay transport controls">
@@ -267,5 +291,6 @@ export function App() {
         <ControlsPanel frame={frame} />
       </aside>
     </main>
+    </>
   );
 }

@@ -5,7 +5,7 @@ import {
 } from "../agent/controllers/scripted";
 import { perfectSensor } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
-import type { MatchReplay } from "../protocol/schema";
+import type { Airframe, MatchReplay } from "../protocol/schema";
 import { compileAirframe, defaultAirframe } from "../sim/airframe";
 import { length, quatLookRotation, vec3 } from "../sim/math";
 import type { AircraftState, FlightMetrics } from "../sim/types";
@@ -23,15 +23,16 @@ const INITIAL_METRICS: FlightMetrics = {
   stalled: false,
 };
 
-export function createInitialAircraft(): AircraftState[] {
+// Build the two duelists. The compiler produces each aircraft's model + devices (the camera is a part).
+// Both default to the default airframe — byte-identical to the old DEFAULT_MODEL / noseCamera() literals
+// — but a custom blue airframe is how "Fly this" sends a built plane into a duel against the default.
+export function createInitialAircraft(
+  blueAirframe: Airframe = defaultAirframe(),
+  redAirframe: Airframe = defaultAirframe(),
+): AircraftState[] {
   const blueVelocity = vec3(112, 2, -118);
   const redVelocity = vec3(-112, 0, 112);
 
-  // Both fly the default airframe; the compiler produces the model + devices (the camera is a part of
-  // it). By construction this is byte-identical to the old DEFAULT_MODEL / noseCamera() literals. A
-  // fresh airframe per ship so the recorded airframes don't share a mutable reference.
-  const blueAirframe = defaultAirframe();
-  const redAirframe = defaultAirframe();
   const blue = compileAirframe(blueAirframe);
   const red = compileAirframe(redAirframe);
 
@@ -71,16 +72,17 @@ export function createInitialAircraft(): AircraftState[] {
   ];
 }
 
-// The all-scripted demo as a MatchConfig: blue pursues, red flies defensively. Reproduces the
-// v0.1.0 duel, now routed through the pluggable runtime.
-export function buildScriptedMatchConfig(turnCount = 28): MatchConfig {
+// The all-scripted duel as a MatchConfig: blue pursues, red flies defensively. Reproduces the v0.1.0
+// duel, now routed through the pluggable runtime. The aircraft (and thus their airframes) are injected
+// so the same scripted match can fly a built plane against the default.
+function scriptedConfig(initialAircraft: AircraftState[], turnCount: number): MatchConfig {
   return {
     id: "demo-merge-001",
     turnDuration: TURN_DURATION,
     frameDt: FRAME_DT,
     maxTurns: turnCount,
     decisionTimeoutMs: 5_000,
-    initialAircraft: createInitialAircraft(),
+    initialAircraft,
     sensor: perfectSensor,
     evaluator: minimalEvaluator,
     fallback: pursuitFallback,
@@ -97,6 +99,21 @@ export function buildScriptedMatchConfig(turnCount = 28): MatchConfig {
   };
 }
 
+export function buildScriptedMatchConfig(turnCount = 28): MatchConfig {
+  return scriptedConfig(createInitialAircraft(), turnCount);
+}
+
 export function generateDemoMatch(turnCount = 28): Promise<MatchReplay> {
   return runMatch(buildScriptedMatchConfig(turnCount));
+}
+
+// "Fly this": a built (blue) airframe duels the default (red) under the scripted controllers — fully
+// deterministic, no credentials. The recorded replay carries both airframes, so the viewer renders the
+// plane you built flying it. Flying a build with a real LLM stays on the headless film/sweep path.
+export function buildAirframeMatchConfig(blueAirframe: Airframe, turnCount = 28): MatchConfig {
+  return scriptedConfig(createInitialAircraft(blueAirframe, defaultAirframe()), turnCount);
+}
+
+export function generateAirframeMatch(blueAirframe: Airframe, turnCount = 28): Promise<MatchReplay> {
+  return runMatch(buildAirframeMatchConfig(blueAirframe, turnCount));
 }
