@@ -266,10 +266,20 @@ export const EnginePartSchema = z.object({
   dims: z.object({ radius: finiteNumber, length: finiteNumber }), // mesh-only nacelle size
 });
 
+export const TankPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("tank"),
+  pose: PartPoseSchema,
+  fuelKg: finiteNumber, // full fuel load (mass carried when full; burns down to 0)
+  dryMassKg: finiteNumber, // empty tank structure mass
+  dims: z.object({ radius: finiteNumber, length: finiteNumber }), // mesh + box-inertia extents
+});
+
 export const PartSchema = z.discriminatedUnion("kind", [
   FuselagePartSchema,
   WingPartSchema,
   EnginePartSchema,
+  TankPartSchema,
   SensorDeviceSchema,
 ]);
 
@@ -331,6 +341,7 @@ export type PartPose = z.infer<typeof PartPoseSchema>;
 export type FuselagePart = z.infer<typeof FuselagePartSchema>;
 export type WingPart = z.infer<typeof WingPartSchema>;
 export type EnginePart = z.infer<typeof EnginePartSchema>;
+export type TankPart = z.infer<typeof TankPartSchema>;
 export type Part = z.infer<typeof PartSchema>;
 export type Airframe = z.infer<typeof AirframeSchema>;
 

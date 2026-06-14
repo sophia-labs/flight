@@ -1,7 +1,7 @@
 import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import { useMemo, useState, type CSSProperties } from "react";
-import type { Airframe, EnginePart, FuselagePart, MatchReplay, Part, WingPart } from "../protocol/schema";
+import type { Airframe, EnginePart, FuselagePart, MatchReplay, Part, TankPart, WingPart } from "../protocol/schema";
 import { generateAirframeMatch } from "../runtime/scenario";
 import { airframeReport, compileAirframe, defaultAirframe, noseCamera } from "../sim/airframe";
 import { quatIdentity, vec3 } from "../sim/math";
@@ -70,7 +70,7 @@ export function HangarScreen({
           <div style={S.sectionHead}>
             <span>PARTS</span>
             <div style={{ display: "flex", gap: 6 }}>
-              {(["wing", "engine", "fuselage", "sensor"] as const).map((k) => (
+              {(["wing", "engine", "fuselage", "tank", "sensor"] as const).map((k) => (
                 <button key={k} type="button" style={S.addBtn} onClick={() => addPart(k)}>
                   + {k}
                 </button>
@@ -132,6 +132,15 @@ export function HangarScreen({
               label="wing loading"
               value={Number.isFinite(report.wingLoadingNm2) ? `${Math.round(report.wingLoadingNm2)} N/m²` : "—"}
             />
+            {compiled.model.fuelCapacityKg > 0 ? (
+              <>
+                <Stat label="fuel" value={`${Math.round(compiled.model.fuelCapacityKg)} kg`} />
+                <Stat
+                  label="endurance"
+                  value={`${Math.round(compiled.model.fuelCapacityKg / (6e-5 * compiled.model.maxThrustN))} s`}
+                />
+              </>
+            ) : null}
           </div>
 
           <div style={S.warnings}>
@@ -272,6 +281,15 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
     );
   }
 
+  if (part.kind === "tank") {
+    return (
+      <>
+        <Slider label="fuel (kg)" value={part.fuelKg} min={0} max={5000} step={50} onChange={(v) => onChange((p) => ({ ...(p as TankPart), fuelKg: v }))} />
+        <Slider label="tank mass" value={part.dryMassKg} min={0} max={1000} step={25} onChange={(v) => onChange((p) => ({ ...(p as TankPart), dryMassKg: v }))} />
+      </>
+    );
+  }
+
   // sensor — pose/optics editing is advanced; show its identity for now.
   return <div style={S.sensorNote}>{part.modality} sensor · range {Math.round(part.for.maxRangeM)} m</div>;
 }
@@ -285,7 +303,7 @@ function MassSlider({
   onChange: (fn: (p: Part) => Part) => void;
   max: number;
 }) {
-  if (part.kind === "sensor") return null;
+  if (part.kind === "sensor" || part.kind === "tank") return null; // tank carries fuel/dry mass instead
   return (
     <Slider
       label="mass"
@@ -347,6 +365,8 @@ function makePart(kind: Part["kind"], parts: Part[]): Part {
       return { id, kind, pose, planform: { span: 6, chord: 1 }, massKg: 300, control: { axis: "roll", area: 1 } };
     case "engine":
       return { id, kind, pose: { offset: vec3(0, 0, 4), rotation: quatIdentity() }, thrustN: 30_000, massKg: 600, dims: { radius: 0.4, length: 2 } };
+    case "tank":
+      return { id, kind, pose: { offset: vec3(0, 0, 0), rotation: quatIdentity() }, fuelKg: 1_500, dryMassKg: 200, dims: { radius: 0.5, length: 2.5 } };
     case "sensor":
       return { ...noseCamera(), id };
   }

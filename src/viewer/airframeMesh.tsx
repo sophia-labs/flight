@@ -9,6 +9,7 @@ export const PART_VISUAL_SCALE = 0.075;
 const WING_THICKNESS = 0.04;
 const ENGINE_COLOR = "#9aa6ad";
 const NOSE_COLOR = "#f4fbff";
+const TANK_COLOR = "#c9a14a";
 
 function PartMesh({ part, color }: { part: Part; color: string }) {
   if (part.kind === "sensor") return null; // a sensor has no structural body in the flight view
@@ -64,6 +65,19 @@ function PartMesh({ part, color }: { part: Part; color: string }) {
         <mesh castShadow rotation={[Math.PI / 2, 0, 0]}>
           <cylinderGeometry args={[radius, radius * 0.85, len, 16]} />
           <meshStandardMaterial color={ENGINE_COLOR} roughness={0.5} metalness={0.55} />
+        </mesh>
+      </group>
+    );
+  }
+
+  if (part.kind === "tank") {
+    const radius = part.dims.radius * s;
+    const len = part.dims.length * s;
+    return (
+      <group position={pos} quaternion={quat}>
+        <mesh castShadow rotation={[Math.PI / 2, 0, 0]}>
+          <capsuleGeometry args={[radius, len, 6, 12]} />
+          <meshStandardMaterial color={TANK_COLOR} roughness={0.6} metalness={0.3} />
         </mesh>
       </group>
     );

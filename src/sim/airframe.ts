@@ -153,6 +153,9 @@ function partBox(part: Part): PartBox | null {
     }
     case "engine":
       return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
+    case "tank":
+      // Full (wet) mass for CoM + inertia; inertia is held at the wet value as fuel burns (a stated cut).
+      return { mass: part.dryMassKg + part.fuelKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
     default:
       return null; // sensor
   }
@@ -175,7 +178,7 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   let massKg = 0;
   let wingAreaM2 = 0;
   let maxThrustN = 0;
-  const fuelCapacityKg = 0; // milestone 4 (tanks) sums this; no tanks today ⇒ effectively infinite fuel
+  let fuelCapacityKg = 0; // Σ tank fuel; 0 (no tanks) ⇒ effectively infinite fuel (no burn)
   let liftArea = 0;
   let liftAreaZ = 0;
   let maxLiftSpan = 0;
@@ -210,6 +213,10 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
       case "engine":
         massKg += part.massKg;
         maxThrustN += part.thrustN;
+        break;
+      case "tank":
+        massKg += part.dryMassKg + part.fuelKg; // full mass; the fuel portion is burnable
+        fuelCapacityKg += part.fuelKg;
         break;
       case "sensor":
         devices.push(part);

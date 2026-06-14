@@ -331,3 +331,58 @@ describe("rigid-body rotation (v0.6.0 physics)", () => {
     expect(1 / sm.aspectRatio).toBeGreaterThan(1 / def.aspectRatio);
   });
 });
+
+describe("fuel as consumable mass (v0.6.0 physics)", () => {
+  function tankedAirframe(fuelKg = 1_500) {
+    const a = defaultAirframe();
+    a.parts.push({
+      id: "tank",
+      kind: "tank",
+      pose: { offset: vec3(0, 0, 0), rotation: { x: 0, y: 0, z: 0, w: 1 } },
+      fuelKg,
+      dryMassKg: 200,
+      dims: { radius: 0.5, length: 2.5 },
+    });
+    return a;
+  }
+
+  it("a tank adds mass + fuel capacity; dryMass excludes the fuel", () => {
+    const base = compileAirframe(defaultAirframe()).model;
+    const m = compileAirframe(tankedAirframe(1_500)).model;
+    expect(m.fuelCapacityKg).toBe(1_500);
+    expect(m.massKg).toBe(base.massKg + 200 + 1_500); // tank structure + fuel
+    expect(m.dryMassKg).toBe(m.massKg - 1_500); // everything except the fuel
+  });
+
+  it("the default (no tank) never burns and stays at full mass — a true no-op", () => {
+    const def = makeAircraft();
+    expect(def.fuelKg).toBe(0);
+    step([def], { "blue-1": controls({ throttle: 1 }) }, 15);
+    expect(def.fuelKg).toBe(0); // no tank ⇒ no burn ⇒ effectiveMass stays massKg
+  });
+
+  it("a tanked aircraft burns fuel and runs dry → thrust cuts → it decelerates", () => {
+    const compiled = compileAirframe(tankedAirframe(6)); // tiny tank (~0.7 kg/frame at full thrust)
+    const tanked = makeAircraft({ model: compiled.model, fuelKg: compiled.model.fuelCapacityKg });
+    expect(tanked.fuelKg).toBe(6);
+
+    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 4);
+    expect(tanked.fuelKg).toBeGreaterThan(0); // still burning
+    expect(tanked.fuelKg).toBeLessThan(6);
+
+    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 20);
+    expect(tanked.fuelKg).toBe(0); // emptied
+
+    const speedDry = tanked.metrics.airspeed;
+    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 15); // dry: thrust cut → glide
+    expect(tanked.metrics.airspeed).toBeLessThan(speedDry); // decelerating
+  });
+
+  it("does not NaN for a fully-empty all-fuel build (0/0 guard)", () => {
+    // A degenerate build that is nothing but an empty tank: effectiveMass floor keeps it finite.
+    const empty = makeAircraft({ fuelKg: 0, model: { ...DEFAULT_MODEL, dryMassKg: 0, fuelCapacityKg: 500 } });
+    step([empty], { "blue-1": controls({ throttle: 1 }) }, 5);
+    expect(Number.isFinite(empty.position.x)).toBe(true);
+    expect(Number.isFinite(empty.metrics.airspeed)).toBe(true);
+  });
+});

@@ -35,6 +35,10 @@ const STAB_K = 0.5;
 // low-AR build now pays a real induced-drag penalty and a long-winged build is rewarded.
 const OSWALD_E = 0.8;
 
+// Specific fuel consumption (kg burned per N of thrust per second). Sized so an ~1800 kg tank gives
+// ~400 s of full-throttle endurance — visible drain over a long fight, not match-ending in a short one.
+const SFC = 6e-5;
+
 // The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
 export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
@@ -93,9 +97,18 @@ function stepAircraft(
   const sideForce = scale(basis.right, -qbar * 8.5 * sideSlip * 1.15);
   const cd = 0.034 + (cl * cl) / (Math.PI * model.aspectRatio * OSWALD_E) + stallSeverity * 0.28;
   const drag = scale(normalize(aircraft.velocity), -qbar * model.wingAreaM2 * cd);
-  const thrust = scale(basis.forward, model.maxThrustN * (0.14 + controls.throttle * 0.86));
+  // Fuel: a tanked airframe (fuelCapacityKg > 0) burns ∝ thrust and cuts thrust when dry; a tankless
+  // one has infinite fuel. effectiveMass shrinks as fuel burns, so the aircraft accelerates/climbs
+  // better light. (CoM + inertia are held at the wet value — a stated cut.)
+  const tanked = model.fuelCapacityKg > 0;
+  const hasFuel = !tanked || aircraft.fuelKg > 0;
+  const thrustN = hasFuel ? model.maxThrustN * (0.14 + controls.throttle * 0.86) : 0;
+  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * thrustN * dt);
+  const effectiveMassKg = Math.max(model.dryMassKg + aircraft.fuelKg, 1); // floor guards a fully-empty build
+
+  const thrust = scale(basis.forward, thrustN);
   const totalForce = add(add(add(lift, sideForce), drag), thrust);
-  const acceleration = add(scale(totalForce, 1 / model.massKg), GRAVITY);
+  const acceleration = add(scale(totalForce, 1 / effectiveMassKg), GRAVITY);
 
   aircraft.velocity = add(aircraft.velocity, scale(acceleration, dt));
   aircraft.position = add(aircraft.position, scale(aircraft.velocity, dt));
@@ -137,7 +150,7 @@ function stepAircraft(
   aircraft.weaponCooldown = Math.max(0, aircraft.weaponCooldown - dt);
 
   const loadForce = length(add(lift, sideForce));
-  const gLoad = loadForce / (model.massKg * 9.81);
+  const gLoad = loadForce / (effectiveMassKg * 9.81);
 
   return {
     airspeed: length(aircraft.velocity),
