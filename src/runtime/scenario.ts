@@ -6,9 +6,8 @@ import {
 import { perfectSensor } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
 import type { MatchReplay } from "../protocol/schema";
-import { DEFAULT_MODEL } from "../sim/flight";
-import { length, quatIdentity, quatLookRotation, vec3 } from "../sim/math";
-import type { SensorDevice } from "../sim/parts";
+import { compileAirframe, defaultAirframe } from "../sim/airframe";
+import { length, quatLookRotation, vec3 } from "../sim/math";
 import type { AircraftState, FlightMetrics } from "../sim/types";
 import { runMatch } from "./match";
 import type { MatchConfig } from "./config";
@@ -24,23 +23,17 @@ const INITIAL_METRICS: FlightMetrics = {
   stalled: false,
 };
 
-// A forward-looking camera on the nose: 18 m ahead, boresight down the nose (-Z), 60° horizontal
-// FOV, sees out to 8 km within a ~40° cone. Its percept is recorded for the viewer; the pilot does
-// not yet fly on it. A fresh instance per aircraft (devices are mutable config).
-export function noseCamera(): SensorDevice {
-  return {
-    id: "nose-cam",
-    kind: "sensor",
-    modality: "camera",
-    pose: { offset: vec3(0, 0, -18), rotation: quatIdentity() },
-    for: { halfAngleRad: 0.7, maxRangeM: 8_000 },
-    optics: { hFovRad: Math.PI / 3, aspect: 1.6 },
-  };
-}
-
 export function createInitialAircraft(): AircraftState[] {
   const blueVelocity = vec3(112, 2, -118);
   const redVelocity = vec3(-112, 0, 112);
+
+  // Both fly the default airframe; the compiler produces the model + devices (the camera is a part of
+  // it). By construction this is byte-identical to the old DEFAULT_MODEL / noseCamera() literals. A
+  // fresh airframe per ship so the recorded airframes don't share a mutable reference.
+  const blueAirframe = defaultAirframe();
+  const redAirframe = defaultAirframe();
+  const blue = compileAirframe(blueAirframe);
+  const red = compileAirframe(redAirframe);
 
   return [
     {
@@ -54,9 +47,10 @@ export function createInitialAircraft(): AircraftState[] {
       controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.86, trigger: false },
       health: 100,
       weaponCooldown: 1.1,
-      model: DEFAULT_MODEL,
+      model: blue.model,
       metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: 1_080 },
-      devices: [noseCamera()],
+      devices: blue.devices,
+      airframe: blueAirframe,
     },
     {
       id: "red-1",
@@ -69,9 +63,10 @@ export function createInitialAircraft(): AircraftState[] {
       controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.82, trigger: false },
       health: 100,
       weaponCooldown: 0.4,
-      model: DEFAULT_MODEL,
+      model: red.model,
       metrics: { ...INITIAL_METRICS, airspeed: length(redVelocity), altitude: 1_020 },
-      devices: [noseCamera()],
+      devices: red.devices,
+      airframe: redAirframe,
     },
   ];
 }

@@ -1,4 +1,5 @@
 import type {
+  Airframe,
   AircraftSnapshot,
   ControlInput,
   Quaternion,
@@ -33,6 +34,10 @@ export interface AircraftState {
   model: AircraftModel;
   metrics: FlightMetrics;
   devices?: SensorDevice[]; // v0.4.0: mounted sensors (camera, …). Static config, not per-frame state.
+  // v0.5.0: the source airframe this aircraft was compiled from (model + devices above are its output).
+  // Config-time metadata, NOT copied into AircraftSnapshot — runMatch records it onto the replay so the
+  // viewer can render the plane that was built.
+  airframe?: Airframe;
 }
 
 export interface FlightMetrics {

@@ -213,6 +213,71 @@ export const TurnDecisionSchema = z.object({
   percepts: z.array(PerceptSchema).optional(), // v0.4.0: recorded sensor output (camera, …)
 });
 
+// --- aircraft builder: an Airframe is a list of Parts that COMPILE into the flat AircraftModel ---
+// compileAirframe (src/sim/airframe.ts) folds these parts into the 7 scalars the physics reads plus
+// the mounted SensorDevices. The Airframe is recorded on the replay (additive/optional) so the viewer
+// can render the plane you built and a build round-trips. This is the first time a Part serializes,
+// so the shapes live here in Zod (single source); src/sim/airframe.ts imports the inferred types.
+// Numeric fields use finiteNumber: an airframe rides in a JSON replay, and NaN/±Infinity can't.
+
+export const PartPoseSchema = z.object({
+  offset: Vec3Schema, // metres, body frame (forward = -Z)
+  rotation: QuaternionSchema, // mount/boresight rotation vs the body basis
+});
+
+// Serialization mirror of SensorDevice (src/sim/parts.ts). Kept structurally identical; a test parses
+// noseCamera() through it to guard drift. maxRangeM is finite here (a JSON replay can't carry Infinity
+// — model an "unlimited" sensor as a large finite range).
+export const SensorDeviceSchema = z.object({
+  id: z.string(),
+  kind: z.literal("sensor"),
+  modality: z.enum(["camera", "radar", "ir"]),
+  pose: PartPoseSchema,
+  for: z.object({ halfAngleRad: finiteNumber, maxRangeM: finiteNumber }),
+  optics: z.object({ hFovRad: finiteNumber, aspect: finiteNumber }).optional(),
+});
+
+export const FuselagePartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("fuselage"),
+  pose: PartPoseSchema,
+  dims: z.object({ length: finiteNumber, width: finiteNumber, height: finiteNumber }), // metres
+  massKg: finiteNumber,
+});
+
+export const WingPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("wing"),
+  pose: PartPoseSchema,
+  planform: z.object({ span: finiteNumber, chord: finiteNumber }), // area = span * chord (rectangular)
+  massKg: finiteNumber,
+  // A moving control surface on this wing + the axis it drives; area (m²) becomes control authority
+  // (→ a max rate). Omit for a plain lifting surface. A "yaw" surface is vertical: it drives yaw but
+  // contributes no lift area.
+  control: z.object({ axis: z.enum(["roll", "pitch", "yaw"]), area: finiteNumber }).optional(),
+});
+
+export const EnginePartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("engine"),
+  pose: PartPoseSchema,
+  thrustN: finiteNumber,
+  massKg: finiteNumber,
+  dims: z.object({ radius: finiteNumber, length: finiteNumber }), // mesh-only nacelle size
+});
+
+export const PartSchema = z.discriminatedUnion("kind", [
+  FuselagePartSchema,
+  WingPartSchema,
+  EnginePartSchema,
+  SensorDeviceSchema,
+]);
+
+export const AirframeSchema = z.object({
+  id: z.string(),
+  parts: z.array(PartSchema),
+});
+
 export const MatchReplaySchema = z.object({
   id: z.string(),
   turnDuration: z.number(),
@@ -223,6 +288,7 @@ export const MatchReplaySchema = z.object({
   agents: z.array(AgentMetaSchema).optional(),
   decisions: z.array(TurnDecisionSchema).optional(),
   outcome: MatchOutcomeSchema.optional(),
+  airframes: z.record(z.string(), AirframeSchema).optional(), // keyed by aircraft id; the plane each flew
 });
 
 // One entry per recorded match in the browser manifest (public/matches/index.json).
@@ -261,6 +327,12 @@ export type Usage = z.infer<typeof UsageSchema>;
 export type PerceptContact = z.infer<typeof PerceptContactSchema>;
 export type Percept = z.infer<typeof PerceptSchema>;
 export type Competence = z.infer<typeof CompetenceSchema>;
+export type PartPose = z.infer<typeof PartPoseSchema>;
+export type FuselagePart = z.infer<typeof FuselagePartSchema>;
+export type WingPart = z.infer<typeof WingPartSchema>;
+export type EnginePart = z.infer<typeof EnginePartSchema>;
+export type Part = z.infer<typeof PartSchema>;
+export type Airframe = z.infer<typeof AirframeSchema>;
 
 export function clampControlInput(input: ControlInput): ControlInput {
   const clampSigned = (value: number) => Math.max(-1, Math.min(1, value));

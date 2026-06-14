@@ -6,6 +6,7 @@ import {
   MatchReplaySchema,
   type Action,
   type AgentMeta,
+  type Airframe,
   type ControlInput,
   type MatchReplay,
   type Observation,
@@ -149,6 +150,14 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
   const outcome = config.evaluator.evaluate(aircraft, frames, decisions, turnsRun);
   const agents: AgentMeta[] = Object.values(config.agents).map((entry) => entry.meta);
 
+  // Record the airframe each aircraft flew (config metadata, not per-frame state) so the viewer can
+  // render the plane that was built. Omitted entirely when no aircraft carries one (keeps legacy-shaped
+  // replays clean and the field optional).
+  const airframes: Record<string, Airframe> = {};
+  for (const ship of aircraft) {
+    if (ship.airframe) airframes[ship.id] = ship.airframe;
+  }
+
   return MatchReplaySchema.parse({
     id: config.id,
     schemaVersion: 2,
@@ -158,5 +167,6 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
     agents,
     decisions,
     outcome,
+    ...(Object.keys(airframes).length > 0 ? { airframes } : {}),
   });
 }
