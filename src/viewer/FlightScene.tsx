@@ -1,8 +1,10 @@
-import { Line, OrbitControls } from "@react-three/drei";
+import { Line, OrbitControls, Sky } from "@react-three/drei";
 import { useFrame, useThree } from "@react-three/fiber";
 import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import * as THREE from "three";
-import type { AircraftSnapshot, MatchReplay, ReplayFrame, Vec3 } from "../protocol/schema";
+import type { AircraftSnapshot, MatchReplay, Part, ReplayFrame, Vec3 } from "../protocol/schema";
+import { defaultAirframe } from "../sim/airframe";
+import { PartMeshes } from "./airframeMesh";
 import type { PlaybackClock } from "./usePlayback";
 
 export type CameraMode = "orbit" | "cabin";
@@ -31,17 +33,21 @@ export function FlightScene({
   // render frame so they glide between recorded states instead of snapping per tick.
   const shipRefs = useRef<Record<string, THREE.Group | null>>({});
   const roster = replay.frames[0].aircraft;
+  // The plane each aircraft flew. Legacy replays (no airframes) fall back to the default so they still
+  // render a recognizable jet rather than nothing.
+  const fallbackParts = useMemo(() => defaultAirframe().parts, []);
 
   return (
     <>
-      <color attach="background" args={["#0b1116"]} />
-      <fog attach="fog" args={["#0b1116", 12, 64]} />
-      <ambientLight intensity={0.35} />
-      <hemisphereLight args={["#c8eefb", "#2a2216", 1.8]} />
+      <color attach="background" args={["#aacbe6"]} />
+      <fog attach="fog" args={["#c4dcef", 26, 130]} />
+      <Sky distance={450000} sunPosition={[12, 22, 8]} turbidity={5} rayleigh={1.6} />
+      <ambientLight intensity={0.5} />
+      <hemisphereLight args={["#dff0ff", "#5a6b4a", 1.4]} />
       <directionalLight
         castShadow
         position={[12, 22, 8]}
-        intensity={3.2}
+        intensity={2.6}
         shadow-mapSize-width={1024}
         shadow-mapSize-height={1024}
       />
@@ -69,7 +75,16 @@ export function FlightScene({
 
       {roster.map((entry) => {
         const ship = frame.aircraft.find((candidate) => candidate.id === entry.id) ?? entry;
-        return <AircraftMesh key={entry.id} ship={ship} shipId={entry.id} refMap={shipRefs} />;
+        const parts = replay.airframes?.[entry.id]?.parts ?? fallbackParts;
+        return (
+          <AircraftMesh
+            key={entry.id}
+            ship={ship}
+            shipId={entry.id}
+            parts={parts}
+            refMap={shipRefs}
+          />
+        );
       })}
 
       {frame.aircraft.map((ship) => (
@@ -95,13 +110,12 @@ export function FlightScene({
 function Terrain() {
   return (
     <group>
+      {/* Larger ground so it reaches the fog horizon instead of reading as a floating island. */}
       <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.02, 0]}>
-        <planeGeometry args={[96, 96]} />
-        <meshStandardMaterial color="#18221f" roughness={0.92} metalness={0.04} />
+        <planeGeometry args={[240, 240]} />
+        <meshStandardMaterial color="#4b6b48" roughness={0.95} metalness={0.02} />
       </mesh>
-      <gridHelper args={[96, 48, "#526b70", "#223238"]} position={[0, 0, 0]} />
-      <Line points={[[-48, 10, 0], [48, 10, 0]]} color="#315b6a" transparent opacity={0.4} />
-      <Line points={[[0, 10, -48], [0, 10, 48]]} color="#315b6a" transparent opacity={0.4} />
+      <gridHelper args={[240, 96, "#6f8f74", "#3f5a42"]} position={[0, 0, 0]} />
     </group>
   );
 }
@@ -261,10 +275,12 @@ function SceneDriver({
 function AircraftMesh({
   ship,
   shipId,
+  parts,
   refMap,
 }: {
   ship: AircraftSnapshot;
   shipId: string;
+  parts: Part[];
   refMap: MutableRefObject<Record<string, THREE.Group | null>>;
 }) {
   // Stable ref callback so the persistent group isn't torn down on per-tick re-renders.
@@ -275,34 +291,12 @@ function AircraftMesh({
     [refMap, shipId],
   );
 
-  // Position/orientation are driven imperatively by SceneDriver; only the discrete visual props
-  // (colour, death scale, stall tint) come from the current frame's snapshot.
+  // Position/orientation are driven imperatively by SceneDriver; the geometry comes from the airframe
+  // parts (the plane you built) and the discrete visual props (colour, death scale, stall tint) from
+  // the current frame's snapshot.
   return (
     <group ref={register} scale={ship.health <= 0 ? 1.05 : 1.42}>
-      <mesh castShadow>
-        <boxGeometry args={[0.12, 0.12, 0.86]} />
-        <meshStandardMaterial color={ship.color} roughness={0.44} metalness={0.25} />
-      </mesh>
-      <mesh castShadow position={[0, 0, -0.52]} rotation={[Math.PI / 2, 0, 0]}>
-        <coneGeometry args={[0.12, 0.26, 16]} />
-        <meshStandardMaterial color="#f4fbff" roughness={0.28} metalness={0.18} />
-      </mesh>
-      <mesh castShadow position={[0, 0, 0.03]}>
-        <boxGeometry args={[1.06, 0.035, 0.18]} />
-        <meshStandardMaterial color={ship.color} roughness={0.5} metalness={0.18} />
-      </mesh>
-      <mesh castShadow position={[0, 0.06, 0.38]}>
-        <boxGeometry args={[0.42, 0.04, 0.16]} />
-        <meshStandardMaterial color="#dce6e9" roughness={0.36} metalness={0.22} />
-      </mesh>
-      <mesh castShadow position={[0, 0.12, 0.3]}>
-        <boxGeometry args={[0.08, 0.36, 0.17]} />
-        <meshStandardMaterial color={ship.color} roughness={0.42} metalness={0.16} />
-      </mesh>
-      <mesh>
-        <sphereGeometry args={[0.12, 16, 16]} />
-        <meshBasicMaterial color={ship.stalled ? "#f2c94c" : ship.color} transparent opacity={0.7} />
-      </mesh>
+      <PartMeshes parts={parts} color={ship.color} stalled={ship.stalled} />
     </group>
   );
 }
