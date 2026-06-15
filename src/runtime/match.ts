@@ -7,13 +7,22 @@ import {
   type Action,
   type AgentMeta,
   type Airframe,
+  type BodyTickTrace,
   type ControlInput,
   type MatchReplay,
   type Observation,
+  type PilotIntentAction,
   type ReplayEvent,
   type ReplayFrame,
   type TurnDecision,
 } from "../protocol/schema";
+import {
+  createBodyRuntimeState,
+  finishBodyTick,
+  runBodyTick,
+  type BodyRuntimeState,
+  type PendingBodyTick,
+} from "../body/runtime";
 import { stepSimulation } from "../sim/flight";
 import { toSnapshot, type AircraftState } from "../sim/types";
 import type { AgentEntry, MatchConfig } from "./config";
@@ -39,6 +48,10 @@ interface DecisionOutcome {
   rationale?: string;
   usage?: TurnDecision["usage"];
   source: TurnDecision["source"];
+}
+
+function isPilotIntentAction(action: Action | undefined): action is PilotIntentAction {
+  return action?.kind === "pilot-intent";
 }
 
 // Race the controller against its latency budget; abort + fall back on timeout or throw.
@@ -83,6 +96,8 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
   const stepsPerTurn = Math.round(config.turnDuration / config.frameDt);
   const frames: ReplayFrame[] = [];
   const decisions: TurnDecision[] = [];
+  const bodyTicks: BodyTickTrace[] = [];
+  const bodyStates: Record<string, BodyRuntimeState> = {};
   let time = 0;
   let frameIndex = 0;
   let turnsRun = 0;
@@ -133,12 +148,36 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
     // the evolving state (raw-stick returns a constant, identical to holding the stick).
     for (let s = 0; s < stepsPerTurn; s += 1) {
       const controlsById: Record<string, ControlInput> = {};
+      const pendingBodyTicks: Record<string, PendingBodyTick> = {};
       for (const ship of aircraft) {
         const action = actionsById[ship.id];
-        if (action) controlsById[ship.id] = adapterFor(action.kind).controlFor(action, ship);
+        const entry = config.agents[ship.id];
+        if (entry?.body && isPilotIntentAction(action)) {
+          bodyStates[ship.id] ??= createBodyRuntimeState(ship.controls);
+          const pending = await runBodyTick({
+            config: entry.body,
+            state: bodyStates[ship.id],
+            turn,
+            agentId: ship.id,
+            time,
+            dt: config.frameDt,
+            self: ship,
+            aircraft,
+            pilotIntent: action,
+          });
+          controlsById[ship.id] = pending.controlInput;
+          pendingBodyTicks[ship.id] = pending;
+        } else if (action) {
+          controlsById[ship.id] = adapterFor(action.kind).controlFor(action, ship);
+        }
       }
       const result = stepSimulation(aircraft, controlsById, config.frameDt);
       time += config.frameDt;
+      for (const [agentId, pending] of Object.entries(pendingBodyTicks)) {
+        const ship = result.aircraft.find((candidate) => candidate.id === agentId);
+        const state = bodyStates[agentId];
+        if (ship && state) bodyTicks.push(finishBodyTick(pending, state, ship));
+      }
       frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events));
       frameIndex += 1;
     }
@@ -159,12 +198,13 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
 
   return MatchReplaySchema.parse({
     id: config.id,
-    schemaVersion: 3,
+    schemaVersion: bodyTicks.length > 0 ? 4 : 3,
     turnDuration: config.turnDuration,
     frameDt: config.frameDt,
     frames,
     agents,
     decisions,
+    ...(bodyTicks.length > 0 ? { bodyTicks } : {}),
     outcome,
     ...(Object.keys(airframes).length > 0 ? { airframes } : {}),
   });

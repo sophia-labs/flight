@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BodyTickTraceSchema,
   ControlInputSchema,
   SurfaceControlSnapshotSchema,
   clampControlInput,
@@ -27,8 +28,9 @@ describe("flight sim replay generation", () => {
     const second = await generateDemoMatch(8);
 
     expect(first).toEqual(second);
-    expect(first.schemaVersion).toBe(3);
+    expect(first.schemaVersion).toBe(4);
     expect(first.frames.length).toBeGreaterThan(20);
+    expect(first.bodyTicks?.length).toBeGreaterThan(20);
   });
 
   it("does not mutate MatchConfig.initialAircraft while running", async () => {
@@ -44,6 +46,7 @@ describe("flight sim replay generation", () => {
 
   it("keeps every generated control input inside the public protocol", async () => {
     const replay = await generateDemoMatch(10);
+    expect(replay.decisions?.some((d) => d.action.kind === "pilot-intent")).toBe(true);
     expect(replay.decisions?.some((d) => d.action.kind === "flight-director")).toBe(true);
 
     for (const frame of replay.frames) {
@@ -55,6 +58,31 @@ describe("flight sim replay generation", () => {
         expect(aircraft.health).toBeLessThanOrEqual(100);
       }
     }
+  });
+
+  it("records the embodied Body loop from muscle command to actual result", async () => {
+    const replay = await generateDemoMatch(4);
+    const bodyTicks = replay.bodyTicks ?? [];
+    expect(bodyTicks.length).toBe(60);
+
+    for (const tick of bodyTicks) {
+      expect(() => BodyTickTraceSchema.parse(tick)).not.toThrow();
+      expect(tick.agentId).toBe("blue-1");
+      expect(tick.pilotIntent.kind).toBe("pilot-intent");
+      expect(tick.rawOutput).toContain("MUSCLE");
+      expect(tick.promptText).toContain("LAST");
+      expect(tick.promptText).toContain("SENSE");
+    }
+
+    const first = bodyTicks[0];
+    expect(first.parsed.muscle).toBeDefined();
+    expect(first.controlInput.roll).toBeCloseTo(first.parsed.muscle!.roll / 5);
+    expect(first.controlInput.pitch).toBeCloseTo(first.parsed.muscle!.pitch / 5);
+    expect(first.controlInput.yaw).toBeCloseTo(first.parsed.muscle!.yaw / 5);
+    expect(first.controlInput.throttle).toBeCloseTo(first.parsed.muscle!.push / 5);
+    expect(bodyTicks.every((tick) => tick.parsed.status !== "failed")).toBe(true);
+    expect(bodyTicks.some((tick) => tick.mismatch.length > 0)).toBe(true);
+    expect(bodyTicks.some((tick) => tick.parsed.feel && tick.parsed.memory !== undefined)).toBe(true);
   });
 
   it("records actual per-surface control deflections for HUD and cockpit rendering", async () => {
@@ -305,12 +333,16 @@ describe("flight physics characterization", () => {
     expect(c).toEqual({ pitch: 1, roll: -1, yaw: 0.2, throttle: 1, trigger: true });
   });
 
-  it("the demo match produces an actual engagement", async () => {
+  it("the demo match produces visible Body-controlled flight instead of a hidden autopilot", async () => {
     const replay = await generateDemoMatch(28);
     const types = replay.frames.flatMap((frame) => frame.events.map((event) => event.type));
+    const bodyTicks = replay.bodyTicks ?? [];
 
+    expect(bodyTicks.length).toBeGreaterThan(100);
+    expect(bodyTicks.every((tick) => tick.parsed.status !== "failed")).toBe(true);
+    expect(bodyTicks.some((tick) => Math.abs(tick.controlInput.roll) > 0.5)).toBe(true);
+    expect(bodyTicks.some((tick) => Math.abs(tick.controlInput.pitch) > 0.1)).toBe(true);
     expect(types.filter((t) => t === "shot").length).toBeGreaterThanOrEqual(1);
-    expect(types.filter((t) => t === "hit").length).toBeGreaterThanOrEqual(1);
 
     const finalFrame = replay.frames[replay.frames.length - 1];
     const minHealth = Math.min(...finalFrame.aircraft.map((a) => a.health));

@@ -87,6 +87,11 @@ test("shows actual surface telemetry in cabin view", async ({ page }) => {
   );
   await page.goto("/");
 
+  const bodyAudit = page.getByLabel("Body audit");
+  await expect(bodyAudit).toBeVisible();
+  await expect(bodyAudit.getByText("Body Loop")).toBeVisible();
+  await expect(bodyAudit.getByText("Muscle")).toBeVisible();
+
   await page.getByRole("button", { name: "Cabin" }).click();
   const hud = page.getByLabel("Control surface HUD");
   await expect(hud).toBeVisible();

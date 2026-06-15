@@ -14,6 +14,7 @@ import {
   sub,
   vec3,
 } from "./math";
+import { samplePropulsion } from "./propulsion";
 import { surfaceControlSnapshot, surfaceEffectiveDeflectionRad } from "./types";
 import type {
   AeroSurface,
@@ -219,14 +220,28 @@ function stepAircraft(
   }
 
   if (commandedThrustN > 0) {
-    if (model.thrustPoints.length > 0) {
-      for (const point of model.thrustPoints) {
-        const force = scale(rotateVec(aircraft.orientation, point.localForward), point.maxThrustN * thrustSetting);
-        const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
-        totalForce = add(totalForce, force);
-        totalTorque = add(totalTorque, cross(rWorld, force));
-      }
-    } else {
+    let appliedThrustPoint = false;
+    for (const point of model.propulsions) {
+      const localForward = rotateVec(aircraft.orientation, point.localForward);
+      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+      const diskVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
+      const axialAirspeed = Math.max(0, dot(diskVelocity, localForward));
+      const sample = samplePropulsion(point, axialAirspeed, density, thrustSetting);
+      const force = scale(localForward, sample.thrustN);
+      totalForce = add(totalForce, force);
+      totalTorque = add(totalTorque, cross(rWorld, force));
+      appliedThrustPoint = true;
+    }
+
+    for (const point of model.thrustPoints) {
+      const force = scale(rotateVec(aircraft.orientation, point.localForward), point.maxThrustN * thrustSetting);
+      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+      totalForce = add(totalForce, force);
+      totalTorque = add(totalTorque, cross(rWorld, force));
+      appliedThrustPoint = true;
+    }
+
+    if (!appliedThrustPoint) {
       totalForce = add(totalForce, scale(basis.forward, commandedThrustN));
     }
   }

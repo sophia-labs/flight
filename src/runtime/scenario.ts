@@ -1,8 +1,10 @@
 import {
   defensiveController,
-  pursuitController,
   pursuitFallback,
 } from "../agent/controllers/scripted";
+import { bodyPilotController } from "../agent/controllers/bodyPilot";
+import { fixedWingBodyManifest } from "../body/manifest";
+import { scriptedFixedWingBodyModel } from "../body/model";
 import { perfectSensor } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
 import type { Airframe, MatchReplay } from "../protocol/schema";
@@ -92,8 +94,17 @@ function scriptedConfig(initialAircraft: AircraftState[], turnCount: number): Ma
     fallback: pursuitFallback,
     agents: {
       "blue-1": {
-        meta: { id: "blue-1", kind: "scripted", label: "pursuit" },
-        controller: pursuitController(0.82),
+        meta: {
+          id: "blue-1",
+          kind: "scripted",
+          label: "embodied body pilot",
+          config: { bodyId: fixedWingBodyManifest.bodyId, bodyTickDt: fixedWingBodyManifest.bodyTickDt },
+        },
+        controller: bodyPilotController(0.78),
+        body: {
+          manifest: fixedWingBodyManifest,
+          model: scriptedFixedWingBodyModel,
+        },
       },
       "red-1": {
         meta: { id: "red-1", kind: "scripted", label: "defensive" },

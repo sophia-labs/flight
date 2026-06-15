@@ -20,6 +20,10 @@ export function MatchStats({ replay, pilotId }: { replay: MatchReplay; pilotId: 
     ? pilotDecisions.filter((d) => d.source === "fallback").length / pilotDecisions.length
     : 0;
   const pilot = replay.agents?.find((a) => a.id === pilotId);
+  const bodyTicks = (replay.bodyTicks ?? []).filter((tick) => tick.agentId === pilotId);
+  const bodyOkRate = bodyTicks.length
+    ? bodyTicks.filter((tick) => tick.parsed.status !== "failed").length / bodyTicks.length
+    : 0;
 
   return (
     <section className="panel" aria-label="Match stats">
@@ -32,6 +36,8 @@ export function MatchStats({ replay, pilotId }: { replay: MatchReplay; pilotId: 
         <Metric label="Turns" value={outcome ? String(outcome.turnsRun) : "—"} />
         <Metric label="Cost" value={cost > 0 ? `$${cost.toFixed(4)}` : "—"} />
         <Metric label="Fallback" value={pct(fallbackRate)} />
+        {bodyTicks.length > 0 ? <Metric label="Body ticks" value={String(bodyTicks.length)} /> : null}
+        {bodyTicks.length > 0 ? <Metric label="Body parse" value={pct(bodyOkRate)} /> : null}
       </div>
       {competence ? (
         <div className="metrics">

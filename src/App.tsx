@@ -23,6 +23,7 @@ import {
 } from "./protocol/schema";
 import { generateDemoMatch } from "./runtime/scenario";
 import { ControlsPanel } from "./viewer/ControlsPanel";
+import { BodyPanel } from "./viewer/BodyPanel";
 import { FlightScene, type CameraMode } from "./viewer/FlightScene";
 import { HangarScreen } from "./viewer/HangarScreen";
 import { MatchBrowser } from "./viewer/MatchBrowser";
@@ -188,7 +189,7 @@ export function App() {
 
         {captionsOn && caption ? (
           <div className="subtitle" key={caption}>
-            <span className="subtitle-speaker">Claude</span>
+            <span className="subtitle-speaker">Pilot</span>
             {caption}
           </div>
         ) : null}
@@ -306,6 +307,7 @@ export function App() {
         />
 
         {hasBrowser ? <MatchStats replay={replay} pilotId={pilotId} /> : null}
+        <BodyPanel replay={replay} frame={frame} pilotId={pilotId} />
         <StatusPanel frame={frame} />
         <ControlsPanel frame={frame} />
       </aside>

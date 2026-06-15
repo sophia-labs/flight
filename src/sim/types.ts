@@ -2,6 +2,7 @@ import type {
   Airframe,
   AircraftSnapshot,
   ControlInput,
+  PropCurvePoint,
   Quaternion,
   ReplayEvent,
   SurfaceControlSnapshot,
@@ -52,6 +53,22 @@ export interface ThrustPoint {
   localForward: Vec3;
 }
 
+export interface PropulsionPoint {
+  id: string;
+  engineId: string;
+  propId: string;
+  maxPowerW: number;
+  idleRpm: number;
+  maxRpm: number;
+  diameterM: number;
+  pitchM: number;
+  bladeCount: number;
+  mode: "fixed-pitch" | "constant-speed";
+  curve: PropCurvePoint[];
+  localOffset: Vec3;
+  localForward: Vec3;
+}
+
 export interface AircraftModel {
   // --- builder summary scalars and compatibility ratings ---
   massKg: number;
@@ -71,6 +88,7 @@ export interface AircraftModel {
   aspectRatio: number; // span²/area of the lifting surfaces; drives induced drag
   aeroSurfaces: AeroSurface[];
   thrustPoints: ThrustPoint[];
+  propulsions: PropulsionPoint[];
   controlAuthority: Record<ControlAxis, number>;
   parasiteDragAreaM2: number;
   dryMassKg: number; // massKg − fuelCapacityKg (structure + payload, no fuel)

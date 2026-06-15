@@ -1,7 +1,8 @@
 import type { Airframe, Part, Vec3 } from "../protocol/schema";
 import { add, clamp, normalize, quatIdentity, rotateVec, scale, vec3 } from "./math";
 import type { SensorDevice } from "./parts";
-import type { AeroSurface, AircraftModel, ControlAxis, Inertia, ThrustPoint } from "./types";
+import { DEFAULT_PROP_CURVE, estimatePropulsionPeakThrust } from "./propulsion";
+import type { AeroSurface, AircraftModel, ControlAxis, Inertia, PropulsionPoint, ThrustPoint } from "./types";
 
 // The aircraft builder's keystone: a PURE fold from a parts list to the physical AircraftModel that
 // stepAircraft consumes. Wings become aerodynamic surfaces with local axes and optional moving control
@@ -258,6 +259,69 @@ function thrustPoint(part: Extract<Part, { kind: "engine" }>): ThrustPoint {
   };
 }
 
+function propulsionPoint(
+  engine: Extract<Part, { kind: "engine" }>,
+  prop: Extract<Part, { kind: "prop" }>,
+): PropulsionPoint {
+  return {
+    id: `${engine.id}:${prop.id}`,
+    engineId: engine.id,
+    propId: prop.id,
+    maxPowerW: engine.maxPowerW ?? Math.max(engine.thrustN * 36, 1),
+    idleRpm: engine.idleRpm ?? 650,
+    maxRpm: engine.maxRpm ?? 2850,
+    diameterM: prop.radius * 2,
+    pitchM: prop.pitchM,
+    bladeCount: prop.bladeCount,
+    mode: prop.mode,
+    curve: prop.curve ?? DEFAULT_PROP_CURVE,
+    localOffset: prop.pose.offset,
+    localForward: rotateVec(prop.pose.rotation, vec3(0, 0, -1)),
+  };
+}
+
+function pairPropulsions(parts: Part[]): {
+  propulsions: PropulsionPoint[];
+  staticEngines: Extract<Part, { kind: "engine" }>[];
+} {
+  const engines = parts.filter((part): part is Extract<Part, { kind: "engine" }> => part.kind === "engine");
+  const props = parts.filter((part): part is Extract<Part, { kind: "prop" }> => part.kind === "prop");
+  const usedProps = new Set<string>();
+  const propulsions: PropulsionPoint[] = [];
+  const staticEngines: Extract<Part, { kind: "engine" }>[] = [];
+
+  for (const engine of engines) {
+    if (!engine.maxPowerW) {
+      staticEngines.push(engine);
+      continue;
+    }
+    const candidates = props
+      .filter((prop) => !usedProps.has(prop.id))
+      .map((prop) => ({
+        prop,
+        distance: partDistanceSquared(engine.pose.offset, prop.pose.offset),
+        forwardBias: prop.pose.offset.z <= engine.pose.offset.z + engine.dims.length * 0.3 ? 0 : 100,
+      }))
+      .sort((a, b) => a.distance + a.forwardBias - (b.distance + b.forwardBias));
+    const match = candidates[0]?.prop;
+    if (!match) {
+      staticEngines.push(engine);
+      continue;
+    }
+    usedProps.add(match.id);
+    propulsions.push(propulsionPoint(engine, match));
+  }
+
+  return { propulsions, staticEngines };
+}
+
+function partDistanceSquared(a: Vec3, b: Vec3): number {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  const dz = a.z - b.z;
+  return dx * dx + dy * dy + dz * dz;
+}
+
 // A massive part's mass, body-frame position, and bounding-box extents — the inputs to CoM + box
 // inertia. Sensors are treated as massless structure and contribute nothing. (Tanks: fuel milestone.)
 function partBox(part: Part): PartBox | null {
@@ -272,6 +336,38 @@ function partBox(part: Part): PartBox | null {
     }
     case "engine":
       return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
+    case "prop":
+      return {
+        mass: part.massKg,
+        offset: part.pose.offset,
+        dimX: part.radius * 2,
+        dimY: part.radius * 2,
+        dimZ: Math.max(0.08, part.radius * 0.08),
+      };
+    case "canopy":
+      return {
+        mass: part.massKg,
+        offset: part.pose.offset,
+        dimX: part.dims.width,
+        dimY: part.dims.height,
+        dimZ: part.dims.length,
+      };
+    case "gear":
+      return {
+        mass: part.massKg,
+        offset: part.pose.offset,
+        dimX: Math.max(part.trackM, part.wheelRadiusM * 2),
+        dimY: part.heightM,
+        dimZ: part.wheelRadiusM * 2,
+      };
+    case "weapon":
+      return {
+        mass: part.massKg,
+        offset: part.pose.offset,
+        dimX: part.dims.width * part.count,
+        dimY: part.dims.height,
+        dimZ: part.dims.length,
+      };
     case "tank":
       // Full (wet) mass for CoM + inertia; inertia is held at the wet value as fuel burns (a stated cut).
       return { mass: part.dryMassKg + part.fuelKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
@@ -305,6 +401,7 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   const devices: SensorDevice[] = [];
   const aeroSurfaces: AeroSurface[] = [];
   const thrustPoints: ThrustPoint[] = [];
+  const propulsions: PropulsionPoint[] = [];
 
   // Pass 1: scalar sums, lift geometry, and mass-weighted CoM accumulation.
   let comMassX = 0;
@@ -336,9 +433,23 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
         break;
       case "engine":
         massKg += part.massKg;
-        maxThrustN += part.thrustN;
-        thrustPoints.push(thrustPoint(part));
         parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.25;
+        break;
+      case "prop":
+        massKg += part.massKg;
+        parasiteDragAreaM2 += part.radius * part.radius * 0.012;
+        break;
+      case "canopy":
+        massKg += part.massKg;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.08;
+        break;
+      case "gear":
+        massKg += part.massKg;
+        parasiteDragAreaM2 += part.style === "skid" ? part.trackM * 0.015 : part.wheelRadiusM * part.trackM * 0.04;
+        break;
+      case "weapon":
+        massKg += part.massKg;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * Math.max(1, part.count) * 0.08;
         break;
       case "tank":
         massKg += part.dryMassKg + part.fuelKg; // full mass; the fuel portion is burnable
@@ -352,6 +463,16 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   }
 
   const com: Vec3 = massKg > 0 ? vec3(comMassX / massKg, comMassY / massKg, comMassZ / massKg) : vec3(0, 0, 0);
+
+  const paired = pairPropulsions(airframe.parts);
+  propulsions.push(...paired.propulsions);
+  for (const point of paired.propulsions) {
+    maxThrustN += estimatePropulsionPeakThrust(point);
+  }
+  for (const engine of paired.staticEngines) {
+    maxThrustN += engine.thrustN;
+    thrustPoints.push(thrustPoint(engine));
+  }
 
   // Pass 2: inertia about the CoM. Floor each axis so a degenerate (massless) build can't divide by 0.
   const inertia: Inertia = { roll: 0, pitch: 0, yaw: 0 };
@@ -389,6 +510,7 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     aspectRatio,
     aeroSurfaces,
     thrustPoints,
+    propulsions,
     controlAuthority,
     parasiteDragAreaM2,
     dryMassKg: massKg - fuelCapacityKg,
@@ -406,6 +528,7 @@ export interface AirframeReport {
   maxYawRate: number;
   surfaceCount: number;
   thrustPointCount: number;
+  propulsionCount: number;
   controlAuthority: Record<ControlAxis, number>;
   warnings: string[];
 }
@@ -429,7 +552,7 @@ export function airframeReport(model: AircraftModel): AirframeReport {
   if (model.aeroSurfaces.length === 0) {
     warnings.push("no aerodynamic surfaces: the aircraft is ballistic");
   }
-  if (model.thrustPoints.length === 0 && model.maxThrustN > 0) {
+  if (model.thrustPoints.length === 0 && model.propulsions.length === 0 && model.maxThrustN > 0) {
     warnings.push("thrust has no mounted engine point");
   }
   for (const axis of ["roll", "pitch", "yaw"] as const) {
@@ -450,6 +573,7 @@ export function airframeReport(model: AircraftModel): AirframeReport {
     maxYawRate: model.maxYawRate,
     surfaceCount: model.aeroSurfaces.length,
     thrustPointCount: model.thrustPoints.length,
+    propulsionCount: model.propulsions.length,
     controlAuthority: model.controlAuthority,
     warnings,
   };

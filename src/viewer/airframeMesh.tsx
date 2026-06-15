@@ -11,6 +11,10 @@ const ENGINE_COLOR = "#9aa6ad";
 const NOSE_COLOR = "#f4fbff";
 const TANK_COLOR = "#c9a14a";
 const CONTROL_SURFACE_COLOR = "#f4a340";
+const PROP_COLOR = "#1b2328";
+const CANOPY_COLOR = "#8ad8ff";
+const GEAR_COLOR = "#d8dee2";
+const WEAPON_COLOR = "#2b3338";
 const DEG = Math.PI / 180;
 
 function PartMesh({
@@ -83,6 +87,122 @@ function PartMesh({
           <cylinderGeometry args={[radius, radius * 0.85, len, 16]} />
           <meshStandardMaterial color={ENGINE_COLOR} roughness={0.5} metalness={0.55} />
         </mesh>
+      </group>
+    );
+  }
+
+  if (part.kind === "prop") {
+    const radius = part.radius * s;
+    const hubRadius = radius * 0.13;
+    const bladeLength = radius * 0.88;
+    const bladeWidth = Math.max(radius * 0.11, 0.012);
+    const bladeThickness = Math.max(radius * 0.025, 0.004);
+    return (
+      <group position={pos} quaternion={quat}>
+        <mesh castShadow rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[hubRadius, hubRadius * 0.85, bladeThickness * 3, 14]} />
+          <meshStandardMaterial color={ENGINE_COLOR} roughness={0.38} metalness={0.5} />
+        </mesh>
+        {Array.from({ length: part.bladeCount }, (_, i) => {
+          const angle = (i / part.bladeCount) * Math.PI * 2;
+          return (
+            <mesh
+              key={`${part.id}-blade-${i}`}
+              castShadow
+              position={[Math.cos(angle) * bladeLength * 0.42, Math.sin(angle) * bladeLength * 0.42, 0]}
+              rotation={[0, 0, angle]}
+            >
+              <boxGeometry args={[bladeLength, bladeWidth, bladeThickness]} />
+              <meshStandardMaterial color={PROP_COLOR} roughness={0.46} metalness={0.18} />
+            </mesh>
+          );
+        })}
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <cylinderGeometry args={[radius, radius, 0.003, 48]} />
+          <meshBasicMaterial color="#d9eef6" transparent opacity={0.13} depthWrite={false} />
+        </mesh>
+      </group>
+    );
+  }
+
+  if (part.kind === "canopy") {
+    const w = part.dims.width * s;
+    const h = part.dims.height * s;
+    const l = part.dims.length * s;
+    const frameCount = part.style === "greenhouse" ? 5 : part.style === "framed" ? 3 : 1;
+    return (
+      <group position={pos} quaternion={quat}>
+        <mesh castShadow>
+          <boxGeometry args={[w, h, l]} />
+          <meshStandardMaterial
+            color={CANOPY_COLOR}
+            transparent
+            opacity={0.48}
+            roughness={0.08}
+            metalness={0.08}
+          />
+        </mesh>
+        {Array.from({ length: frameCount }, (_, i) => {
+          const z = frameCount === 1 ? 0 : -l * 0.38 + (i / (frameCount - 1)) * l * 0.76;
+          return (
+            <mesh key={`${part.id}-frame-${i}`} position={[0, 0, z]}>
+              <boxGeometry args={[w * 1.08, h * 0.12, Math.max(l * 0.035, 0.006)]} />
+              <meshStandardMaterial color={NOSE_COLOR} roughness={0.36} metalness={0.32} />
+            </mesh>
+          );
+        })}
+      </group>
+    );
+  }
+
+  if (part.kind === "gear") {
+    const track = part.trackM * s;
+    const height = part.heightM * s;
+    const wheelRadius = part.wheelRadiusM * s;
+    const stance: number[] = part.style === "skid" ? [-0.45, 0.45] : [-0.5, 0.5];
+    return (
+      <group position={pos} quaternion={quat}>
+        {stance.map((side) => (
+          <group key={`${part.id}-${side}`} position={[side * track, -height * 0.45, 0]}>
+            <mesh castShadow>
+              <boxGeometry args={[Math.max(wheelRadius * 0.18, 0.005), height, Math.max(wheelRadius * 0.18, 0.005)]} />
+              <meshStandardMaterial color={GEAR_COLOR} roughness={0.5} metalness={0.45} />
+            </mesh>
+            {part.style === "skid" ? (
+              <mesh castShadow position={[0, -height * 0.52, 0.08]}>
+                <boxGeometry args={[wheelRadius * 0.35, wheelRadius * 0.18, wheelRadius * 2.8]} />
+                <meshStandardMaterial color={PROP_COLOR} roughness={0.62} metalness={0.12} />
+              </mesh>
+            ) : (
+              <mesh castShadow position={[0, -height * 0.55, 0]} rotation={[0, 0, Math.PI / 2]}>
+                <cylinderGeometry args={[wheelRadius, wheelRadius, Math.max(wheelRadius * 0.42, 0.012), 16]} />
+                <meshStandardMaterial color={PROP_COLOR} roughness={0.68} metalness={0.12} />
+              </mesh>
+            )}
+          </group>
+        ))}
+      </group>
+    );
+  }
+
+  if (part.kind === "weapon") {
+    const len = part.dims.length * s;
+    const w = part.dims.width * s;
+    const h = part.dims.height * s;
+    const spacing = Math.max(w * 2.2, 0.035);
+    const start = -((part.count - 1) * spacing) / 2;
+    return (
+      <group position={pos} quaternion={quat}>
+        {Array.from({ length: part.count }, (_, i) => (
+          <mesh key={`${part.id}-${i}`} castShadow position={[start + i * spacing, 0, 0]}>
+            <boxGeometry args={[w, h, len]} />
+            <meshStandardMaterial
+              color={part.role === "bomb-rack" || part.role === "rocket-rail" ? TANK_COLOR : WEAPON_COLOR}
+              roughness={0.48}
+              metalness={0.42}
+            />
+          </mesh>
+        ))}
       </group>
     );
   }

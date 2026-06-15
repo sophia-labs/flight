@@ -9,6 +9,7 @@ import {
 } from "../src/sim/airframe";
 import { DEFAULT_MODEL } from "../src/sim/flight";
 import { quatFromAxisAngle, vec3 } from "../src/sim/math";
+import { samplePropulsion } from "../src/sim/propulsion";
 
 describe("airframe compiler", () => {
   it("compiles the default airframe to the calibration baseline + frozen derived rigid-body fields", () => {
@@ -74,6 +75,33 @@ describe("airframe compiler", () => {
     const w = stubby.parts.find((p) => p.id === "main-wing") as WingPart;
     w.planform = { ...w.planform, span: w.planform.span / 2 };
     expect(compileAirframe(stubby).model.wingAreaM2).toBeLessThan(base.wingAreaM2);
+  });
+
+  it("pairs powered engines with propellers and produces speed-sensitive thrust", () => {
+    const powered = defaultAirframe();
+    const engine = powered.parts.find((p) => p.id === "engine");
+    if (!engine || engine.kind !== "engine") throw new Error("default engine missing");
+    engine.maxPowerW = 1_100_000;
+    engine.idleRpm = 650;
+    engine.maxRpm = 2800;
+    powered.parts.push({
+      id: "prop",
+      kind: "prop",
+      pose: { offset: vec3(0, 0, 2.5), rotation: quatFromAxisAngle(vec3(0, 1, 0), 0) },
+      radius: 1.6,
+      pitchM: 2.25,
+      bladeCount: 4,
+      mode: "constant-speed",
+      massKg: 85,
+    });
+
+    const model = compileAirframe(powered).model;
+    expect(model.propulsions).toHaveLength(1);
+    expect(model.thrustPoints).toHaveLength(0);
+    const staticPull = samplePropulsion(model.propulsions[0], 0, 1.225, 1);
+    const fastPull = samplePropulsion(model.propulsions[0], 160, 1.225, 1);
+    expect(staticPull.thrustN).toBeGreaterThan(10_000);
+    expect(fastPull.thrustN).toBeLessThan(staticPull.thrustN);
   });
 
   it("does not invent control authority for a control-surface-free build", () => {

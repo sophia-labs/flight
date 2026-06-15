@@ -1,4 +1,5 @@
 import type { Controller } from "../agent/controller";
+import type { BodyRuntimeConfig } from "../body/runtime";
 import type { SensorModel } from "../agent/observation";
 import type { Evaluator } from "../eval/outcome";
 import type { Action, AgentMeta, Observation } from "../protocol/schema";
@@ -7,6 +8,7 @@ import type { AircraftState } from "../sim/types";
 export interface AgentEntry {
   meta: AgentMeta;
   controller: Controller;
+  body?: BodyRuntimeConfig;
 }
 
 export interface MatchConfig {

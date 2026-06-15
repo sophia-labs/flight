@@ -112,11 +112,23 @@ export const FlightDirectorActionSchema = z.object({
   trigger: z.boolean(),
 });
 
+export const PilotIntentActionSchema = z.object({
+  kind: z.literal("pilot-intent"),
+  goal: z.string(),
+  urgency: z.number().min(0).max(1),
+  riskTolerance: z.number().min(0).max(1),
+  style: z.string(),
+  constraints: z.array(z.string()),
+  attention: z.array(z.string()),
+  trigger: z.boolean(),
+});
+
 // Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
 export const ActionSchema = z.discriminatedUnion("kind", [
   RawStickActionSchema,
   SetpointActionSchema,
   FlightDirectorActionSchema,
+  PilotIntentActionSchema,
 ]);
 
 export const SelfPerceptSchema = z.object({
@@ -226,6 +238,96 @@ export const PerceptSchema = z.object({
   attitude: z.object({ bankDeg: finiteNumber, pitchDeg: finiteNumber }).optional(), // for the horizon overlay
 });
 
+export const BodyMuscleCommandSchema = z.object({
+  roll: z.number().int().min(-5).max(5),
+  pitch: z.number().int().min(-5).max(5),
+  yaw: z.number().int().min(-5).max(5),
+  push: z.number().int().min(0).max(5),
+});
+
+export const BodyToneSchema = z.object({
+  mode: z.enum(["hold", "pulse", "brace", "relax", "reverse"]),
+  intensity: z.number().int().min(0).max(3),
+});
+
+export const BodyExpectationSchema = z.object({
+  roll: z.string(),
+  pitch: z.string(),
+  speed: z.string(),
+  margin: z.string(),
+});
+
+export const BodyActualResultSchema = z.object({
+  roll: z.string(),
+  pitch: z.string(),
+  speed: z.string(),
+  margin: z.string(),
+});
+
+export const BodyPainSchema = z.object({
+  wingBuffet: z.number().int().min(0).max(5),
+  pitchMush: z.number().int().min(0).max(5),
+  overG: z.number().int().min(0).max(5),
+  groundRush: z.number().int().min(0).max(5),
+});
+
+export const BodyAuthoritySchema = z.object({
+  pitch: z.string(),
+  roll: z.string(),
+  yaw: z.string(),
+  thrust: z.string(),
+});
+
+export const BodyProprioceptionSchema = z.object({
+  attitude: z.string(),
+  motion: z.string(),
+  energy: z.string(),
+  stallMargin: z.string(),
+  authority: BodyAuthoritySchema,
+  terrain: z.string(),
+  target: z.string(),
+  pain: BodyPainSchema,
+  affordances: z.array(z.string()),
+  last: z
+    .object({
+      muscle: BodyMuscleCommandSchema.optional(),
+      expect: BodyExpectationSchema.optional(),
+      actual: BodyActualResultSchema.optional(),
+      mismatch: z.array(z.string()),
+    })
+    .optional(),
+});
+
+export const BodyParsedOutputSchema = z.object({
+  status: z.enum(["ok", "clipped", "degraded", "failed"]),
+  muscle: BodyMuscleCommandSchema.optional(),
+  tone: BodyToneSchema.optional(),
+  expect: BodyExpectationSchema.optional(),
+  feel: z.string().optional(),
+  memory: z.string().optional(),
+  errors: z.array(z.string()),
+  clipped: z.boolean(),
+  bodyChatter: z.string().optional(),
+});
+
+export const BodyTickTraceSchema = z.object({
+  turn: z.number().int().nonnegative(),
+  tick: z.number().int().nonnegative(),
+  agentId: z.string(),
+  time: z.number(),
+  dt: z.number(),
+  reason: z.enum(["regular_tick", "pain_interrupt", "invalid_recovery"]),
+  manifestId: z.string(),
+  pilotIntent: PilotIntentActionSchema,
+  proprioception: BodyProprioceptionSchema,
+  promptText: z.string(),
+  rawOutput: z.string(),
+  parsed: BodyParsedOutputSchema,
+  controlInput: ControlInputSchema,
+  actual: BodyActualResultSchema,
+  mismatch: z.array(z.string()),
+});
+
 export const TurnDecisionSchema = z.object({
   turn: z.number().int().nonnegative(),
   agentId: z.string(),
@@ -286,8 +388,60 @@ export const EnginePartSchema = z.object({
   kind: z.literal("engine"),
   pose: PartPoseSchema,
   thrustN: finiteNumber,
+  maxPowerW: finiteNumber.optional(),
+  idleRpm: finiteNumber.optional(),
+  maxRpm: finiteNumber.optional(),
   massKg: finiteNumber,
   dims: z.object({ radius: finiteNumber, length: finiteNumber }), // mesh-only nacelle size
+});
+
+export const PropCurvePointSchema = z.object({
+  j: finiteNumber, // advance ratio V / nD
+  ct: finiteNumber, // thrust coefficient
+  cp: finiteNumber, // power coefficient
+});
+
+export const PropPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("prop"),
+  pose: PartPoseSchema,
+  radius: finiteNumber,
+  pitchM: finiteNumber,
+  bladeCount: z.number().int().min(2).max(6),
+  mode: z.enum(["fixed-pitch", "constant-speed"]),
+  curve: z.array(PropCurvePointSchema).min(2).optional(),
+  massKg: finiteNumber,
+});
+
+export const CanopyPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("canopy"),
+  pose: PartPoseSchema,
+  dims: z.object({ length: finiteNumber, width: finiteNumber, height: finiteNumber }),
+  massKg: finiteNumber,
+  style: z.enum(["razorback", "bubble", "framed", "greenhouse"]),
+});
+
+export const GearPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("gear"),
+  pose: PartPoseSchema,
+  trackM: finiteNumber,
+  heightM: finiteNumber,
+  wheelRadiusM: finiteNumber,
+  massKg: finiteNumber,
+  style: z.enum(["taildragger", "tricycle", "skid"]),
+});
+
+export const WeaponPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("weapon"),
+  pose: PartPoseSchema,
+  count: z.number().int().min(1).max(12),
+  caliberMm: finiteNumber,
+  massKg: finiteNumber,
+  dims: z.object({ length: finiteNumber, width: finiteNumber, height: finiteNumber }),
+  role: z.enum(["machine-gun", "cannon", "rocket-rail", "bomb-rack"]),
 });
 
 export const TankPartSchema = z.object({
@@ -303,6 +457,10 @@ export const PartSchema = z.discriminatedUnion("kind", [
   FuselagePartSchema,
   WingPartSchema,
   EnginePartSchema,
+  PropPartSchema,
+  CanopyPartSchema,
+  GearPartSchema,
+  WeaponPartSchema,
   TankPartSchema,
   SensorDeviceSchema,
 ]);
@@ -318,9 +476,10 @@ export const MatchReplaySchema = z.object({
   frameDt: z.number(),
   frames: z.array(ReplayFrameSchema).min(1),
   // All optional ⇒ v0.1.0 replays still validate and the viewer (reads only `frames`) is unchanged.
-  schemaVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+  schemaVersion: z.union([z.literal(2), z.literal(3), z.literal(4)]).optional(),
   agents: z.array(AgentMetaSchema).optional(),
   decisions: z.array(TurnDecisionSchema).optional(),
+  bodyTicks: z.array(BodyTickTraceSchema).optional(),
   outcome: MatchOutcomeSchema.optional(),
   airframes: z.record(z.string(), AirframeSchema).optional(), // keyed by aircraft id; the plane each flew
 });
@@ -351,6 +510,7 @@ export type StickCommand = z.infer<typeof StickCommandSchema>;
 export type RawStickAction = z.infer<typeof RawStickActionSchema>;
 export type SetpointAction = z.infer<typeof SetpointActionSchema>;
 export type FlightDirectorAction = z.infer<typeof FlightDirectorActionSchema>;
+export type PilotIntentAction = z.infer<typeof PilotIntentActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
 export type ContactPercept = z.infer<typeof ContactPerceptSchema>;
@@ -362,11 +522,25 @@ export type TurnDecision = z.infer<typeof TurnDecisionSchema>;
 export type Usage = z.infer<typeof UsageSchema>;
 export type PerceptContact = z.infer<typeof PerceptContactSchema>;
 export type Percept = z.infer<typeof PerceptSchema>;
+export type BodyMuscleCommand = z.infer<typeof BodyMuscleCommandSchema>;
+export type BodyTone = z.infer<typeof BodyToneSchema>;
+export type BodyExpectation = z.infer<typeof BodyExpectationSchema>;
+export type BodyActualResult = z.infer<typeof BodyActualResultSchema>;
+export type BodyPain = z.infer<typeof BodyPainSchema>;
+export type BodyAuthority = z.infer<typeof BodyAuthoritySchema>;
+export type BodyProprioception = z.infer<typeof BodyProprioceptionSchema>;
+export type BodyParsedOutput = z.infer<typeof BodyParsedOutputSchema>;
+export type BodyTickTrace = z.infer<typeof BodyTickTraceSchema>;
 export type Competence = z.infer<typeof CompetenceSchema>;
 export type PartPose = z.infer<typeof PartPoseSchema>;
 export type FuselagePart = z.infer<typeof FuselagePartSchema>;
 export type WingPart = z.infer<typeof WingPartSchema>;
 export type EnginePart = z.infer<typeof EnginePartSchema>;
+export type PropCurvePoint = z.infer<typeof PropCurvePointSchema>;
+export type PropPart = z.infer<typeof PropPartSchema>;
+export type CanopyPart = z.infer<typeof CanopyPartSchema>;
+export type GearPart = z.infer<typeof GearPartSchema>;
+export type WeaponPart = z.infer<typeof WeaponPartSchema>;
 export type TankPart = z.infer<typeof TankPartSchema>;
 export type Part = z.infer<typeof PartSchema>;
 export type Airframe = z.infer<typeof AirframeSchema>;

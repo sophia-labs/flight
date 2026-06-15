@@ -3,6 +3,7 @@ import {
   type Action,
   type ControlInput,
   type FlightDirectorAction,
+  type PilotIntentAction,
   type RawStickAction,
   type SetpointAction,
 } from "../protocol/schema";
@@ -129,10 +130,19 @@ export const flightDirectorAdapter: ActionAdapter = {
   },
 };
 
+export const pilotIntentAdapter: ActionAdapter = {
+  vocabulary: "pilot-intent",
+  controlFor(action, self) {
+    const a = action as PilotIntentAction;
+    return clampControlInput({ ...self.controls, trigger: a.trigger });
+  },
+};
+
 const ADAPTERS: Record<Action["kind"], ActionAdapter> = {
   "raw-stick": rawStickAdapter,
   setpoint: setpointAdapter,
   "flight-director": flightDirectorAdapter,
+  "pilot-intent": pilotIntentAdapter,
 };
 
 export function adapterFor(kind: Action["kind"]): ActionAdapter {

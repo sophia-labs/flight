@@ -1,10 +1,25 @@
 import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import { useMemo, useState, type CSSProperties } from "react";
-import type { Airframe, EnginePart, FuselagePart, MatchReplay, Part, TankPart, WingPart } from "../protocol/schema";
+import type {
+  Airframe,
+  CanopyPart,
+  EnginePart,
+  FuselagePart,
+  GearPart,
+  MatchReplay,
+  Part,
+  PropPart,
+  TankPart,
+  WeaponPart,
+  WingPart,
+} from "../protocol/schema";
 import { generateAirframeMatch } from "../runtime/scenario";
+import { aircraftArchetypes, referencesForArchetype } from "../sim/aircraftCatalog";
 import { airframeReport, compileAirframe, defaultAirframe, noseCamera } from "../sim/airframe";
 import { quatFromAxisAngle, quatIdentity, vec3 } from "../sim/math";
+import { samplePropulsion } from "../sim/propulsion";
+import type { PropulsionPoint } from "../sim/types";
 import { PartMeshes } from "./airframeMesh";
 
 const BLUE = "#4da3ff";
@@ -19,12 +34,32 @@ export function HangarScreen({
   onExit: () => void;
   onFly: (replay: MatchReplay) => void;
 }) {
-  const [airframe, setAirframe] = useState<Airframe>(() => defaultAirframe());
+  const firstArchetype = aircraftArchetypes[0];
+  const [selectedArchetypeId, setSelectedArchetypeId] = useState(firstArchetype?.id ?? "default");
+  const [airframe, setAirframe] = useState<Airframe>(() =>
+    firstArchetype ? structuredClone(firstArchetype.airframe) : defaultAirframe(),
+  );
   const [flying, setFlying] = useState(false);
 
   const compiled = useMemo(() => compileAirframe(airframe), [airframe]);
   const report = useMemo(() => airframeReport(compiled.model), [compiled]);
   const base = useMemo(() => compileAirframe(defaultAirframe()).model, []);
+  const selectedArchetype = useMemo(
+    () => aircraftArchetypes.find((candidate) => candidate.id === selectedArchetypeId) ?? aircraftArchetypes[0],
+    [selectedArchetypeId],
+  );
+  const referenceNotes = useMemo(
+    () => (selectedArchetype ? referencesForArchetype(selectedArchetype) : []),
+    [selectedArchetype],
+  );
+  const propSamples = useMemo(() => propulsionSamples(compiled.model.propulsions[0]), [compiled]);
+
+  const loadArchetype = (id: string) => {
+    const archetype = aircraftArchetypes.find((candidate) => candidate.id === id);
+    if (!archetype) return;
+    setSelectedArchetypeId(id);
+    setAirframe(structuredClone(archetype.airframe));
+  };
 
   const updatePart = (id: string, fn: (p: Part) => Part) =>
     setAirframe((a) => ({ ...a, parts: a.parts.map((p) => (p.id === id ? fn(p) : p)) }));
@@ -53,8 +88,15 @@ export function HangarScreen({
           <h1 style={S.title}>Build your aircraft</h1>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button type="button" style={S.ghostBtn} onClick={() => setAirframe(defaultAirframe())}>
-            Reset to default
+          <button
+            type="button"
+            style={S.ghostBtn}
+            onClick={() => {
+              setSelectedArchetypeId("default");
+              setAirframe(defaultAirframe());
+            }}
+          >
+            Calibration default
           </button>
           <button type="button" style={S.ghostBtn} onClick={onExit}>
             ← Back to flight
@@ -68,9 +110,30 @@ export function HangarScreen({
       <div style={S.body}>
         <section style={S.editor}>
           <div style={S.sectionHead}>
+            <span>AIRCRAFT LINES</span>
+          </div>
+          <div style={S.archetypeList}>
+            {aircraftArchetypes.map((archetype) => (
+              <button
+                key={archetype.id}
+                type="button"
+                style={{
+                  ...S.archetypeBtn,
+                  borderColor:
+                    selectedArchetypeId === archetype.id ? archetype.palette.trim : "rgba(255,255,255,0.08)",
+                }}
+                onClick={() => loadArchetype(archetype.id)}
+              >
+                <span style={{ ...S.swatch, background: archetype.palette.base, borderColor: archetype.palette.trim }} />
+                <span style={S.archetypeName}>{archetype.shortName}</span>
+                <span style={S.archetypeRole}>{archetype.role}</span>
+              </button>
+            ))}
+          </div>
+          <div style={S.sectionHead}>
             <span>PARTS</span>
-            <div style={{ display: "flex", gap: 6 }}>
-              {(["wing", "engine", "fuselage", "tank", "sensor"] as const).map((k) => (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              {(["wing", "engine", "prop", "canopy", "gear", "weapon", "fuselage", "tank", "sensor"] as const).map((k) => (
                 <button key={k} type="button" style={S.addBtn} onClick={() => addPart(k)}>
                   + {k}
                 </button>
@@ -91,6 +154,26 @@ export function HangarScreen({
         </section>
 
         <section style={S.right}>
+          {selectedArchetype ? (
+            <div style={S.brief}>
+              <div>
+                <p style={S.eyebrow}>Golden-age design line</p>
+                <h2 style={S.briefTitle}>{selectedArchetype.name}</h2>
+                <p style={S.briefText}>{selectedArchetype.summary}</p>
+              </div>
+              <div style={S.referenceGrid}>
+                {referenceNotes.slice(0, 3).map((ref) => (
+                  <div key={ref.id} style={S.referenceCard}>
+                    <span style={S.referenceName}>{ref.name}</span>
+                    <span>{ref.role}</span>
+                    <span>
+                      {ref.spanM.toFixed(1)} m span · {ref.powerHp} hp
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div style={S.preview}>
             <Canvas camera={{ position: [2.4, 1.3, 3.2], fov: 50 }}>
               <color attach="background" args={["#0c141b"]} />
@@ -104,6 +187,28 @@ export function HangarScreen({
             </Canvas>
           </div>
 
+          <div style={S.propCurve}>
+            <div style={S.sectionHeadCompact}>
+              <span>PROP CURVE</span>
+              <span>{compiled.model.propulsions.length > 0 ? `${compiled.model.propulsions.length} curve-driven` : "fixed thrust fallback"}</span>
+            </div>
+            <div style={S.curveBars}>
+              {propSamples.length > 0 ? (
+                propSamples.map((sample) => (
+                  <div key={sample.speed} style={S.curveBarCol}>
+                    <div style={S.curveTrack}>
+                      <div style={{ ...S.curveFill, height: `${sample.percent}%` }} />
+                    </div>
+                    <span>{sample.speed}</span>
+                    <strong>{sample.thrustKn}</strong>
+                  </div>
+                ))
+              ) : (
+                <span style={{ color: "#8aa0ad" }}>Add a powered engine and propeller to see thrust versus airspeed.</span>
+              )}
+            </div>
+          </div>
+
           <div style={S.stats}>
             <Stat label="mass" value={`${Math.round(compiled.model.massKg)} kg`} />
             <Stat
@@ -113,7 +218,7 @@ export function HangarScreen({
             />
             <Stat label="wing area" value={`${compiled.model.wingAreaM2.toFixed(1)} m²`} />
             <Stat label="surfaces" value={`${compiled.model.aeroSurfaces.length}`} />
-            <Stat label="engines" value={`${compiled.model.thrustPoints.length}`} />
+            <Stat label="engines" value={`${compiled.model.thrustPoints.length + compiled.model.propulsions.length}`} />
             <Stat label="thrust : weight" value={report.thrustToWeight.toFixed(2)} />
             <Stat
               label="roll"
@@ -174,6 +279,24 @@ function Stat({ label, value, ratio }: { label: string; value: string; ratio?: n
       ) : null}
     </div>
   );
+}
+
+function propulsionSamples(point: PropulsionPoint | undefined) {
+  if (!point) return [];
+  const speeds = [0, 40, 80, 120, 160];
+  const samples = speeds.map((speed) => {
+    const sample = samplePropulsion(point, speed, 1.225, 1);
+    return {
+      speed,
+      thrustN: sample.thrustN,
+      thrustKn: `${(sample.thrustN / 1000).toFixed(1)} kN`,
+    };
+  });
+  const max = Math.max(...samples.map((sample) => Math.abs(sample.thrustN)), 1);
+  return samples.map((sample) => ({
+    ...sample,
+    percent: Math.max(4, Math.min(100, (Math.max(sample.thrustN, 0) / max) * 100)),
+  }));
 }
 
 function PartCard({
@@ -283,17 +406,146 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
   }
 
   if (part.kind === "engine") {
+    const powerHp = Math.round(((part.maxPowerW ?? part.thrustN * 36) / 745.7) * 10) / 10;
     return (
       <>
         <Slider
-          label="thrust (kN)"
+          label="power (hp)"
+          value={powerHp}
+          min={300}
+          max={3600}
+          step={25}
+          onChange={(v) =>
+            onChange((p) => ({
+              ...(p as EnginePart),
+              maxPowerW: Math.round(v * 745.7),
+              thrustN: Math.round(v * 46),
+            }))
+          }
+        />
+        <Slider
+          label="fallback kN"
           value={part.thrustN / 1000}
           min={5}
           max={200}
           step={1}
           onChange={(v) => onChange((p) => ({ ...(p as EnginePart), thrustN: v * 1000 }))}
         />
+        <Slider
+          label="idle rpm"
+          value={part.idleRpm ?? 650}
+          min={400}
+          max={1100}
+          step={25}
+          onChange={(v) => onChange((p) => ({ ...(p as EnginePart), idleRpm: v }))}
+        />
+        <Slider
+          label="max rpm"
+          value={part.maxRpm ?? 2800}
+          min={1800}
+          max={3600}
+          step={50}
+          onChange={(v) => onChange((p) => ({ ...(p as EnginePart), maxRpm: v }))}
+        />
         <MassSlider part={part} onChange={onChange} max={4000} />
+        <PoseSliders part={part} onChange={onChange} />
+      </>
+    );
+  }
+
+  if (part.kind === "prop") {
+    return (
+      <>
+        <Slider label="radius" value={part.radius} min={0.5} max={3.6} step={0.05} onChange={(v) => onChange((p) => ({ ...(p as PropPart), radius: v }))} />
+        <Slider label="pitch" value={part.pitchM} min={0.5} max={3.2} step={0.05} onChange={(v) => onChange((p) => ({ ...(p as PropPart), pitchM: v }))} />
+        <Slider label="blades" value={part.bladeCount} min={2} max={6} step={1} onChange={(v) => onChange((p) => ({ ...(p as PropPart), bladeCount: Math.round(v) }))} />
+        <div style={S.fieldRow}>
+          <span style={S.fieldLabel}>mode</span>
+          <select
+            style={S.select}
+            value={part.mode}
+            onChange={(e) => onChange((p) => ({ ...(p as PropPart), mode: e.target.value as PropPart["mode"] }))}
+          >
+            <option value="fixed-pitch">fixed-pitch</option>
+            <option value="constant-speed">constant-speed</option>
+          </select>
+        </div>
+        <MassSlider part={part} onChange={onChange} max={600} />
+        <PoseSliders part={part} onChange={onChange} />
+      </>
+    );
+  }
+
+  if (part.kind === "canopy") {
+    const set = (k: keyof CanopyPart["dims"], v: number) =>
+      onChange((p) => ({ ...(p as CanopyPart), dims: { ...(p as CanopyPart).dims, [k]: v } }));
+    return (
+      <>
+        <Slider label="length" value={part.dims.length} min={0.5} max={5} step={0.1} onChange={(v) => set("length", v)} />
+        <Slider label="width" value={part.dims.width} min={0.2} max={2} step={0.05} onChange={(v) => set("width", v)} />
+        <Slider label="height" value={part.dims.height} min={0.2} max={1.6} step={0.05} onChange={(v) => set("height", v)} />
+        <div style={S.fieldRow}>
+          <span style={S.fieldLabel}>style</span>
+          <select
+            style={S.select}
+            value={part.style}
+            onChange={(e) => onChange((p) => ({ ...(p as CanopyPart), style: e.target.value as CanopyPart["style"] }))}
+          >
+            <option value="razorback">razorback</option>
+            <option value="bubble">bubble</option>
+            <option value="framed">framed</option>
+            <option value="greenhouse">greenhouse</option>
+          </select>
+        </div>
+        <MassSlider part={part} onChange={onChange} max={400} />
+        <PoseSliders part={part} onChange={onChange} />
+      </>
+    );
+  }
+
+  if (part.kind === "gear") {
+    return (
+      <>
+        <Slider label="track" value={part.trackM} min={0.4} max={7} step={0.1} onChange={(v) => onChange((p) => ({ ...(p as GearPart), trackM: v }))} />
+        <Slider label="height" value={part.heightM} min={0.2} max={2.5} step={0.05} onChange={(v) => onChange((p) => ({ ...(p as GearPart), heightM: v }))} />
+        <Slider label="wheel" value={part.wheelRadiusM} min={0.08} max={0.7} step={0.02} onChange={(v) => onChange((p) => ({ ...(p as GearPart), wheelRadiusM: v }))} />
+        <div style={S.fieldRow}>
+          <span style={S.fieldLabel}>style</span>
+          <select
+            style={S.select}
+            value={part.style}
+            onChange={(e) => onChange((p) => ({ ...(p as GearPart), style: e.target.value as GearPart["style"] }))}
+          >
+            <option value="taildragger">taildragger</option>
+            <option value="tricycle">tricycle</option>
+            <option value="skid">skid</option>
+          </select>
+        </div>
+        <MassSlider part={part} onChange={onChange} max={1000} />
+        <PoseSliders part={part} onChange={onChange} />
+      </>
+    );
+  }
+
+  if (part.kind === "weapon") {
+    return (
+      <>
+        <Slider label="count" value={part.count} min={1} max={12} step={1} onChange={(v) => onChange((p) => ({ ...(p as WeaponPart), count: Math.round(v) }))} />
+        <Slider label="caliber" value={part.caliberMm} min={7.62} max={120} step={0.5} onChange={(v) => onChange((p) => ({ ...(p as WeaponPart), caliberMm: v }))} />
+        <div style={S.fieldRow}>
+          <span style={S.fieldLabel}>role</span>
+          <select
+            style={S.select}
+            value={part.role}
+            onChange={(e) => onChange((p) => ({ ...(p as WeaponPart), role: e.target.value as WeaponPart["role"] }))}
+          >
+            <option value="machine-gun">machine-gun</option>
+            <option value="cannon">cannon</option>
+            <option value="rocket-rail">rocket-rail</option>
+            <option value="bomb-rack">bomb-rack</option>
+          </select>
+        </div>
+        <MassSlider part={part} onChange={onChange} max={1400} />
         <PoseSliders part={part} onChange={onChange} />
       </>
     );
@@ -352,7 +604,12 @@ function MassSlider({
       min={0}
       max={max}
       step={50}
-      onChange={(v) => onChange((p) => ({ ...(p as FuselagePart | WingPart | EnginePart), massKg: v }))}
+      onChange={(v) =>
+        onChange((p) => ({
+          ...(p as FuselagePart | WingPart | EnginePart | PropPart | CanopyPart | GearPart | WeaponPart),
+          massKg: v,
+        }))
+      }
     />
   );
 }
@@ -405,7 +662,25 @@ function makePart(kind: Part["kind"], parts: Part[]): Part {
     case "wing":
       return { id, kind, pose, planform: { span: 6, chord: 1 }, massKg: 300, control: { axis: "roll", area: 1 } };
     case "engine":
-      return { id, kind, pose: { offset: vec3(0, 0, 4), rotation: quatIdentity() }, thrustN: 30_000, massKg: 600, dims: { radius: 0.4, length: 2 } };
+      return {
+        id,
+        kind,
+        pose: { offset: vec3(0, 0, -4), rotation: quatIdentity() },
+        thrustN: 55_000,
+        maxPowerW: Math.round(1200 * 745.7),
+        idleRpm: 650,
+        maxRpm: 2850,
+        massKg: 600,
+        dims: { radius: 0.4, length: 2 },
+      };
+    case "prop":
+      return { id, kind, pose: { offset: vec3(0, 0, -4.7), rotation: quatIdentity() }, radius: 1.6, pitchM: 2.25, bladeCount: 3, mode: "constant-speed", massKg: 85 };
+    case "canopy":
+      return { id, kind, pose: { offset: vec3(0, 0.75, -1.4), rotation: quatIdentity() }, dims: { length: 1.8, width: 0.75, height: 0.5 }, massKg: 90, style: "bubble" };
+    case "gear":
+      return { id, kind, pose: { offset: vec3(0, -0.75, 0.2), rotation: quatIdentity() }, trackM: 2.6, heightM: 0.8, wheelRadiusM: 0.22, massKg: 220, style: "taildragger" };
+    case "weapon":
+      return { id, kind, pose: { offset: vec3(0, -0.15, -1.4), rotation: quatIdentity() }, count: 2, caliberMm: 20, massKg: 120, dims: { length: 1.1, width: 0.06, height: 0.06 }, role: "cannon" };
     case "tank":
       return { id, kind, pose: { offset: vec3(0, 0, 0), rotation: quatIdentity() }, fuelKg: 1_500, dryMassKg: 200, dims: { radius: 0.5, length: 2.5 } };
     case "sensor":
@@ -446,9 +721,90 @@ const S: Record<string, CSSProperties> = {
     color: "#9fb2bd",
     borderBottom: "1px solid rgba(255,255,255,0.06)",
   },
+  sectionHeadCompact: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "9px 14px",
+    fontSize: 11,
+    letterSpacing: 1.2,
+    color: "#9fb2bd",
+    borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
+  archetypeList: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 8,
+    padding: 12,
+    borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
+  archetypeBtn: {
+    minHeight: 58,
+    background: "rgba(14,20,24,0.82)",
+    color: "#e7eef2",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 8,
+    padding: "8px 9px",
+    display: "grid",
+    gridTemplateColumns: "18px 1fr",
+    gridTemplateRows: "1fr 1fr",
+    columnGap: 8,
+    textAlign: "left",
+    cursor: "pointer",
+  },
+  swatch: {
+    gridRow: "1 / span 2",
+    width: 18,
+    height: 18,
+    borderRadius: 5,
+    border: "2px solid rgba(255,255,255,0.35)",
+    alignSelf: "center",
+  },
+  archetypeName: { fontSize: 12, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  archetypeRole: { fontSize: 10, color: "#8aa0ad", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   partList: { overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 12 },
   right: { display: "flex", flexDirection: "column", minHeight: 0 },
+  brief: {
+    display: "grid",
+    gridTemplateColumns: "minmax(280px, 1.2fr) minmax(300px, 1fr)",
+    gap: 14,
+    padding: "12px 16px",
+    background: "#0e1418",
+    borderBottom: "1px solid rgba(255,255,255,0.08)",
+  },
+  briefTitle: { margin: "2px 0 4px", fontSize: 18 },
+  briefText: { margin: 0, color: "#aebdc5", fontSize: 13, lineHeight: 1.4 },
+  referenceGrid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 },
+  referenceCard: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 3,
+    padding: "8px 9px",
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.07)",
+    borderRadius: 8,
+    color: "#91a7b2",
+    fontSize: 11,
+    minWidth: 0,
+  },
+  referenceName: { color: "#e7eef2", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   preview: { flex: 1, minHeight: 240, background: "#0c141b" },
+  propCurve: {
+    background: "#0e1418",
+    borderTop: "1px solid rgba(255,255,255,0.08)",
+  },
+  curveBars: { minHeight: 94, display: "flex", alignItems: "flex-end", gap: 12, padding: "12px 16px" },
+  curveBarCol: { width: 64, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, fontSize: 11, color: "#91a7b2" },
+  curveTrack: {
+    height: 54,
+    width: 14,
+    borderRadius: 3,
+    background: "rgba(255,255,255,0.08)",
+    display: "flex",
+    alignItems: "flex-end",
+    overflow: "hidden",
+  },
+  curveFill: { width: "100%", background: "#f4a340" },
   stats: {
     display: "grid",
     gridTemplateColumns: "repeat(4, 1fr)",

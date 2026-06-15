@@ -98,9 +98,42 @@ export const flightDirectorSpec: ActionSpec = {
   },
 };
 
+export const pilotIntentSpec: ActionSpec = {
+  name: "set_pilot_intent",
+  description: "Describe tactical desire for an embodied Body controller; do not command actuators.",
+  toolSchema: Type.Object({
+    reason: Type.String({ description: "one short phrase: your tactical intent" }),
+    goal: Type.String({ description: "what you want the body to attempt next" }),
+    urgency: Type.Number({ description: "0..1, how urgent the desire is" }),
+    riskTolerance: Type.Number({ description: "0..1, how much envelope risk to accept" }),
+    style: Type.String({ description: "short token such as patient, aggressive, reckless_but_survivable" }),
+    constraints: Type.Array(Type.String({ description: "short constraint token" })),
+    attention: Type.Array(Type.String({ description: "short object/state token to attend to" })),
+    trigger: Type.Boolean({ description: "request guns this turn if the body can line up" }),
+  }),
+  rules: [
+    "ACTION (pilot-intent): send desire, constraints, style, attention, and trigger request.",
+    "Do NOT output actuator, stick, bank, pitch, or load commands. The Body owns direct motor control.",
+    "Use body-relative language: pursue, unload, recover energy, line up, avoid ground, keep control.",
+  ].join("\n"),
+  toAction: (a) => ({
+    kind: "pilot-intent",
+    goal: typeof a.goal === "string" ? a.goal.slice(0, 180) : "keep control and pursue the target",
+    urgency: clamp(num(a.urgency, "urgency"), 0, 1),
+    riskTolerance: clamp(num(a.riskTolerance, "riskTolerance"), 0, 1),
+    style: typeof a.style === "string" ? a.style.slice(0, 48) : "controlled",
+    constraints: Array.isArray(a.constraints)
+      ? a.constraints.map(String).slice(0, 8)
+      : ["do_not_crash", "avoid_stall"],
+    attention: Array.isArray(a.attention) ? a.attention.map(String).slice(0, 8) : [],
+    trigger: Boolean(a.trigger),
+  }),
+};
+
 export const actionSpecs = {
   "raw-stick": rawStickSpec,
   setpoint: setpointSpec,
   "flight-director": flightDirectorSpec,
+  "pilot-intent": pilotIntentSpec,
 } as const;
 export type ActionMode = keyof typeof actionSpecs;
