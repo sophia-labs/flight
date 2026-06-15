@@ -4,11 +4,12 @@ import type {
   BodyTickTrace,
   ControlInput,
   PilotIntentAction,
+  Usage,
 } from "../protocol/schema";
 import { clampControlInput } from "../protocol/schema";
 import type { AircraftState } from "../sim/types";
 import type { BodyManifest } from "./manifest";
-import type { BodyModel } from "./model";
+import type { BodyModel, BodyModelResult } from "./model";
 import { parseBodyOutput } from "./parser";
 import {
   buildBodyPrompt,
@@ -23,6 +24,9 @@ import {
 export interface BodyRuntimeConfig {
   manifest: BodyManifest;
   model: BodyModel;
+  timeoutMs?: number;
+  recordLatency?: boolean;
+  controlSlew?: Partial<BodyControlSlewLimits>;
 }
 
 export interface BodyRuntimeState extends BodyHistory {
@@ -45,14 +49,44 @@ export interface PendingBodyTick {
   parsed: BodyParsedOutput;
   controlInput: ControlInput;
   before: BodyKinematicSnapshot;
+  latencyMs?: number;
+  usage?: Usage;
+  modelError?: string;
+}
+
+const DEFAULT_BODY_MODEL_TIMEOUT_MS = 15_000;
+const DEFAULT_BODY_CONTROL_SLEW = {
+  pitch: 0.26,
+  roll: 0.3,
+  yaw: 0.22,
+  throttle: 0.18,
+} satisfies BodyControlSlewLimits;
+
+interface BodyControlSlewLimits {
+  pitch: number;
+  roll: number;
+  yaw: number;
+  throttle: number;
 }
 
 export function createBodyRuntimeState(initialControl: ControlInput): BodyRuntimeState {
   return {
     tick: 0,
     mismatch: [],
+    mismatchStreaks: {},
     lastControl: initialControl,
   };
+}
+
+function nextMismatchStreaks(
+  current: Record<string, number>,
+  mismatch: string[],
+): Record<string, number> {
+  const next: Record<string, number> = {};
+  for (const label of mismatch) {
+    next[label] = (current[label] ?? 0) + 1;
+  }
+  return next;
 }
 
 function muscleControl(parsed: BodyParsedOutput, trigger: boolean): ControlInput | undefined {
@@ -63,6 +97,61 @@ function muscleControl(parsed: BodyParsedOutput, trigger: boolean): ControlInput
     yaw: parsed.muscle.yaw / 5,
     throttle: parsed.muscle.push / 5,
     trigger,
+  });
+}
+
+function toneSlewScale(parsed: BodyParsedOutput): number {
+  const tone = parsed.tone;
+  if (!tone) return 0.85;
+  const modeScale = {
+    relax: 0.55,
+    hold: 0.82,
+    pulse: 1.0,
+    brace: 1.2,
+    reverse: 1.08,
+  } satisfies Record<NonNullable<BodyParsedOutput["tone"]>["mode"], number>;
+  return modeScale[tone.mode] * (1 + tone.intensity * 0.12);
+}
+
+function stepToward(current: number, desired: number, maxDelta: number): number {
+  const delta = desired - current;
+  if (Math.abs(delta) <= maxDelta) return desired;
+  return current + Math.sign(delta) * maxDelta;
+}
+
+function crossesControlSign(current: number, desired: number): boolean {
+  const deadband = 0.08;
+  return Math.abs(current) >= deadband && Math.abs(desired) >= deadband && Math.sign(current) !== Math.sign(desired);
+}
+
+function stepControlAxis(
+  current: number,
+  desired: number,
+  maxDelta: number,
+  canReverse: boolean,
+): number {
+  if (!canReverse && crossesControlSign(current, desired)) {
+    const neutralStep = current - Math.sign(current) * maxDelta;
+    return Math.sign(neutralStep) === Math.sign(current) ? neutralStep : 0;
+  }
+  return stepToward(current, desired, maxDelta);
+}
+
+export function slewBodyControl(
+  current: ControlInput,
+  desired: ControlInput,
+  parsed: BodyParsedOutput,
+  limits: Partial<BodyControlSlewLimits> = {},
+): ControlInput {
+  const scale = toneSlewScale(parsed);
+  const merged = { ...DEFAULT_BODY_CONTROL_SLEW, ...limits };
+  const canReverse = parsed.tone?.mode === "reverse";
+  return clampControlInput({
+    pitch: stepControlAxis(current.pitch, desired.pitch, merged.pitch * scale, canReverse),
+    roll: stepControlAxis(current.roll, desired.roll, merged.roll * scale, canReverse),
+    yaw: stepControlAxis(current.yaw, desired.yaw, merged.yaw * scale, canReverse),
+    throttle: stepToward(current.throttle, desired.throttle, merged.throttle * scale),
+    trigger: desired.trigger,
   });
 }
 
@@ -84,6 +173,68 @@ function reasonForPain(proprioception: PendingBodyTick["proprioception"]): BodyT
   return "regular_tick";
 }
 
+function normalizeBodyResult(result: BodyModelResult): {
+  rawOutput: string;
+  usage?: Usage;
+} {
+  if (typeof result === "string") return { rawOutput: result };
+  return {
+    rawOutput: result.output,
+    ...(result.usage ? { usage: result.usage } : {}),
+  };
+}
+
+async function callBodyModel(input: {
+  config: BodyRuntimeConfig;
+  manifest: BodyManifest;
+  pilotIntent: PilotIntentAction;
+  proprioception: PendingBodyTick["proprioception"];
+  memory?: string;
+}): Promise<{
+  rawOutput: string;
+  usage?: Usage;
+  latencyMs?: number;
+  modelError?: string;
+}> {
+  const { config, manifest, pilotIntent, proprioception, memory } = input;
+  const timeoutMs = Math.max(1, config.timeoutMs ?? DEFAULT_BODY_MODEL_TIMEOUT_MS);
+  const aborter = new AbortController();
+  const started = config.recordLatency ? Date.now() : 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      aborter.abort();
+      reject(new Error(`body model timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    const pending = config.model({
+      manifest,
+      pilotIntent,
+      proprioception,
+      memory,
+      signal: aborter.signal,
+      timeoutMs,
+    });
+    pending.catch(() => {});
+    const result = await Promise.race([pending, timeout]);
+    return {
+      ...normalizeBodyResult(result),
+      ...(config.recordLatency ? { latencyMs: Date.now() - started } : {}),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      rawOutput: "",
+      modelError: message.slice(0, 240),
+      ...(config.recordLatency ? { latencyMs: Date.now() - started } : {}),
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function runBodyTick(input: {
   config: BodyRuntimeConfig;
   state: BodyRuntimeState;
@@ -98,15 +249,21 @@ export async function runBodyTick(input: {
   const { config, state, turn, agentId, time, dt, self, aircraft, pilotIntent } = input;
   const proprioception = encodeProprioception(self, aircraft, state);
   const promptText = buildBodyPrompt(config.manifest, pilotIntent, proprioception, state.memory);
-  const rawOutput = await config.model({
+  const bodyCall = await callBodyModel({
+    config,
     manifest: config.manifest,
     pilotIntent,
     proprioception,
     memory: state.memory,
   });
-  const parsed = parseBodyOutput(rawOutput, config.manifest);
-  const controlInput =
-    muscleControl(parsed, pilotIntent.trigger) ?? invalidOutputControl(state, pilotIntent.trigger);
+  const rawOutput = bodyCall.rawOutput;
+  const parsed: BodyParsedOutput = bodyCall.modelError
+    ? { status: "failed", errors: [`model_error: ${bodyCall.modelError}`], clipped: false }
+    : parseBodyOutput(rawOutput, config.manifest);
+  const desiredControl = muscleControl(parsed, pilotIntent.trigger);
+  const controlInput = desiredControl
+    ? slewBodyControl(state.lastControl, desiredControl, parsed, config.controlSlew)
+    : invalidOutputControl(state, pilotIntent.trigger);
   const reason = parsed.status === "failed" ? "invalid_recovery" : reasonForPain(proprioception);
   const before = snapshotKinematics(self);
 
@@ -131,6 +288,9 @@ export async function runBodyTick(input: {
     parsed,
     controlInput,
     before,
+    ...(bodyCall.latencyMs !== undefined ? { latencyMs: bodyCall.latencyMs } : {}),
+    ...(bodyCall.usage ? { usage: bodyCall.usage } : {}),
+    ...(bodyCall.modelError ? { modelError: bodyCall.modelError } : {}),
   };
 }
 
@@ -140,9 +300,10 @@ export function finishBodyTick(
   after: AircraftState,
 ): BodyTickTrace {
   const actual: BodyActualResult = summarizeActual(pending.before, after);
-  const mismatch = compareExpectation(pending.parsed.expect, actual);
+  const mismatch = compareExpectation(pending.parsed.expect, actual, pending.controlInput);
   state.lastActual = actual;
   state.mismatch = mismatch;
+  state.mismatchStreaks = nextMismatchStreaks(state.mismatchStreaks, mismatch);
   return {
     turn: pending.turn,
     tick: pending.tick,
@@ -159,6 +320,8 @@ export function finishBodyTick(
     controlInput: pending.controlInput,
     actual,
     mismatch,
+    ...(pending.latencyMs !== undefined ? { latencyMs: pending.latencyMs } : {}),
+    ...(pending.usage ? { usage: pending.usage } : {}),
+    ...(pending.modelError ? { modelError: pending.modelError } : {}),
   };
 }
-

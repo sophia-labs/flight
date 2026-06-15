@@ -13,6 +13,7 @@ export interface PlaybackClock {
 
 export function usePlayback(replay: MatchReplay | null) {
   const [frameIndex, setFrameIndexState] = useState(0);
+  const [samplePosition, setSamplePositionState] = useState(0);
   const [playing, setPlayingState] = useState(true);
 
   const maxIndex = replay ? replay.frames.length - 1 : 0;
@@ -35,6 +36,7 @@ export function usePlayback(replay: MatchReplay | null) {
       lastReplay.current = replay;
       clock.position = 0;
       setFrameIndexState(0);
+      setSamplePositionState(0);
     } else if (clock.position > maxIndex) {
       clock.position = maxIndex;
     }
@@ -46,6 +48,7 @@ export function usePlayback(replay: MatchReplay | null) {
       const clamped = Math.max(0, Math.min(clock.maxIndex, Math.round(next)));
       clock.position = clamped;
       setFrameIndexState(clamped);
+      setSamplePositionState(clamped);
     },
     [clock],
   );
@@ -55,10 +58,28 @@ export function usePlayback(replay: MatchReplay | null) {
     setFrameIndexState((current) => (current === index ? current : index));
   }, []);
 
+  // The render loop also reports the fractional position for smooth cockpit instruments and HUD.
+  const reportSample = useCallback((position: number) => {
+    setSamplePositionState((current) => (Math.abs(current - position) < 0.01 ? current : position));
+  }, []);
+
+  const setPosition = useCallback(
+    (next: number, nextPlaying = clock.playing) => {
+      const clamped = Math.max(0, Math.min(clock.maxIndex, next));
+      clock.position = clamped;
+      clock.playing = nextPlaying;
+      setPlayingState(nextPlaying);
+      setFrameIndexState(Math.floor(clamped));
+      setSamplePositionState(clamped);
+    },
+    [clock],
+  );
+
   const restart = useCallback(() => {
     clock.position = 0;
     clock.playing = true;
     setFrameIndexState(0);
+    setSamplePositionState(0);
     setPlayingState(true);
   }, [clock]);
 
@@ -75,9 +96,12 @@ export function usePlayback(replay: MatchReplay | null) {
 
   return {
     frameIndex,
+    samplePosition,
     playing,
     clock,
     reportIndex,
+    reportSample,
+    setPosition,
     setFrameIndex: seek,
     restart,
     next,

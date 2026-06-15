@@ -1,6 +1,6 @@
 import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
-import { useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type {
   Airframe,
   CanopyPart,
@@ -24,6 +24,22 @@ import { PartMeshes } from "./airframeMesh";
 
 const BLUE = "#4da3ff";
 
+function useCompactHangar() {
+  const [compact, setCompact] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia("(max-width: 760px)").matches,
+  );
+
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 760px)");
+    const update = () => setCompact(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+
+  return compact;
+}
+
 // A small KSP-style hangar: edit the airframe as a parts list, watch the model recompile live (mass,
 // thrust, wing area, the 3 control rates, T:W) with flyability warnings, see the plane you're building
 // in 3D, then "Fly this" to send it into a deterministic scripted duel against the default.
@@ -39,7 +55,11 @@ export function HangarScreen({
   const [airframe, setAirframe] = useState<Airframe>(() =>
     firstArchetype ? structuredClone(firstArchetype.airframe) : defaultAirframe(),
   );
+  const [selectedPartId, setSelectedPartId] = useState(() =>
+    firstArchetype?.airframe.parts[0]?.id ?? defaultAirframe().parts[0]?.id ?? "",
+  );
   const [flying, setFlying] = useState(false);
+  const compact = useCompactHangar();
 
   const compiled = useMemo(() => compileAirframe(airframe), [airframe]);
   const report = useMemo(() => airframeReport(compiled.model), [compiled]);
@@ -53,25 +73,41 @@ export function HangarScreen({
     [selectedArchetype],
   );
   const propSamples = useMemo(() => propulsionSamples(compiled.model.propulsions[0]), [compiled]);
+  const selectedPart = useMemo(
+    () => airframe.parts.find((part) => part.id === selectedPartId) ?? airframe.parts[0],
+    [airframe.parts, selectedPartId],
+  );
 
   const loadArchetype = (id: string) => {
     const archetype = aircraftArchetypes.find((candidate) => candidate.id === id);
     if (!archetype) return;
     setSelectedArchetypeId(id);
-    setAirframe(structuredClone(archetype.airframe));
+    const next = structuredClone(archetype.airframe);
+    setSelectedPartId(next.parts[0]?.id ?? "");
+    setAirframe(next);
   };
 
   const updatePart = (id: string, fn: (p: Part) => Part) =>
     setAirframe((a) => ({ ...a, parts: a.parts.map((p) => (p.id === id ? fn(p) : p)) }));
   const removePart = (id: string) =>
-    setAirframe((a) => ({ ...a, parts: a.parts.filter((p) => p.id !== id) }));
+    setAirframe((a) => {
+      const parts = a.parts.filter((p) => p.id !== id);
+      if (selectedPartId === id) setSelectedPartId(parts[0]?.id ?? "");
+      return { ...a, parts };
+    });
   const addPart = (kind: Part["kind"]) =>
-    setAirframe((a) => ({ ...a, parts: [...a.parts, makePart(kind, a.parts)] }));
+    setAirframe((a) => {
+      const part = makePart(kind, a.parts);
+      setSelectedPartId(part.id);
+      return { ...a, parts: [...a.parts, part] };
+    });
   const duplicatePart = (id: string) =>
     setAirframe((a) => {
       const p = a.parts.find((x) => x.id === id);
       if (!p) return a;
-      return { ...a, parts: [...a.parts, { ...structuredClone(p), id: uniqueId(p.kind, a.parts) }] };
+      const copy = { ...structuredClone(p), id: uniqueId(p.kind, a.parts) };
+      setSelectedPartId(copy.id);
+      return { ...a, parts: [...a.parts, copy] };
     });
 
   const fly = async () => {
@@ -82,18 +118,20 @@ export function HangarScreen({
 
   return (
     <div style={S.overlay}>
-      <header style={S.header}>
+      <header style={compact ? { ...S.header, ...S.headerCompact } : S.header}>
         <div>
           <p style={S.eyebrow}>Flight Duel — Hangar</p>
           <h1 style={S.title}>Build your aircraft</h1>
         </div>
-        <div style={{ display: "flex", gap: 10 }}>
+        <div style={compact ? S.headerActionsCompact : S.headerActions}>
           <button
             type="button"
             style={S.ghostBtn}
             onClick={() => {
               setSelectedArchetypeId("default");
-              setAirframe(defaultAirframe());
+              const next = defaultAirframe();
+              setSelectedPartId(next.parts[0]?.id ?? "");
+              setAirframe(next);
             }}
           >
             Calibration default
@@ -107,8 +145,8 @@ export function HangarScreen({
         </div>
       </header>
 
-      <div style={S.body}>
-        <section style={S.editor}>
+      <div style={compact ? S.bodyCompact : S.body}>
+        <section style={compact ? { ...S.editor, ...S.editorCompact } : S.editor}>
           <div style={S.sectionHead}>
             <span>AIRCRAFT LINES</span>
           </div>
@@ -131,37 +169,55 @@ export function HangarScreen({
             ))}
           </div>
           <div style={S.sectionHead}>
-            <span>PARTS</span>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              {(["wing", "engine", "prop", "canopy", "gear", "weapon", "fuselage", "tank", "sensor"] as const).map((k) => (
-                <button key={k} type="button" style={S.addBtn} onClick={() => addPart(k)}>
-                  + {k}
+            <span>PART KIT</span>
+          </div>
+          <div style={S.addTray}>
+            {(["wing", "engine", "prop", "canopy", "gear", "weapon", "fuselage", "tank", "sensor"] as const).map((k) => (
+              <button key={k} type="button" style={S.addBtn} onClick={() => addPart(k)}>
+                + {k}
+              </button>
+            ))}
+          </div>
+          <div style={compact ? { ...S.partList, ...S.partListCompact } : S.partList}>
+            <div style={S.partRoster}>
+              {airframe.parts.map((part) => (
+                <button
+                  key={part.id}
+                  type="button"
+                  style={{
+                    ...S.partRosterBtn,
+                    borderColor: selectedPart?.id === part.id ? BLUE : "rgba(255,255,255,0.08)",
+                  }}
+                  onClick={() => setSelectedPartId(part.id)}
+                >
+                  <span style={S.partRosterKind}>{part.kind}</span>
+                  <span style={S.partRosterId}>{part.id}</span>
                 </button>
               ))}
             </div>
-          </div>
-          <div style={S.partList}>
-            {airframe.parts.map((part) => (
+            {selectedPart ? (
               <PartCard
-                key={part.id}
-                part={part}
-                onChange={(fn) => updatePart(part.id, fn)}
-                onRemove={() => removePart(part.id)}
-                onDuplicate={() => duplicatePart(part.id)}
+                key={selectedPart.id}
+                part={selectedPart}
+                onChange={(fn) => updatePart(selectedPart.id, fn)}
+                onRemove={() => removePart(selectedPart.id)}
+                onDuplicate={() => duplicatePart(selectedPart.id)}
               />
-            ))}
+            ) : (
+              <div style={S.sensorNote}>Add a part to begin shaping this airframe.</div>
+            )}
           </div>
         </section>
 
-        <section style={S.right}>
+        <section style={compact ? { ...S.right, ...S.rightCompact } : S.right}>
           {selectedArchetype ? (
-            <div style={S.brief}>
+            <div style={compact ? { ...S.brief, ...S.briefCompact } : S.brief}>
               <div>
                 <p style={S.eyebrow}>Golden-age design line</p>
                 <h2 style={S.briefTitle}>{selectedArchetype.name}</h2>
                 <p style={S.briefText}>{selectedArchetype.summary}</p>
               </div>
-              <div style={S.referenceGrid}>
+              <div style={compact ? { ...S.referenceGrid, ...S.referenceGridCompact } : S.referenceGrid}>
                 {referenceNotes.slice(0, 3).map((ref) => (
                   <div key={ref.id} style={S.referenceCard}>
                     <span style={S.referenceName}>{ref.name}</span>
@@ -174,14 +230,22 @@ export function HangarScreen({
               </div>
             </div>
           ) : null}
-          <div style={S.preview}>
-            <Canvas camera={{ position: [2.4, 1.3, 3.2], fov: 50 }}>
-              <color attach="background" args={["#0c141b"]} />
-              <ambientLight intensity={0.6} />
-              <directionalLight position={[5, 8, 4]} intensity={2.2} />
-              <gridHelper args={[8, 16, "#2c3a44", "#1b2730"]} position={[0, -0.9, 0]} />
-              <group scale={1.42}>
-                <PartMeshes parts={airframe.parts} color={BLUE} stalled={false} />
+          <div style={compact ? { ...S.preview, ...S.previewCompact } : S.preview}>
+            <Canvas camera={{ position: [1.9, 1.05, 2.25], fov: 38 }} shadows>
+              <color attach="background" args={["#0d1518"]} />
+              <hemisphereLight args={["#c6e9ff", "#263018", 1.1]} />
+              <ambientLight intensity={0.35} />
+              <directionalLight position={[4, 6, 3]} intensity={2.4} castShadow />
+              <directionalLight position={[-3, 2, -4]} intensity={0.65} />
+              <HangarEnvironment />
+              <group scale={2.18} position={[0, -0.05, 0]} rotation={[0.02, -0.34, 0]}>
+                <PartMeshes
+                  parts={airframe.parts}
+                  color={selectedArchetype?.palette.base ?? BLUE}
+                  accentColor={selectedArchetype?.palette.trim ?? "#f4d35e"}
+                  stalled={false}
+                  propSpin={0.18}
+                />
               </group>
               <OrbitControls enableDamping dampingFactor={0.1} />
             </Canvas>
@@ -278,6 +342,44 @@ function Stat({ label, value, ratio }: { label: string; value: string; ratio?: n
         </span>
       ) : null}
     </div>
+  );
+}
+
+function HangarEnvironment() {
+  return (
+    <group position={[0, -0.66, 0]}>
+      <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.012, 0]}>
+        <planeGeometry args={[6.2, 4.8]} />
+        <meshStandardMaterial color="#121d20" roughness={0.72} metalness={0.08} />
+      </mesh>
+      <gridHelper args={[5.6, 14, "#344750", "#1f3036"]} position={[0, 0, 0]} />
+      <mesh position={[0, 0.006, -1.42]}>
+        <boxGeometry args={[3.4, 0.012, 0.035]} />
+        <meshStandardMaterial color="#d8a33c" roughness={0.5} metalness={0.12} />
+      </mesh>
+      <mesh position={[0, 0.008, 1.22]}>
+        <boxGeometry args={[2.2, 0.014, 0.035]} />
+        <meshStandardMaterial color="#d8e6ec" roughness={0.48} metalness={0.12} />
+      </mesh>
+      <mesh position={[-2.34, 0.14, -1.22]} castShadow>
+        <boxGeometry args={[0.4, 0.28, 0.18]} />
+        <meshStandardMaterial color="#233038" roughness={0.6} metalness={0.18} />
+      </mesh>
+      <mesh position={[-2.34, 0.34, -1.22]} castShadow>
+        <boxGeometry args={[0.46, 0.06, 0.22]} />
+        <meshStandardMaterial color="#d8a33c" roughness={0.46} metalness={0.18} />
+      </mesh>
+      <mesh position={[2.24, 0.14, 1.1]} castShadow>
+        <boxGeometry args={[0.36, 0.28, 0.16]} />
+        <meshStandardMaterial color="#20323a" roughness={0.6} metalness={0.2} />
+      </mesh>
+      {([-1, 1] as const).map((side) => (
+        <mesh key={`chock-${side}`} position={[side * 0.34, 0.04, 0.24]} rotation={[0, 0.4 * side, 0]} castShadow>
+          <boxGeometry args={[0.1, 0.08, 0.18]} />
+          <meshStandardMaterial color="#d8a33c" roughness={0.58} metalness={0.1} />
+        </mesh>
+      ))}
+    </group>
   );
 }
 
@@ -707,10 +809,20 @@ const S: Record<string, CSSProperties> = {
     padding: "18px 26px",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
+  headerCompact: {
+    alignItems: "flex-start",
+    gap: 12,
+    padding: "14px 16px",
+    flexWrap: "wrap",
+  },
+  headerActions: { display: "flex", gap: 10 },
+  headerActionsCompact: { display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-start" },
   eyebrow: { margin: 0, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "#7f95a3" },
   title: { margin: "2px 0 0", fontSize: 24 },
   body: { flex: 1, display: "grid", gridTemplateColumns: "minmax(360px, 460px) 1fr", minHeight: 0 },
+  bodyCompact: { flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflowY: "auto" },
   editor: { borderRight: "1px solid rgba(255,255,255,0.08)", display: "flex", flexDirection: "column", minHeight: 0 },
+  editorCompact: { borderRight: "none", borderBottom: "1px solid rgba(255,255,255,0.08)", minHeight: "auto", flex: "0 0 auto" },
   sectionHead: {
     display: "flex",
     justifyContent: "space-between",
@@ -731,6 +843,14 @@ const S: Record<string, CSSProperties> = {
     color: "#9fb2bd",
     borderBottom: "1px solid rgba(255,255,255,0.06)",
   },
+  addTray: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 7,
+    justifyContent: "flex-start",
+    padding: "10px 14px 12px",
+    borderBottom: "1px solid rgba(255,255,255,0.06)",
+  },
   archetypeList: {
     display: "grid",
     gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
@@ -739,6 +859,8 @@ const S: Record<string, CSSProperties> = {
     borderBottom: "1px solid rgba(255,255,255,0.06)",
   },
   archetypeBtn: {
+    width: "100%",
+    height: "auto",
     minHeight: 58,
     background: "rgba(14,20,24,0.82)",
     color: "#e7eef2",
@@ -763,7 +885,35 @@ const S: Record<string, CSSProperties> = {
   archetypeName: { fontSize: 12, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   archetypeRole: { fontSize: 10, color: "#8aa0ad", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   partList: { overflowY: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 12 },
+  partListCompact: { overflowY: "visible" },
+  partRoster: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gap: 8,
+    maxHeight: 132,
+    overflowY: "auto",
+    paddingRight: 2,
+  },
+  partRosterBtn: {
+    width: "100%",
+    height: "auto",
+    minHeight: 48,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    justifyContent: "center",
+    gap: 2,
+    padding: "8px 10px",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 8,
+    background: "rgba(255,255,255,0.035)",
+    color: "#e7eef2",
+    cursor: "pointer",
+  },
+  partRosterKind: { color: BLUE, fontSize: 11, fontWeight: 800, letterSpacing: 1, textTransform: "uppercase" },
+  partRosterId: { maxWidth: "100%", color: "#8aa0ad", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   right: { display: "flex", flexDirection: "column", minHeight: 0 },
+  rightCompact: { minHeight: "auto", flex: "0 0 auto" },
   brief: {
     display: "grid",
     gridTemplateColumns: "minmax(280px, 1.2fr) minmax(300px, 1fr)",
@@ -772,9 +922,11 @@ const S: Record<string, CSSProperties> = {
     background: "#0e1418",
     borderBottom: "1px solid rgba(255,255,255,0.08)",
   },
+  briefCompact: { gridTemplateColumns: "1fr", padding: "12px 14px" },
   briefTitle: { margin: "2px 0 4px", fontSize: 18 },
   briefText: { margin: 0, color: "#aebdc5", fontSize: 13, lineHeight: 1.4 },
   referenceGrid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 },
+  referenceGridCompact: { gridTemplateColumns: "1fr" },
   referenceCard: {
     display: "flex",
     flexDirection: "column",
@@ -789,6 +941,7 @@ const S: Record<string, CSSProperties> = {
   },
   referenceName: { color: "#e7eef2", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   preview: { flex: 1, minHeight: 240, background: "#0c141b" },
+  previewCompact: { flex: "0 0 auto", minHeight: 280 },
   propCurve: {
     background: "#0e1418",
     borderTop: "1px solid rgba(255,255,255,0.08)",
@@ -827,8 +980,42 @@ const S: Record<string, CSSProperties> = {
   range: { flex: 1, accentColor: BLUE },
   select: { flex: 1, background: "#0e1418", color: "#e7eef2", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 6, padding: "4px 6px" },
   sensorNote: { fontSize: 12, color: "#8aa0ad" },
-  addBtn: { background: "rgba(77,163,255,0.14)", color: BLUE, border: "1px solid rgba(77,163,255,0.3)", borderRadius: 6, padding: "4px 8px", fontSize: 12, cursor: "pointer" },
+  addBtn: {
+    width: "auto",
+    height: "auto",
+    minHeight: 34,
+    background: "rgba(77,163,255,0.14)",
+    color: BLUE,
+    border: "1px solid rgba(77,163,255,0.3)",
+    borderRadius: 6,
+    padding: "4px 8px",
+    fontSize: 12,
+    cursor: "pointer",
+  },
   iconBtn: { background: "transparent", color: "#9fb2bd", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 6, width: 26, height: 26, cursor: "pointer" },
-  ghostBtn: { background: "transparent", color: "#cdd9e0", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontSize: 14, whiteSpace: "nowrap" },
-  flyBtn: { background: BLUE, color: "#04101c", border: "none", borderRadius: 8, padding: "8px 18px", cursor: "pointer", fontSize: 14, fontWeight: 700, whiteSpace: "nowrap" },
+  ghostBtn: {
+    width: "auto",
+    height: "auto",
+    background: "transparent",
+    color: "#cdd9e0",
+    border: "1px solid rgba(255,255,255,0.18)",
+    borderRadius: 8,
+    padding: "8px 14px",
+    cursor: "pointer",
+    fontSize: 14,
+    whiteSpace: "nowrap",
+  },
+  flyBtn: {
+    width: "auto",
+    height: "auto",
+    background: BLUE,
+    color: "#04101c",
+    border: "none",
+    borderRadius: 8,
+    padding: "8px 18px",
+    cursor: "pointer",
+    fontSize: 14,
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+  },
 };

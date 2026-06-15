@@ -15,12 +15,14 @@ export function MatchStats({ replay, pilotId }: { replay: MatchReplay; pilotId: 
   const outcome = replay.outcome;
   const competence = outcome?.competence?.[pilotId];
   const pilotDecisions = (replay.decisions ?? []).filter((d) => d.agentId === pilotId);
-  const cost = pilotDecisions.reduce((sum, d) => sum + (d.usage?.costUsd ?? 0), 0);
+  const pilotCost = pilotDecisions.reduce((sum, d) => sum + (d.usage?.costUsd ?? 0), 0);
   const fallbackRate = pilotDecisions.length
     ? pilotDecisions.filter((d) => d.source === "fallback").length / pilotDecisions.length
     : 0;
   const pilot = replay.agents?.find((a) => a.id === pilotId);
   const bodyTicks = (replay.bodyTicks ?? []).filter((tick) => tick.agentId === pilotId);
+  const bodyCost = bodyTicks.reduce((sum, tick) => sum + (tick.usage?.costUsd ?? 0), 0);
+  const cost = pilotCost + bodyCost;
   const bodyOkRate = bodyTicks.length
     ? bodyTicks.filter((tick) => tick.parsed.status !== "failed").length / bodyTicks.length
     : 0;
@@ -38,6 +40,7 @@ export function MatchStats({ replay, pilotId }: { replay: MatchReplay; pilotId: 
         <Metric label="Fallback" value={pct(fallbackRate)} />
         {bodyTicks.length > 0 ? <Metric label="Body ticks" value={String(bodyTicks.length)} /> : null}
         {bodyTicks.length > 0 ? <Metric label="Body parse" value={pct(bodyOkRate)} /> : null}
+        {bodyCost > 0 ? <Metric label="Body cost" value={`$${bodyCost.toFixed(4)}`} /> : null}
       </div>
       {competence ? (
         <div className="metrics">

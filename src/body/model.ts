@@ -1,4 +1,4 @@
-import type { BodyProprioception, PilotIntentAction } from "../protocol/schema";
+import type { BodyProprioception, PilotIntentAction, Usage } from "../protocol/schema";
 import type { BodyManifest } from "./manifest";
 
 export interface BodyModelInput {
@@ -6,9 +6,19 @@ export interface BodyModelInput {
   pilotIntent: PilotIntentAction;
   proprioception: BodyProprioception;
   memory?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
-export type BodyModel = (input: BodyModelInput) => Promise<string>;
+export type BodyModelResult =
+  | string
+  | {
+      output: string;
+      usage?: Usage;
+      raw?: unknown;
+    };
+
+export type BodyModel = (input: BodyModelInput) => Promise<BodyModelResult>;
 
 function targetSide(target: string) {
   if (target.startsWith("left_")) return -1;
@@ -109,4 +119,3 @@ export const scriptedFixedWingBodyModel: BodyModel = async ({ pilotIntent, propr
     `MEM ${nextMemory}`.trim(),
   ].join("\n");
 };
-

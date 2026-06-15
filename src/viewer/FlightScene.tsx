@@ -7,12 +7,13 @@ import type {
   ControlInput,
   MatchReplay,
   Part,
-  PartPose,
   ReplayFrame,
   SurfaceControlSnapshot,
   Vec3,
 } from "../protocol/schema";
 import { defaultAirframe } from "../sim/airframe";
+import { mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
+import type { SensorDevice } from "../sim/parts";
 import { PART_VISUAL_SCALE, PartMeshes } from "./airframeMesh";
 import { deriveSurfaceControls } from "./surfaceTelemetry";
 import type { PlaybackClock } from "./usePlayback";
@@ -22,10 +23,6 @@ export type CameraMode = "orbit" | "cabin";
 const SCENE_SCALE = 0.01;
 const ACTIVE_AIRCRAFT_SCALE = 1.42;
 const DEAD_AIRCRAFT_SCALE = 1.05;
-const DEFAULT_COCKPIT_VIEW: PartPose = {
-  offset: { x: 0, y: 0.45, z: -4.2 },
-  rotation: { x: 0, y: 0, z: 0, w: 1 },
-};
 
 interface FlightSceneProps {
   frame: ReplayFrame;
@@ -34,6 +31,7 @@ interface FlightSceneProps {
   pilotId?: string;
   clock: PlaybackClock;
   onIndex: (index: number) => void;
+  onSample: (position: number) => void;
 }
 
 export function FlightScene({
@@ -43,6 +41,7 @@ export function FlightScene({
   pilotId = "blue-1",
   clock,
   onIndex,
+  onSample,
 }: FlightSceneProps) {
   const controlsRef = useRef<any>(null);
   // Persistent aircraft groups, keyed by id — the SceneDriver moves them imperatively every
@@ -53,7 +52,7 @@ export function FlightScene({
   // render a recognizable jet rather than nothing.
   const fallbackParts = useMemo(() => defaultAirframe().parts, []);
   const pilotParts = replay.airframes?.[pilotId]?.parts ?? fallbackParts;
-  const cockpitView = cockpitViewPose(pilotParts);
+  const cockpitDevice = selectCameraDevice(pilotParts, "cockpit-cam");
 
   return (
     <>
@@ -76,10 +75,11 @@ export function FlightScene({
         clock={clock}
         cameraMode={cameraMode}
         pilotId={pilotId}
-        cockpitView={cockpitView}
+        cockpitDevice={cockpitDevice}
         shipRefs={shipRefs}
         controlsRef={controlsRef}
         onIndex={onIndex}
+        onSample={onSample}
       />
       {cameraMode === "orbit" ? (
         <OrbitControls
@@ -140,16 +140,6 @@ function Terrain() {
   );
 }
 
-function cockpitViewPose(parts: Part[]): PartPose {
-  const cockpit = parts.find(
-    (part) => part.kind === "sensor" && part.modality === "camera" && part.id === "cockpit-cam",
-  );
-  if (cockpit?.kind === "sensor") return cockpit.pose;
-
-  const camera = parts.find((part) => part.kind === "sensor" && part.modality === "camera");
-  return camera?.kind === "sensor" ? camera.pose : DEFAULT_COCKPIT_VIEW;
-}
-
 // Single render-loop driver: advances the clock, interpolates every aircraft between the
 // bracketing recorded frames (position lerp + orientation slerp), drives the camera from the
 // same interpolated state, and reports the integer frame up to React at tick rate.
@@ -157,37 +147,37 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const tmpQa = new THREE.Quaternion();
 const tmpQb = new THREE.Quaternion();
 const tmpPilotQ = new THREE.Quaternion();
-const tmpSensorQ = new THREE.Quaternion();
-const tmpCameraQ = new THREE.Quaternion();
 const tmpVec = new THREE.Vector3();
-const tmpLocalOffset = new THREE.Vector3();
-const tmpEye = new THREE.Vector3();
+const SAMPLE_REPORT_INTERVAL_S = 1 / 24;
 
 function SceneDriver({
   replay,
   clock,
   cameraMode,
   pilotId,
-  cockpitView,
+  cockpitDevice,
   shipRefs,
   controlsRef,
   onIndex,
+  onSample,
 }: {
   replay: MatchReplay;
   clock: PlaybackClock;
   cameraMode: CameraMode;
   pilotId: string;
-  cockpitView: PartPose;
+  cockpitDevice: SensorDevice;
   shipRefs: MutableRefObject<Record<string, THREE.Group | null>>;
   controlsRef: MutableRefObject<any>;
   onIndex: (index: number) => void;
+  onSample: (position: number) => void;
 }) {
   const { camera } = useThree();
   const orbitTarget = useRef<THREE.Vector3 | null>(null);
   const lastReported = useRef(-1);
+  const lastSampleReportedAt = useRef(-Infinity);
   const lastMode = useRef<CameraMode | null>(null);
 
-  useFrame((_, delta) => {
+  useFrame((state, delta) => {
     const frames = replay.frames;
     const maxIndex = frames.length - 1;
     if (maxIndex < 0) return;
@@ -256,21 +246,16 @@ function SceneDriver({
       const ey = (havePilot ? pilotY : centerY / count) * SCENE_SCALE;
       const ez = (havePilot ? pilotZ : centerZ / count) * SCENE_SCALE;
 
-      tmpLocalOffset
-        .set(cockpitView.offset.x, cockpitView.offset.y, cockpitView.offset.z)
-        .multiplyScalar(PART_VISUAL_SCALE * pilotScale)
-        .applyQuaternion(tmpPilotQ);
-      tmpEye.set(ex, ey, ez).add(tmpLocalOffset);
-      tmpSensorQ.set(
-        cockpitView.rotation.x,
-        cockpitView.rotation.y,
-        cockpitView.rotation.z,
-        cockpitView.rotation.w,
+      const pose = mountedSensorPose(
+        cockpitDevice,
+        {
+          position: { x: ex, y: ey, z: ez },
+          orientation: { x: tmpPilotQ.x, y: tmpPilotQ.y, z: tmpPilotQ.z, w: tmpPilotQ.w },
+        },
+        { offsetScale: PART_VISUAL_SCALE * pilotScale },
       );
-      tmpCameraQ.copy(tmpPilotQ).multiply(tmpSensorQ);
-
-      camera.position.copy(tmpEye);
-      camera.quaternion.copy(tmpCameraQ);
+      camera.position.set(pose.eye.x, pose.eye.y, pose.eye.z);
+      camera.quaternion.set(pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w);
       camera.updateMatrixWorld();
     } else {
       if (entering || !orbitTarget.current) {
@@ -297,6 +282,10 @@ function SceneDriver({
     if (i !== lastReported.current) {
       lastReported.current = i;
       onIndex(i);
+    }
+    if (state.clock.elapsedTime - lastSampleReportedAt.current >= SAMPLE_REPORT_INTERVAL_S) {
+      lastSampleReportedAt.current = state.clock.elapsedTime;
+      onSample(clock.position);
     }
   });
 
@@ -332,8 +321,10 @@ function AircraftMesh({
       <PartMeshes
         parts={parts}
         color={ship.color}
+        accentColor={ship.team === "blue" ? "#f4d35e" : "#f0f2f2"}
         stalled={ship.stalled}
         surfaceControls={ship.surfaceControls ?? deriveSurfaceControls(parts, ship.controls)}
+        controls={ship.controls}
       />
       {showCockpit ? (
         <AircraftCockpitControls

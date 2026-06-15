@@ -294,6 +294,7 @@ export const BodyProprioceptionSchema = z.object({
       expect: BodyExpectationSchema.optional(),
       actual: BodyActualResultSchema.optional(),
       mismatch: z.array(z.string()),
+      mismatchStreaks: z.record(z.string(), z.number().int().nonnegative()).optional(),
     })
     .optional(),
 });
@@ -326,6 +327,9 @@ export const BodyTickTraceSchema = z.object({
   controlInput: ControlInputSchema,
   actual: BodyActualResultSchema,
   mismatch: z.array(z.string()),
+  latencyMs: z.number().optional(),
+  usage: UsageSchema.optional(),
+  modelError: z.string().optional(),
 });
 
 export const TurnDecisionSchema = z.object({
@@ -494,6 +498,8 @@ export const MatchSummarySchema = z.object({
   winnerTeam: z.enum(["blue", "red"]).nullable(),
   costUsd: z.number(),
   fallbackRate: z.number(),
+  bodyCostUsd: z.number().optional(),
+  bodyParseRate: z.number().optional(),
   competence: CompetenceSchema.optional(), // the pilot seat's competence
 });
 export type MatchSummary = z.infer<typeof MatchSummarySchema>;

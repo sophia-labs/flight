@@ -21,6 +21,37 @@ npm run e2e
 
 `npm test` runs deterministic sim tests. `npm run e2e` runs the browser smoke test against the Vite app.
 
+## Headless Runs
+
+```bash
+npm run match
+npm run film -- --scripted --cinema --out clips/scripted.mp4
+FILM_MODE=pilot-intent npm run film -- --scripted --cinema --out clips/body-scripted.mp4
+FILM_MODE=pilot-intent BODY_MODEL=deepseek/deepseek-v4-flash npm run film -- deepseek/deepseek-v4-flash --cinema --out clips/body-live.mp4
+FILM_SENSOR_ID=nose-cam npm run film -- --scripted --cinema --out clips/nose-sensor.mp4
+FILM_MODE=pilot-intent npm run film -- --scripted --replay-out /tmp/body-replay.json
+npm run clip:controls -- --replay /tmp/body-replay.json --out clips/body-cockpit.mp4 --seconds 12
+npm run clip:ensemble -- --out clips/deepseek-v4-flash-ensemble-cockpit.mp4
+npm run verify:replay -- clips/deepseek-v4-flash-ensemble-replay.json --require-ensemble
+npm run critique:replay -- clips/deepseek-v4-flash-ensemble-replay.json
+npm run transcript:replay -- clips/deepseek-v4-flash-ensemble-replay.json --out clips/flight-transcript.md
+SWEEP_MODES=pilot-intent SWEEP_BODY_MODEL=scripted npm run sweep
+```
+
+`FILM_MODE=pilot-intent` mounts the Body loop. `BODY_MODEL=scripted` is the free deterministic Body; any OpenRouter slug uses the live Body adapter and records Body usage, cost, latency, parse status, and provider errors in `bodyTicks`. Film defaults to the airframe's `cockpit-cam`; set `FILM_SENSOR_ID=nose-cam` to render the forward sensor instead.
+
+Body `MUSCLE` output is treated as a desired motor posture. The runtime applies tone-dependent slew limits before the command reaches aircraft controls, so live Body ticks can be granular without snapping the airframe.
+
+For live Body runs, `BODY_TIMEOUT_MS`, `BODY_MAX_RETRIES`, `BODY_EMPTY_RETRIES`, and `BODY_MAX_TOKENS` tune provider reliability and output budget. `BODY_EMPTY_RETRIES` retries successful-but-empty Body responses with a corrective command-format prompt.
+
+`clip:controls` records the live React viewer, so use it when the clip needs the same cockpit controls, pedals, and HUD overlay the app shows. Pass `--replay` to capture a specific generated match; omit it for the built-in deterministic demo.
+
+`clip:ensemble` is the repeatable live path. By default it uses `deepseek/deepseek-v4-flash` for both Pilot and Body, writes a sensor film plus replay under `clips/`, verifies that the pilot did not fall back and that the live Body ticks parsed, writes the matching transcript Markdown, then records the cockpit-mounted viewer clip. Use `--transcript-out` to choose the transcript path or `--no-transcript` to skip it.
+
+`critique:replay` turns a replay into prompt/harness notes: fallback validity, Body parse and mismatch rates, range closure, energy, stall, control smoothness, and weapon employment.
+
+The primary debugging workflow is transcript reading. The app's Flight Transcript panel follows replay time and shows Pilot want, Body sense/output, control motion, weapon geometry, EXPECT/ACTUAL, mismatch streaks, and a short human read for each Body tick. `transcript:replay` writes the same moment-by-moment read as Markdown for review beside generated clips.
+
 ## Shape
 
 - `src/sim`: deterministic headless simulation, aircraft state, controls, simple aerodynamics, weapon resolution.

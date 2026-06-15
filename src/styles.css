@@ -470,6 +470,85 @@ h2 {
   font-weight: 800;
 }
 
+.transcript-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.transcript-head,
+.transcript-entry-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.transcript-head h2 {
+  margin: 0;
+}
+
+.transcript-head span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.transcript-list {
+  display: grid;
+  gap: 8px;
+  max-height: 430px;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.transcript-entry {
+  display: grid;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  place-items: stretch;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 8px;
+  color: var(--text);
+  text-align: left;
+  background: rgba(0, 0, 0, 0.17);
+}
+
+.transcript-entry.active {
+  border-color: rgba(77, 163, 255, 0.58);
+  background: rgba(77, 163, 255, 0.14);
+}
+
+.transcript-entry.has-mismatch:not(.active) {
+  border-color: rgba(242, 201, 76, 0.22);
+}
+
+.transcript-entry-top {
+  color: #dce6e9;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.transcript-read,
+.transcript-detail {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.32;
+}
+
+.transcript-read {
+  color: #e7f6fb;
+  font-size: 0.8rem;
+}
+
+.transcript-detail {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
 .stick-card {
   display: grid;
   grid-template-columns: 76px minmax(0, 1fr);

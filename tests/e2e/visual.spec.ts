@@ -71,8 +71,12 @@ test("opens the hangar with physical surface controls", async ({ page }) => {
 
   await page.getByRole("button", { name: "Hangar" }).click();
   await expect(page.getByRole("heading", { name: "Build your aircraft" })).toBeVisible();
+  await expect(page.getByText("PART KIT")).toBeVisible();
+  await expect(page.getByText("PROP CURVE")).toBeVisible();
   await expect(page.getByText("surfaces")).toBeVisible();
   await expect(page.getByText("engines")).toBeVisible();
+  await expect(page.getByRole("button", { name: /WING main-wing/i })).toBeVisible();
+  await page.getByRole("button", { name: /WING main-wing/i }).click();
   await expect(page.getByText("incidence").first()).toBeVisible();
   await expect(page.getByText("x offset").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Fly this ▶" })).toBeVisible();
@@ -91,8 +95,17 @@ test("shows actual surface telemetry in cabin view", async ({ page }) => {
   await expect(bodyAudit).toBeVisible();
   await expect(bodyAudit.getByText("Body Loop")).toBeVisible();
   await expect(bodyAudit.getByText("Muscle")).toBeVisible();
+  await expect(bodyAudit.getByText("Motion")).toBeVisible();
+  await expect(bodyAudit.getByText(/delta=.*flips=/).first()).toBeVisible();
 
   await page.getByRole("button", { name: "Cabin" }).click();
+
+  const transcript = page.getByLabel("Flight transcript");
+  await expect(transcript).toBeVisible();
+  await expect(transcript.getByText("Flight Transcript")).toBeVisible();
+  await expect(transcript.getByText(/Body \d+/).first()).toBeVisible();
+  await expect(transcript.getByText(/delta=.*flips=/).first()).toBeVisible();
+
   const hud = page.getByLabel("Control surface HUD");
   await expect(hud).toBeVisible();
   await expect(hud.getByText("AIL L")).toBeVisible();

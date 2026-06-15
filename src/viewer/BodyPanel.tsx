@@ -1,4 +1,10 @@
+import { useMemo } from "react";
 import type { BodyTickTrace, MatchReplay, ReplayFrame } from "../protocol/schema";
+import {
+  activeFlightTranscriptMomentIndex,
+  buildFlightTranscriptMoments,
+  type FlightTranscriptMoment,
+} from "../transcript/flightTranscript";
 import { formatTime } from "./format";
 
 function muscleText(tick: BodyTickTrace) {
@@ -7,8 +13,8 @@ function muscleText(tick: BodyTickTrace) {
   return `R${muscle.roll} P${muscle.pitch} Y${muscle.yaw} U${muscle.push}`;
 }
 
-function mismatchText(tick: BodyTickTrace) {
-  return tick.mismatch.length > 0 ? tick.mismatch.join(", ") : "matched";
+function mismatchText(moment: FlightTranscriptMoment) {
+  return moment.mismatch.length > 0 ? moment.mismatch.join(", ") : "matched";
 }
 
 export function BodyPanel({
@@ -20,13 +26,14 @@ export function BodyPanel({
   frame: ReplayFrame;
   pilotId: string;
 }) {
-  const ticks = (replay.bodyTicks ?? []).filter((tick) => tick.agentId === pilotId);
-  let tick: BodyTickTrace | undefined;
-  for (const candidate of ticks) {
-    if (candidate.time <= frame.time) tick = candidate;
-    else break;
-  }
-  if (!tick) return null;
+  const moments = useMemo(
+    () => buildFlightTranscriptMoments(replay, { pilotId }),
+    [pilotId, replay],
+  );
+  const activeIndex = activeFlightTranscriptMomentIndex(moments, frame.time);
+  const moment = activeIndex >= 0 ? moments[activeIndex] : undefined;
+  if (!moment) return null;
+  const tick = moment.tick;
 
   return (
     <section className="panel body-panel" aria-label="Body audit">
@@ -53,11 +60,27 @@ export function BodyPanel({
         </div>
         <div>
           <p className="metric-label">Mismatch</p>
-          <div className="metric-value">{mismatchText(tick)}</div>
+          <div className="metric-value">{mismatchText(moment)}</div>
         </div>
+        <div>
+          <p className="metric-label">Motion</p>
+          <div className="metric-value">{moment.controlMotionText}</div>
+        </div>
+        {tick.latencyMs !== undefined ? (
+          <div>
+            <p className="metric-label">Latency</p>
+            <div className="metric-value">{Math.round(tick.latencyMs)} ms</div>
+          </div>
+        ) : null}
+        {tick.usage ? (
+          <div>
+            <p className="metric-label">Call cost</p>
+            <div className="metric-value">${tick.usage.costUsd.toFixed(5)}</div>
+          </div>
+        ) : null}
       </div>
 
-      <p className="body-feel">{tick.parsed.feel ?? "body did not report feeling"}</p>
+      <p className="body-feel">{tick.modelError ?? tick.parsed.feel ?? "body did not report feeling"}</p>
       <div className="body-sense">
         <p>
           <span>Sense</span> {tick.proprioception.energy} · {tick.proprioception.stallMargin} ·{" "}
@@ -70,6 +93,9 @@ export function BodyPanel({
         <p>
           <span>Actual</span> {tick.actual.roll} / {tick.actual.pitch} / {tick.actual.speed} /{" "}
           {tick.actual.margin}
+        </p>
+        <p>
+          <span>Read</span> {moment.read}
         </p>
         {tick.parsed.memory ? (
           <p>

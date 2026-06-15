@@ -6,6 +6,8 @@ export interface PiBodyModelOptions {
   slug: string;
   maxTokens?: number;
   maxRetries?: number;
+  emptyRetries?: number;
+  timeoutMs?: number;
 }
 
 function resolveOpenRouterModel(slug: string) {
@@ -24,35 +26,70 @@ function textFromResponse(content: unknown[]): string {
     .trim();
 }
 
+function contentTypes(content: unknown[]): string {
+  return content
+    .map((block) =>
+      typeof block === "object" && block !== null && typeof (block as { type?: unknown }).type === "string"
+        ? String((block as { type: unknown }).type)
+        : typeof block,
+    )
+    .join(",");
+}
+
 export function piBodyModel(options: PiBodyModelOptions): BodyModel {
   const model = resolveOpenRouterModel(options.slug);
   const maxTokens = options.maxTokens ?? 96;
   const maxRetries = options.maxRetries ?? 2;
+  const emptyRetries = options.emptyRetries ?? 1;
   const systemPrompt = [
     "You are the vehicle's body, not the pilot.",
     "You live one tick at a time.",
-    "Move the muscles of this body using only the required command format.",
-    "Do not explain, ask questions, or make long plans.",
+    "Move the muscles of this body using exactly the required five-line command format.",
+    "Return only these five lines, with no Markdown, labels, prose, or extra text before or after them.",
+    "The first line must begin with MUSCLE and use integer ROLL, PITCH, YAW, and PUSH fields.",
+    "Do not invent words such as gentle_right, throttle_up, or pull_gently; use only signed numbers.",
     "If the pilot asks for something physically dangerous, preserve control and report the body feeling.",
   ].join("\n");
 
-  return async ({ manifest, pilotIntent, proprioception, memory }) => {
+  return async ({ manifest, pilotIntent, proprioception, memory, signal, timeoutMs: inputTimeoutMs }) => {
     const prompt = buildBodyPrompt(manifest, pilotIntent, proprioception, memory);
-    const response = await complete(
-      model,
-      {
-        systemPrompt,
-        messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-      },
-      { maxTokens, maxRetries },
-    );
+    let lastEmpty = "body model produced no text";
+    let usage = { inputTokens: 0, outputTokens: 0, costUsd: 0 };
 
-    if (response.stopReason === "error" || response.content.length === 0) {
-      throw new Error(response.errorMessage ?? `body model returned stopReason=${response.stopReason}`);
+    for (let attempt = 0; attempt <= emptyRetries; attempt += 1) {
+      const retrySuffix =
+        attempt === 0
+          ? ""
+          : "\n\nEMPTY_RESPONSE_RECOVERY\nYour previous response was empty. Return exactly the five command lines now.";
+      const response = await complete(
+        model,
+        {
+          systemPrompt,
+          messages: [{ role: "user", content: `${prompt}${retrySuffix}`, timestamp: Date.now() }],
+        },
+        { maxTokens, maxRetries, signal, timeoutMs: inputTimeoutMs ?? options.timeoutMs },
+      );
+
+      usage = {
+        inputTokens: usage.inputTokens + response.usage.input,
+        outputTokens: usage.outputTokens + response.usage.output,
+        costUsd: usage.costUsd + response.usage.cost.total,
+      };
+      if (response.stopReason === "error") {
+        throw new Error(response.errorMessage ?? `body model returned stopReason=${response.stopReason}`);
+      }
+      const text = textFromResponse(response.content);
+      if (!text) {
+        lastEmpty = `body model produced no text (stop=${response.stopReason}, content=${contentTypes(response.content) || "empty"})`;
+        continue;
+      }
+      return {
+        output: text,
+        usage,
+        raw: { model: response.model, stopReason: response.stopReason, emptyRetries: attempt },
+      };
     }
-    const text = textFromResponse(response.content);
-    if (!text) throw new Error("body model produced no text");
-    return text;
+
+    throw new Error(lastEmpty);
   };
 }
-

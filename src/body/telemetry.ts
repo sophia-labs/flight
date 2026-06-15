@@ -3,6 +3,7 @@ import type {
   BodyExpectation,
   BodyMuscleCommand,
   BodyProprioception,
+  ControlInput,
   PilotIntentAction,
 } from "../protocol/schema";
 import { basisFromQuat, clamp, cross, dot, length, normalize, scale, sub, vec3 } from "../sim/math";
@@ -17,6 +18,7 @@ export interface BodyHistory {
   lastExpect?: BodyExpectation;
   lastActual?: BodyActualResult;
   mismatch: string[];
+  mismatchStreaks: Record<string, number>;
 }
 
 export interface BodyKinematicSnapshot {
@@ -161,12 +163,60 @@ export function summarizeActual(before: BodyKinematicSnapshot, after: AircraftSt
   };
 }
 
-export function compareExpectation(expect: BodyExpectation | undefined, actual: BodyActualResult): string[] {
+function rollDirection(label: string): number {
+  if (label.startsWith("left")) return -1;
+  if (label.startsWith("right")) return 1;
+  return 0;
+}
+
+function pitchDirection(label: string): number {
+  if (label.startsWith("down")) return -1;
+  if (label.startsWith("up")) return 1;
+  return 0;
+}
+
+function directionSupported(direction: number, controlValue: number | undefined): boolean {
+  return direction !== 0 && controlValue !== undefined && Math.sign(controlValue) === direction && Math.abs(controlValue) >= 0.08;
+}
+
+function rollMatches(expect: BodyExpectation, actual: BodyActualResult, controlInput?: ControlInput): boolean {
+  if (expect.roll === "stable") return true;
+  const expectedBase = expect.roll.replace(/\++$/, "");
+  if (actual.roll.startsWith(expectedBase)) return true;
+  return actual.roll === "stable" && directionSupported(rollDirection(expect.roll), controlInput?.roll);
+}
+
+function pitchMatches(expect: BodyExpectation, actual: BodyActualResult, controlInput?: ControlInput): boolean {
+  if (expect.pitch === "stable") return true;
+  if (actual.pitch.startsWith(expect.pitch)) return true;
+  return actual.pitch === "stable" && directionSupported(pitchDirection(expect.pitch), controlInput?.pitch);
+}
+
+function speedMatches(expect: BodyExpectation, actual: BodyActualResult, controlInput?: ControlInput): boolean {
+  if (expect.speed === actual.speed) return true;
+  if (expect.speed === "recover" && (actual.speed === "rising" || actual.speed === "stable")) return true;
+  if (
+    expect.speed === "rising" &&
+    actual.speed === "stable" &&
+    controlInput !== undefined &&
+    controlInput.throttle >= 0.72 &&
+    controlInput.pitch <= 0.18
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function compareExpectation(
+  expect: BodyExpectation | undefined,
+  actual: BodyActualResult,
+  controlInput?: ControlInput,
+): string[] {
   if (!expect) return ["no_expect"];
   const mismatch: string[] = [];
-  if (!actual.roll.startsWith(expect.roll.replace(/\++$/, "")) && expect.roll !== "stable") mismatch.push("roll_mismatch");
-  if (!actual.pitch.startsWith(expect.pitch.replace(/\++$/, "")) && expect.pitch !== "stable") mismatch.push("pitch_mismatch");
-  if (expect.speed !== actual.speed && !(expect.speed === "recover" && (actual.speed === "rising" || actual.speed === "stable"))) mismatch.push("speed_mismatch");
+  if (!rollMatches(expect, actual, controlInput)) mismatch.push("roll_mismatch");
+  if (!pitchMatches(expect, actual, controlInput)) mismatch.push("pitch_mismatch");
+  if (!speedMatches(expect, actual, controlInput)) mismatch.push("speed_mismatch");
   if (expect.margin !== actual.margin && !(expect.margin === "better" && actual.margin !== "stalled")) mismatch.push("margin_mismatch");
   return mismatch;
 }
@@ -189,12 +239,22 @@ export function encodeProprioception(
     pain: pain(self),
     affordances: affordances(self),
   };
-  if (history.lastMuscle || history.lastExpect || history.lastActual || history.mismatch.length > 0) {
+  const activeStreaks = Object.fromEntries(
+    Object.entries(history.mismatchStreaks).filter(([, count]) => count > 0),
+  );
+  if (
+    history.lastMuscle ||
+    history.lastExpect ||
+    history.lastActual ||
+    history.mismatch.length > 0 ||
+    Object.keys(activeStreaks).length > 0
+  ) {
     sense.last = {
       ...(history.lastMuscle ? { muscle: history.lastMuscle } : {}),
       ...(history.lastExpect ? { expect: history.lastExpect } : {}),
       ...(history.lastActual ? { actual: history.lastActual } : {}),
       mismatch: history.mismatch,
+      ...(Object.keys(activeStreaks).length > 0 ? { mismatchStreaks: activeStreaks } : {}),
     };
   }
   return sense;
@@ -203,6 +263,66 @@ export function encodeProprioception(
 function muscleLine(muscle: BodyMuscleCommand | undefined) {
   if (!muscle) return "none";
   return `ROLL=${muscle.roll} PITCH=${muscle.pitch} YAW=${muscle.yaw} PUSH=${muscle.push}`;
+}
+
+const OUTPUT_CONTRACT = [
+  "OUTPUT_CONTRACT",
+  "Return exactly these five lines and nothing else:",
+  "MUSCLE ROLL=<int -5..5> PITCH=<int -5..5> YAW=<int -5..5> PUSH=<int 0..5>",
+  "TONE <hold|pulse|brace|relax|reverse> <int 0..3>",
+  "EXPECT ROLL=<left++|left+|stable|right+|right++> PITCH=<down|stable|up> SPEED=<recover|stable|rising|falling> MARGIN=<better|stable|safe|narrowing|thin>",
+  "FEEL <1 to 12 words>",
+  "MEM <0 to 7 words>",
+  "Example:",
+  "MUSCLE ROLL=4 PITCH=-1 YAW=2 PUSH=5",
+  "TONE brace 1",
+  "EXPECT ROLL=right+ PITCH=down SPEED=stable MARGIN=safe",
+  "FEEL rolling right before I pull",
+  "MEM right_turn stage",
+  "Use integers only for MUSCLE and TONE. Never use word-values like gentle_right or throttle_up.",
+  "Only use TONE reverse when you intentionally need an axis to cross through neutral immediately.",
+];
+
+function calibrationLines(proprioception: BodyProprioception): string[] {
+  const mismatch = proprioception.last?.mismatch ?? [];
+  const streaks = proprioception.last?.mismatchStreaks ?? {};
+  const repeated = Object.entries(streaks)
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1]);
+  if (mismatch.length === 0 && repeated.length === 0) {
+    return [
+      "CALIBRATION",
+      "controls are rate-limited; command the next desired posture, not an instant snap",
+      "hold a useful muscle for several ticks before reversing it",
+      "non-reverse tones pass control sign changes through neutral first",
+    ];
+  }
+
+  const lines = [
+    "CALIBRATION",
+    `last_mismatch: ${mismatch.join("; ")}`,
+    "trust ACTUAL over EXPECT when they disagree",
+    "correct the next EXPECT to what the airframe can actually do",
+  ];
+  if (repeated.length > 0) {
+    lines.push(`mismatch_streaks: ${repeated.map(([label, count]) => `${label}x${count}`).join("; ")}`);
+  }
+  if (mismatch.includes("roll_mismatch")) lines.push("roll_mismatch: hold bank longer or reduce roll reversal");
+  if (mismatch.includes("pitch_mismatch")) lines.push("pitch_mismatch: ease pull; unload before asking for more pitch");
+  if (mismatch.includes("speed_mismatch")) lines.push("speed_mismatch: use PUSH and nose-down before tightening");
+  if (mismatch.includes("margin_mismatch")) lines.push("margin_mismatch: preserve wing authority before pursuit");
+  if (mismatch.includes("no_expect")) lines.push("no_expect: always include EXPECT with realistic results");
+  if ((streaks.speed_mismatch ?? 0) >= 2) {
+    lines.push("speed_mismatch_streak: match last ACTUAL speed trend; do not promise speed change from controls alone");
+  }
+  if ((streaks.pitch_mismatch ?? 0) >= 2) {
+    lines.push("pitch_mismatch_streak: stop promising pitch response from tiny/oscillating commands");
+  }
+  if ((streaks.roll_mismatch ?? 0) >= 2) {
+    lines.push("roll_mismatch_streak: hold one roll direction longer before changing EXPECT");
+  }
+  lines.push("reversal_rule: use TONE reverse only for deliberate immediate sign changes");
+  return lines;
 }
 
 export function buildBodyPrompt(
@@ -221,6 +341,10 @@ export function buildBodyPrompt(
     "",
     "BODY_LAWS",
     ...manifest.bodyLaws,
+    "",
+    ...OUTPUT_CONTRACT,
+    "",
+    ...calibrationLines(proprioception),
     "",
     "SENSE",
     `attitude: ${proprioception.attitude}`,
@@ -243,4 +367,3 @@ export function buildBodyPrompt(
     memory ?? "",
   ].join("\n");
 }
-

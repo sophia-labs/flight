@@ -1,5 +1,5 @@
 // Pilot-cam film exporter. Flies a match (scripted or a live model via pi-ai/OpenRouter), then
-// renders an mp4 of what the pilot's nose-camera "sees".
+// renders an mp4 of what the selected mounted camera sees.
 //
 // Two looks:
 //   default   — the camera-ascii viewport + subtitles on black (cheap, no WebGL).
@@ -12,27 +12,39 @@
 //   npm run film -- --scripted --cinema                 # free dev pass (3D), no API key
 //   npm run film -- deepseek/deepseek-v4-flash --cinema  # live; writes film.mp4
 //   npm run film -- <model> --cinema --out clips/run.mp4
-//   env: FILM_TURNS (16), FILM_FPS (30), FILM_MODE (raw-stick|setpoint|flight-director, default flight-director)
+//   npm run film -- --scripted --replay-out /tmp/replay.json
+//   env: FILM_TURNS (16), FILM_FPS (30), FILM_MODE (raw-stick|setpoint|flight-director|pilot-intent)
+//        BODY_MODEL (scripted, or an OpenRouter slug when FILM_MODE=pilot-intent)
+//        FILM_SENSOR_ID (cockpit-cam default; use nose-cam for the old forward sensor)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
+import { dirname } from "node:path";
 import { chromium } from "@playwright/test";
 import { actionSpecs, type ActionMode } from "../agent/actionSpec";
+import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import { FLIGHT_RULES, piController, resolveOpenRouterModel } from "../agent/controllers/pi";
 import { defensiveController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
 import { perfectSensor } from "../agent/observation";
 import { senseAndEncode } from "../agent/perception";
 import { competenceEvaluator } from "../eval/outcome";
-import type { AircraftSnapshot, MatchReplay, Quaternion } from "../protocol/schema";
+import type { AircraftSnapshot, MatchReplay, Part, Quaternion } from "../protocol/schema";
 import type { MatchConfig } from "../runtime/config";
 import { runMatch } from "../runtime/match";
 import { FRAME_DT, TURN_DURATION, createInitialAircraft } from "../runtime/scenario";
-import { noseCamera } from "../sim/airframe";
 import { DEFAULT_MODEL } from "../sim/flight";
-import { add, basisFromQuat, lerp, quatMultiply, quatNormalize, rotateVec } from "../sim/math";
+import { lerp, quatNormalize } from "../sim/math";
+import { cameraDevices, mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
 import type { AircraftState } from "../sim/types";
+import {
+  SCRIPTED_BODY_MODEL,
+  bodyModelLabel,
+  createHeadlessBodyConfig,
+  isLiveBodyModel,
+} from "./bodyConfig";
+import { formatReplayVerification, summarizeReplayVerification } from "./replayVerification";
 
 const PILOT_ID = "blue-1";
 const RAD2DEG = 180 / Math.PI;
@@ -47,22 +59,55 @@ const PILOT_ASPECT = WL / H;
 const argv = process.argv.slice(2);
 const scripted = argv.includes("--scripted");
 const cinema = argv.includes("--cinema");
-const outIdx = argv.indexOf("--out");
-const out = outIdx >= 0 ? argv[outIdx + 1] : "film.mp4";
+const valueFlags = ["--out", "--replay-out"] as const;
+const consumedArgIndices = new Set<number>();
+function flagValue(flag: (typeof valueFlags)[number]): string | undefined {
+  const index = argv.indexOf(flag);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
+  consumedArgIndices.add(index + 1);
+  return value;
+}
+const out = flagValue("--out") ?? "film.mp4";
+const replayOut = flagValue("--replay-out");
 const model =
-  argv.find((a, i) => !a.startsWith("--") && (outIdx < 0 || i !== outIdx + 1)) ??
-  "deepseek/deepseek-chat-v3.1";
+  argv.find((a, i) => !a.startsWith("--") && !consumedArgIndices.has(i)) ??
+  "deepseek/deepseek-v4-flash";
 const turns = Number(process.env.FILM_TURNS ?? 16);
 const fps = Number(process.env.FILM_FPS ?? 30);
-const mode = (process.env.FILM_MODE ?? "flight-director") as ActionMode;
+const mode = parseActionMode(process.env.FILM_MODE ?? "flight-director");
+const bodyModel = process.env.BODY_MODEL ?? SCRIPTED_BODY_MODEL;
+const bodyTimeoutMs = Number(process.env.BODY_TIMEOUT_MS ?? 15_000);
+const bodyMaxTokens = Number(process.env.BODY_MAX_TOKENS ?? 96);
+const bodyMaxRetries = Number(process.env.BODY_MAX_RETRIES ?? 2);
+const bodyEmptyRetries = Number(process.env.BODY_EMPTY_RETRIES ?? 1);
+const sensorId = process.env.FILM_SENSOR_ID ?? "cockpit-cam";
 const label = scripted ? "Pursuit" : (model.split("/").pop() ?? model);
 
+function parseActionMode(raw: string): ActionMode {
+  if (raw in actionSpecs) return raw as ActionMode;
+  throw new Error(`unknown FILM_MODE=${raw}; expected ${Object.keys(actionSpecs).join("|")}`);
+}
+
 function buildConfig(): MatchConfig {
+  const usesBody = mode === "pilot-intent";
+  const body = usesBody
+    ? createHeadlessBodyConfig({
+        modelSlug: bodyModel,
+        maxTokens: bodyMaxTokens,
+        maxRetries: bodyMaxRetries,
+        emptyRetries: bodyEmptyRetries,
+        timeoutMs: bodyTimeoutMs,
+      })
+    : undefined;
   const blue = scripted
-    ? pursuitController(0.82)
+    ? usesBody
+      ? bodyPilotController(0.82)
+      : pursuitController(0.82)
     : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES });
   return {
-    id: `film|${scripted ? "scripted" : model}|${mode}`,
+    id: `film|${scripted ? "scripted" : model}|${mode}${usesBody ? `|body:${bodyModelLabel(bodyModel)}` : ""}`,
     turnDuration: TURN_DURATION,
     frameDt: FRAME_DT,
     maxTurns: turns,
@@ -73,8 +118,16 @@ function buildConfig(): MatchConfig {
     fallback: pursuitFallback,
     agents: {
       "blue-1": {
-        meta: { id: "blue-1", kind: scripted ? "scripted" : "llm", label: scripted ? "pursuit" : `${model}/${mode}` },
+        meta: {
+          id: "blue-1",
+          kind: scripted ? "scripted" : "llm",
+          label: scripted ? "pursuit" : `${model}/${mode}`,
+          ...(body
+            ? { config: { bodyId: body.manifest.bodyId, bodyModel: bodyModelLabel(bodyModel) } }
+            : {}),
+        },
         controller: blue,
+        ...(body ? { body } : {}),
       },
       "red-1": { meta: { id: "red-1", kind: "scripted", label: "defensive" }, controller: defensiveController(0.64) },
     },
@@ -82,7 +135,8 @@ function buildConfig(): MatchConfig {
 }
 
 // ---- interpolation: rebuild a sense-able AircraftState world at an arbitrary time ----
-function fromSnapshot(s: AircraftSnapshot): AircraftState {
+function fromSnapshot(s: AircraftSnapshot, parts: Part[] | undefined): AircraftState {
+  const devices = cameraDevices(parts);
   return {
     id: s.id,
     callsign: s.callsign,
@@ -98,7 +152,7 @@ function fromSnapshot(s: AircraftSnapshot): AircraftState {
     metrics: { airspeed: s.airspeed, altitude: s.altitude, aoaDeg: s.aoaDeg, gLoad: s.gLoad, stalled: s.stalled },
     angularVelocity: { x: 0, y: 0, z: 0 },
     fuelKg: DEFAULT_MODEL.fuelCapacityKg,
-    devices: [noseCamera()],
+    devices,
   };
 }
 
@@ -149,9 +203,12 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
   const frames = replay.frames;
   const duration = frames[frames.length - 1].time;
   const total = Math.max(1, Math.floor(duration * fps));
-  const device = noseCamera();
-  const hFovRad = device.optics?.hFovRad ?? Math.PI / 3;
-  const fovDeg = 2 * Math.atan(Math.tan(hFovRad / 2) / PILOT_ASPECT) * RAD2DEG; // pilot vertical fov
+  const pilotParts = replay.airframes?.[PILOT_ID]?.parts;
+  const devices = cameraDevices(pilotParts);
+  if (process.env.FILM_SENSOR_ID && devices.length > 0 && !devices.some((device) => device.id === sensorId)) {
+    throw new Error(`FILM_SENSOR_ID=${sensorId} is not mounted on ${PILOT_ID}`);
+  }
+  const device = selectCameraDevice(pilotParts, sensorId);
 
   const rationaleByTurn = new Map<number, string>();
   for (const d of replay.decisions ?? []) {
@@ -170,20 +227,17 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
 
     const world = fa.aircraft.map((sa) => {
       const sb = fb.aircraft.find((s) => s.id === sa.id) ?? sa;
-      return interpAircraft(fromSnapshot(sa), fromSnapshot(sb), alpha);
+      const parts = replay.airframes?.[sa.id]?.parts;
+      return interpAircraft(fromSnapshot(sa, parts), fromSnapshot(sb, parts), alpha);
     });
     const self = world.find((s) => s.id === PILOT_ID) ?? world[0];
 
-    // True mounted-camera pose (matches what the sensor projects from).
-    const camOrient = quatMultiply(self.orientation, device.pose.rotation);
-    const b = basisFromQuat(camOrient);
-    const eye = add(self.position, rotateVec(self.orientation, device.pose.offset));
-
+    const pose = mountedSensorPose(device, self, { aspectOverride: PILOT_ASPECT });
     const percept = senseAndEncode(device, world, self);
     result.push({
       cam: percept.text ?? "",
       sub: rationaleByTurn.get(fa.turn) ?? "",
-      hud: `NOSE-CAM   turn ${fa.turn}/${turns}   t=${t.toFixed(1)}s`,
+      hud: `${device.id.toUpperCase()}   turn ${fa.turn}/${turns}   t=${t.toFixed(1)}s`,
       selfId: self.id,
       aircraft: world.map((s) => ({
         id: s.id,
@@ -193,10 +247,10 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
         stalled: s.metrics.stalled,
         alive: s.health > 0,
       })),
-      eye,
-      fwd: b.forward,
-      up: b.up,
-      fovDeg,
+      eye: pose.eye,
+      fwd: pose.boresight,
+      up: pose.basis.up,
+      fovDeg: pose.vFovRad * RAD2DEG,
       angle: t * 0.22, // slow orbit
     });
   }
@@ -407,17 +461,32 @@ async function renderCinema(frames: FilmFrame[]): Promise<void> {
 
 async function main(): Promise<void> {
   if (!scripted) resolveOpenRouterModel(model); // fail fast if the slug isn't in the registry
+  if (mode === "pilot-intent" && isLiveBodyModel(bodyModel)) createHeadlessBodyConfig({ modelSlug: bodyModel });
   console.error(
-    `film${cinema ? " [cinema]" : ""}: ${scripted ? "scripted" : model} (${mode}) — ${turns} turns @ ${fps}fps -> ${out}`,
+    `film${cinema ? " [cinema]" : ""}: ${scripted ? "scripted" : model} (${mode}` +
+      `${mode === "pilot-intent" ? `, body=${bodyModelLabel(bodyModel)}` : ""}) — ` +
+      `${turns} turns @ ${fps}fps -> ${out}`,
   );
 
   const replay = await runMatch(buildConfig());
+  if (replayOut) {
+    mkdirSync(dirname(replayOut), { recursive: true });
+    writeFileSync(replayOut, JSON.stringify(replay));
+    console.error(`replay -> ${replayOut}`);
+  }
   const pilotDecisions = (replay.decisions ?? []).filter((d) => d.agentId === PILOT_ID);
   const fallbacks = pilotDecisions.filter((d) => d.source === "fallback").length;
-  const cost = pilotDecisions.reduce((s, d) => s + (d.usage?.costUsd ?? 0), 0);
+  const pilotCost = pilotDecisions.reduce((s, d) => s + (d.usage?.costUsd ?? 0), 0);
+  const bodyCost = (replay.bodyTicks ?? [])
+    .filter((tick) => tick.agentId === PILOT_ID)
+    .reduce((s, tick) => s + (tick.usage?.costUsd ?? 0), 0);
   console.error(
-    `flew: winner=${replay.outcome?.winnerTeam ?? "draw"} fallbacks=${fallbacks}/${pilotDecisions.length} cost=$${cost.toFixed(4)}`,
+    `flew: winner=${replay.outcome?.winnerTeam ?? "draw"} fallbacks=${fallbacks}/${pilotDecisions.length} ` +
+      `cost=$${(pilotCost + bodyCost).toFixed(4)} pilot=$${pilotCost.toFixed(4)} body=$${bodyCost.toFixed(4)}`,
   );
+  if (mode === "pilot-intent") {
+    console.error(formatReplayVerification(summarizeReplayVerification(replay, PILOT_ID)));
+  }
 
   const frames = buildFrames(replay);
   console.error(`rendering ${frames.length} frames...`);

@@ -28,22 +28,45 @@ import { FlightScene, type CameraMode } from "./viewer/FlightScene";
 import { HangarScreen } from "./viewer/HangarScreen";
 import { MatchBrowser } from "./viewer/MatchBrowser";
 import { MatchStats } from "./viewer/MatchStats";
+import { sampleReplayFrame } from "./viewer/replaySample";
 import { StatusPanel } from "./viewer/StatusPanel";
 import { SurfaceHud } from "./viewer/SurfaceHud";
 import { Timeline } from "./viewer/Timeline";
+import { TranscriptPanel } from "./viewer/TranscriptPanel";
 import { usePlayback } from "./viewer/usePlayback";
 import { useReplayAudio } from "./viewer/useReplayAudio";
+
+function queryValue(name: string): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+function queryFlag(name: string, fallback: boolean): boolean {
+  const value = queryValue(name);
+  if (value === null) return fallback;
+  return !["0", "false", "off", "no"].includes(value.toLowerCase());
+}
+
+function queryCameraMode(): CameraMode {
+  return queryValue("camera") === "cabin" ? "cabin" : "orbit";
+}
+
+declare global {
+  interface Window {
+    __flightSetReplayPosition?: (position: number) => void;
+  }
+}
 
 export function App() {
   const [matches, setMatches] = useState<MatchSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [replay, setReplay] = useState<MatchReplay | null>(null);
-  const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
+  const [cameraMode, setCameraMode] = useState<CameraMode>(() => queryCameraMode());
   const [screen, setScreen] = useState<"flight" | "hangar">("flight");
-  const [hudOn, setHudOn] = useState(true);
-  const [captionsOn, setCaptionsOn] = useState(true);
-  const [soundOn, setSoundOn] = useState(false);
-  const [voiceOn, setVoiceOn] = useState(false);
+  const [hudOn, setHudOn] = useState(() => queryFlag("hud", true));
+  const [captionsOn, setCaptionsOn] = useState(() => queryFlag("captions", true));
+  const [soundOn, setSoundOn] = useState(() => queryFlag("sound", false));
+  const [voiceOn, setVoiceOn] = useState(() => queryFlag("voice", false));
   const requestRef = useRef(0);
 
   // Source preference: sweep manifest (browser) → single recorded match.json → generated demo.
@@ -107,8 +130,17 @@ export function App() {
 
   const playback = usePlayback(replay);
   const frame = replay
-    ? replay.frames[Math.min(playback.frameIndex, replay.frames.length - 1)]
+    ? sampleReplayFrame(replay.frames, playback.samplePosition)
     : undefined;
+
+  useEffect(() => {
+    window.__flightSetReplayPosition = (position: number) => {
+      playback.setPosition(position, false);
+    };
+    return () => {
+      delete window.__flightSetReplayPosition;
+    };
+  }, [playback.setPosition]);
 
   const pilotId = useMemo(
     () => replay?.agents?.find((agent) => agent.kind === "llm")?.id ?? "blue-1",
@@ -184,6 +216,7 @@ export function App() {
             pilotId={pilotId}
             clock={playback.clock}
             onIndex={playback.reportIndex}
+            onSample={playback.reportSample}
           />
         </Canvas>
 
@@ -308,6 +341,12 @@ export function App() {
 
         {hasBrowser ? <MatchStats replay={replay} pilotId={pilotId} /> : null}
         <BodyPanel replay={replay} frame={frame} pilotId={pilotId} />
+        <TranscriptPanel
+          replay={replay}
+          frame={frame}
+          pilotId={pilotId}
+          onSeek={(position) => playback.setPosition(position, false)}
+        />
         <StatusPanel frame={frame} />
         <ControlsPanel frame={frame} />
       </aside>

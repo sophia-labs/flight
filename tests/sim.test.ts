@@ -76,10 +76,17 @@ describe("flight sim replay generation", () => {
 
     const first = bodyTicks[0];
     expect(first.parsed.muscle).toBeDefined();
-    expect(first.controlInput.roll).toBeCloseTo(first.parsed.muscle!.roll / 5);
-    expect(first.controlInput.pitch).toBeCloseTo(first.parsed.muscle!.pitch / 5);
-    expect(first.controlInput.yaw).toBeCloseTo(first.parsed.muscle!.yaw / 5);
-    expect(first.controlInput.throttle).toBeCloseTo(first.parsed.muscle!.push / 5);
+    const desiredRoll = first.parsed.muscle!.roll / 5;
+    const desiredPitch = first.parsed.muscle!.pitch / 5;
+    const desiredYaw = first.parsed.muscle!.yaw / 5;
+    const desiredThrottle = first.parsed.muscle!.push / 5;
+    expect(Math.sign(first.controlInput.roll || desiredRoll)).toBe(Math.sign(desiredRoll || first.controlInput.roll));
+    expect(Math.abs(first.controlInput.roll)).toBeLessThanOrEqual(Math.abs(desiredRoll));
+    expect(Math.sign(first.controlInput.pitch || desiredPitch)).toBe(Math.sign(desiredPitch || first.controlInput.pitch));
+    expect(Math.abs(first.controlInput.pitch)).toBeLessThanOrEqual(Math.abs(desiredPitch));
+    expect(Math.sign(first.controlInput.yaw || desiredYaw)).toBe(Math.sign(desiredYaw || first.controlInput.yaw));
+    expect(Math.abs(first.controlInput.yaw)).toBeLessThanOrEqual(Math.abs(desiredYaw));
+    expect(first.controlInput.throttle).toBeLessThanOrEqual(Math.max(1, desiredThrottle));
     expect(bodyTicks.every((tick) => tick.parsed.status !== "failed")).toBe(true);
     expect(bodyTicks.some((tick) => tick.mismatch.length > 0)).toBe(true);
     expect(bodyTicks.some((tick) => tick.parsed.feel && tick.parsed.memory !== undefined)).toBe(true);

@@ -114,7 +114,10 @@ export const pilotIntentSpec: ActionSpec = {
   rules: [
     "ACTION (pilot-intent): send desire, constraints, style, attention, and trigger request.",
     "Do NOT output actuator, stick, bank, pitch, or load commands. The Body owns direct motor control.",
-    "Use body-relative language: pursue, unload, recover energy, line up, avoid ground, keep control.",
+    "Choose one concrete phase each turn: close, point_nose, preserve_energy, recover, or fire.",
+    "Use body-relative language: close range, point nose, unload, recover energy, line up, avoid ground, keep control.",
+    "If range < 1050m, bearingForward is high, bearingRight/bearingUp are small, and weaponCooldown is 0, set trigger=true and make the goal a firing-window request.",
+    "If not in a firing window, set trigger=false and make the goal explain the next geometry step instead of a generic engage command.",
   ].join("\n"),
   toAction: (a) => ({
     kind: "pilot-intent",

@@ -1,18 +1,6 @@
 import type { Percept, Vec3 } from "../protocol/schema";
-import {
-  add,
-  basisFromQuat,
-  clamp,
-  cross,
-  dot,
-  length,
-  normalize,
-  quatMultiply,
-  rotateVec,
-  scale,
-  sub,
-  WORLD_UP,
-} from "../sim/math";
+import { basisFromQuat, clamp, dot, length, normalize, sub } from "../sim/math";
+import { mountedSensorPose } from "../sim/mountedSensor";
 import type { Modality, SensorDevice } from "../sim/parts";
 import type { AircraftState, Team } from "../sim/types";
 import { cameraAsciiEncoder } from "./encoders/cameraAscii";
@@ -75,21 +63,11 @@ const AIRFRAME_RADIUS_M = 8; // ~16 m span; turns range into an apparent angular
 export const cameraSensor: Sensor = {
   modality: "camera",
   sense(device, world, self) {
-    const eye = add(self.position, rotateVec(self.orientation, device.pose.offset));
-    const camOrient = quatMultiply(self.orientation, device.pose.rotation);
-    const basis = basisFromQuat(camOrient);
-    const boresight = basis.forward;
-
-    // Camera attitude — same bank/pitch formula the setpoint adapter uses, on the camera basis.
-    const refUp = normalize(sub(WORLD_UP, scale(boresight, dot(WORLD_UP, boresight))), basis.up);
-    const bankRad = Math.atan2(dot(cross(refUp, basis.up), boresight), dot(refUp, basis.up));
-    const pitchRad = Math.asin(clamp(boresight.y, -1, 1));
-
-    const hHalfFovRad = (device.optics?.hFovRad ?? Math.PI / 3) / 2;
-    const aspect = device.optics?.aspect ?? 4 / 3;
+    const pose = mountedSensorPose(device, self);
+    const { eye, basis, boresight, bankRad, pitchRad, hHalfFovRad, vHalfFovRad } = pose;
+    const aspect = pose.aspect;
     const tanH = Math.tan(Math.max(hHalfFovRad, 1e-4)); // floor keeps a degenerate FOV from making ndc NaN
     const tanV = tanH / aspect;
-    const vHalfFovRad = Math.atan(tanV);
 
     const contacts: ProjectedContact[] = [];
     for (const other of world) {
