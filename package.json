@@ -14,6 +14,7 @@
     "film": "tsx --env-file=.env src/headless/film.ts",
     "demo:physics": "tsx src/headless/surfaceDemo.ts",
     "clip:controls": "tsx src/headless/cockpitClip.ts",
+    "stills:pairs": "tsx src/headless/cockpitStills.ts",
     "clip:ensemble": "tsx --env-file=.env src/headless/ensembleClip.ts",
     "verify:replay": "tsx src/headless/verifyReplay.ts",
     "critique:replay": "tsx src/headless/critiqueReplay.ts",

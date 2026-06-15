@@ -3,7 +3,7 @@ import { basisFromQuat, clamp, dot, length, normalize, sub } from "../sim/math";
 import { mountedSensorPose } from "../sim/mountedSensor";
 import type { Modality, SensorDevice } from "../sim/parts";
 import type { AircraftState, Team } from "../sim/types";
-import { cameraAsciiEncoder } from "./encoders/cameraAscii";
+import { cameraAsciiEncoder, cameraAsciiEncoderV2 } from "./encoders/cameraAscii";
 
 // v0.4.0 perception seam — the structural mirror of the action seam:
 //   action:     intent  -> adapterFor(kind).controlFor -> ControlInput   (sim-facing)
@@ -129,6 +129,7 @@ const SENSORS: Partial<Record<Modality, Sensor>> = {
 
 const ENCODERS: Record<string, Encoder> = {
   [cameraAsciiEncoder.id]: cameraAsciiEncoder,
+  [cameraAsciiEncoderV2.id]: cameraAsciiEncoderV2,
 };
 
 const DEFAULT_ENCODER: Partial<Record<Modality, string>> = {
