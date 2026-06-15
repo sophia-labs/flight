@@ -1,4 +1,4 @@
-import type { Part } from "../protocol/schema";
+import type { Part, SurfaceControlSnapshot } from "../protocol/schema";
 
 // Renders an aircraft from its airframe parts — the plane you build is the plane you see. Shared by the
 // flight scene (parent group is driven imperatively by SceneDriver) and the builder preview.
@@ -10,8 +10,18 @@ const WING_THICKNESS = 0.04;
 const ENGINE_COLOR = "#9aa6ad";
 const NOSE_COLOR = "#f4fbff";
 const TANK_COLOR = "#c9a14a";
+const CONTROL_SURFACE_COLOR = "#f4a340";
+const DEG = Math.PI / 180;
 
-function PartMesh({ part, color }: { part: Part; color: string }) {
+function PartMesh({
+  part,
+  color,
+  surfaceControls,
+}: {
+  part: Part;
+  color: string;
+  surfaceControls: Map<string, SurfaceControlSnapshot>;
+}) {
   if (part.kind === "sensor") return null; // a sensor has no structural body in the flight view
 
   const s = PART_VISUAL_SCALE;
@@ -53,6 +63,13 @@ function PartMesh({ part, color }: { part: Part; color: string }) {
           <boxGeometry args={dims} />
           <meshStandardMaterial color={color} roughness={0.5} metalness={0.18} />
         </mesh>
+        <WingControlSurfaces
+          part={part}
+          span={span}
+          chord={chord}
+          vertical={vertical}
+          surfaceControls={surfaceControls}
+        />
       </group>
     );
   }
@@ -86,19 +103,129 @@ function PartMesh({ part, color }: { part: Part; color: string }) {
   return null;
 }
 
+function WingControlSurfaces({
+  part,
+  span,
+  chord,
+  vertical,
+  surfaceControls,
+}: {
+  part: Extract<Part, { kind: "wing" }>;
+  span: number;
+  chord: number;
+  vertical: boolean;
+  surfaceControls: Map<string, SurfaceControlSnapshot>;
+}) {
+  const axis = part.control?.axis;
+  if (!axis) return null;
+
+  if (axis === "roll") {
+    return (
+      <>
+        <ControlPanel
+          surfaceId={`${part.id}-left`}
+          axis={axis}
+          side={-1}
+          span={span}
+          chord={chord}
+          vertical={false}
+          surfaceControls={surfaceControls}
+        />
+        <ControlPanel
+          surfaceId={`${part.id}-right`}
+          axis={axis}
+          side={1}
+          span={span}
+          chord={chord}
+          vertical={false}
+          surfaceControls={surfaceControls}
+        />
+      </>
+    );
+  }
+
+  return (
+    <ControlPanel
+      surfaceId={part.id}
+      axis={axis}
+      span={span}
+      chord={chord}
+      vertical={vertical}
+      surfaceControls={surfaceControls}
+    />
+  );
+}
+
+function ControlPanel({
+  surfaceId,
+  axis,
+  side = 0,
+  span,
+  chord,
+  vertical,
+  surfaceControls,
+}: {
+  surfaceId: string;
+  axis: "pitch" | "roll" | "yaw";
+  side?: -1 | 0 | 1;
+  span: number;
+  chord: number;
+  vertical: boolean;
+  surfaceControls: Map<string, SurfaceControlSnapshot>;
+}) {
+  const state = surfaceControls.get(surfaceId);
+  const deflectionRad = (state?.deflectionDeg ?? 0) * DEG;
+  const panelChord = Math.max(chord * 0.32, 0.025);
+  const hingeZ = chord / 2 - panelChord;
+  const panelSpan = axis === "roll" ? span * 0.34 : span * 0.74;
+  const centerX = axis === "roll" ? side * span * 0.31 : 0;
+  const material = (
+    <meshStandardMaterial
+      color={CONTROL_SURFACE_COLOR}
+      emissive={CONTROL_SURFACE_COLOR}
+      emissiveIntensity={Math.min(0.22, Math.abs(deflectionRad) * 0.9 + 0.04)}
+      roughness={0.42}
+      metalness={0.18}
+    />
+  );
+
+  if (vertical) {
+    return (
+      <group position={[0, 0, hingeZ]} rotation={[0, deflectionRad, 0]}>
+        <mesh castShadow position={[WING_THICKNESS * 0.02, 0, panelChord / 2]}>
+          <boxGeometry args={[WING_THICKNESS * 1.18, panelSpan, panelChord]} />
+          {material}
+        </mesh>
+      </group>
+    );
+  }
+
+  return (
+    <group position={[centerX, WING_THICKNESS * 0.58, hingeZ]} rotation={[deflectionRad, 0, 0]}>
+      <mesh castShadow position={[0, 0, panelChord / 2]}>
+        <boxGeometry args={[panelSpan, WING_THICKNESS * 0.74, panelChord]} />
+        {material}
+      </mesh>
+    </group>
+  );
+}
+
 export function PartMeshes({
   parts,
   color,
   stalled,
+  surfaceControls = [],
 }: {
   parts: Part[];
   color: string;
   stalled: boolean;
+  surfaceControls?: SurfaceControlSnapshot[];
 }) {
+  const surfaceControlsById = new Map(surfaceControls.map((state) => [state.id, state]));
   return (
     <>
       {parts.map((part) => (
-        <PartMesh key={part.id} part={part} color={color} />
+        <PartMesh key={part.id} part={part} color={color} surfaceControls={surfaceControlsById} />
       ))}
       {/* energy/stall glow, sized to the airframe centre */}
       <mesh>

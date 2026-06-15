@@ -1,6 +1,7 @@
 import { Canvas } from "@react-three/fiber";
 import {
   Captions,
+  Gauge,
   Mic,
   Orbit,
   Pause,
@@ -27,6 +28,7 @@ import { HangarScreen } from "./viewer/HangarScreen";
 import { MatchBrowser } from "./viewer/MatchBrowser";
 import { MatchStats } from "./viewer/MatchStats";
 import { StatusPanel } from "./viewer/StatusPanel";
+import { SurfaceHud } from "./viewer/SurfaceHud";
 import { Timeline } from "./viewer/Timeline";
 import { usePlayback } from "./viewer/usePlayback";
 import { useReplayAudio } from "./viewer/useReplayAudio";
@@ -37,6 +39,7 @@ export function App() {
   const [replay, setReplay] = useState<MatchReplay | null>(null);
   const [cameraMode, setCameraMode] = useState<CameraMode>("orbit");
   const [screen, setScreen] = useState<"flight" | "hangar">("flight");
+  const [hudOn, setHudOn] = useState(true);
   const [captionsOn, setCaptionsOn] = useState(true);
   const [soundOn, setSoundOn] = useState(false);
   const [voiceOn, setVoiceOn] = useState(false);
@@ -189,6 +192,13 @@ export function App() {
             {caption}
           </div>
         ) : null}
+
+        <SurfaceHud
+          frame={frame}
+          replay={replay}
+          pilotId={pilotId}
+          visible={cameraMode === "cabin" && hudOn}
+        />
       </section>
 
       <aside className="control-rail" aria-label="Match controls">
@@ -251,6 +261,15 @@ export function App() {
         </div>
 
         <div className="av-toggle" role="group" aria-label="Captions and audio">
+          <button
+            type="button"
+            className={hudOn ? "active" : ""}
+            aria-pressed={hudOn}
+            onClick={() => setHudOn((on) => !on)}
+            title="Surface telemetry overlay for the mounted camera view"
+          >
+            <Gauge size={16} /> HUD
+          </button>
           <button
             type="button"
             className={captionsOn ? "active" : ""}

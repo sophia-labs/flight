@@ -70,6 +70,122 @@ button:hover {
   background: #0a0d10;
 }
 
+.surface-hud {
+  position: absolute;
+  left: 18px;
+  bottom: 18px;
+  z-index: 8;
+  width: min(360px, calc(100% - 36px));
+  padding: 12px;
+  border: 1px solid rgba(77, 163, 255, 0.28);
+  border-radius: 8px;
+  background: rgba(5, 11, 14, 0.64);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  color: #e9f8ff;
+  backdrop-filter: blur(10px);
+}
+
+.surface-hud-topline,
+.surface-hud-inputs,
+.surface-row {
+  display: grid;
+  align-items: center;
+}
+
+.surface-hud-topline {
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  color: #b9e8ff;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.surface-hud-inputs {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.surface-hud-inputs div {
+  min-width: 0;
+  padding: 7px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.surface-hud-inputs span,
+.surface-label {
+  display: block;
+  color: #7fb5c7;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.surface-hud-inputs strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: #f7fcff;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.surface-hud-surfaces {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.surface-row {
+  grid-template-columns: 48px minmax(60px, 1fr) 116px;
+  gap: 8px;
+}
+
+.surface-row-hot .surface-label {
+  color: #f2c94c;
+}
+
+.surface-bar {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, transparent calc(50% - 1px), rgba(255, 255, 255, 0.38) 50%, transparent calc(50% + 1px)),
+    rgba(255, 255, 255, 0.1);
+}
+
+.surface-bar span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: inherit;
+  background: #f4a340;
+  box-shadow: 0 0 12px rgba(244, 163, 64, 0.65);
+}
+
+.surface-values {
+  display: grid;
+  gap: 1px;
+  color: #f7fcff;
+  font-size: 0.63rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  text-align: right;
+  line-height: 1.08;
+}
+
+.surface-hud-empty {
+  margin: 0;
+  color: #8fa0a6;
+  font-size: 0.78rem;
+}
+
 .control-rail {
   display: flex;
   flex-direction: column;
@@ -357,7 +473,7 @@ h2 {
 
 .av-toggle {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 

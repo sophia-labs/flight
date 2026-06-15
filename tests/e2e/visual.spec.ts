@@ -77,3 +77,68 @@ test("opens the hangar with physical surface controls", async ({ page }) => {
   await expect(page.getByText("x offset").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Fly this ▶" })).toBeVisible();
 });
+
+test("shows actual surface telemetry in cabin view", async ({ page }) => {
+  await page.route("**/matches/index.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await page.route("**/match.json", (route) =>
+    route.fulfill({ status: 404, contentType: "text/plain", body: "not found" }),
+  );
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Cabin" }).click();
+  const hud = page.getByLabel("Control surface HUD");
+  await expect(hud).toBeVisible();
+  await expect(hud.getByText("AIL L")).toBeVisible();
+  await expect(hud.getByText("AIL R")).toBeVisible();
+  await expect(hud.getByText("ELEV")).toBeVisible();
+  await expect(hud.getByText("RUD", { exact: true })).toBeVisible();
+  await expect(hud.getByText("PED")).toBeVisible();
+  await expect(hud.getByText("THR")).toBeVisible();
+  await expect(hud.getByText(/hinge [+-]?\d+\.\d deg/).first()).toBeVisible();
+  await expect(hud.getByText(/ctrl [+-]?\d+\.\d deg/).first()).toBeVisible();
+  await expect(hud.getByText(/flow [+-]?\d+\.\d deg/).first()).toBeVisible();
+  await expect(hud.getByText(/load \d+(\.\d)? kN/).first()).toBeVisible();
+
+  await page.getByRole("button", { name: "HUD" }).click();
+  await expect(hud).toBeHidden();
+  const canvas = page.locator("canvas").first();
+  await expect(canvas).toBeVisible();
+  await page.waitForTimeout(500);
+  const cockpitIndicators = await canvas.evaluate((node) => {
+    const canvasElement = node as HTMLCanvasElement;
+    const gl =
+      canvasElement.getContext("webgl2") ?? canvasElement.getContext("webgl");
+    if (!gl) return { magenta: 0, cyan: 0 };
+
+    let magenta = 0;
+    let cyan = 0;
+    for (let y = 0.12; y < 0.92; y += 0.007) {
+      for (let x = 0.02; x < 0.86; x += 0.007) {
+        const pixel = new Uint8Array(4);
+        gl.readPixels(
+          Math.floor(canvasElement.width * x),
+          Math.floor(canvasElement.height * y),
+          1,
+          1,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          pixel,
+        );
+        if (pixel[0] > 120 && pixel[2] > 120 && pixel[1] < Math.min(pixel[0], pixel[2]) * 0.78) {
+          magenta += 1;
+        }
+        if (pixel[1] > 120 && pixel[2] > 120 && pixel[0] < Math.min(pixel[1], pixel[2]) * 0.78) {
+          cyan += 1;
+        }
+      }
+    }
+    return { magenta, cyan };
+  });
+  expect(cockpitIndicators.magenta).toBeGreaterThan(0);
+  expect(cockpitIndicators.cyan).toBeGreaterThan(0);
+
+  await page.getByRole("button", { name: "HUD" }).click();
+  await expect(hud).toBeVisible();
+});

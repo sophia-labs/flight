@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ControlInputSchema,
+  SurfaceControlSnapshotSchema,
   clampControlInput,
   type ControlInput,
   type ReplayEvent,
@@ -54,6 +55,53 @@ describe("flight sim replay generation", () => {
         expect(aircraft.health).toBeLessThanOrEqual(100);
       }
     }
+  });
+
+  it("records actual per-surface control deflections for HUD and cockpit rendering", async () => {
+    const replay = await generateDemoMatch(4);
+    const blueFrames = replay.frames
+      .map((frame) => frame.aircraft.find((aircraft) => aircraft.id === "blue-1"))
+      .filter((aircraft): aircraft is NonNullable<typeof aircraft> => Boolean(aircraft));
+
+    expect(blueFrames[0].surfaceControls?.map((surface) => surface.id)).toEqual([
+      "main-wing-left",
+      "main-wing-right",
+      "tailplane",
+      "fin",
+    ]);
+
+    for (const aircraft of blueFrames) {
+      for (const surface of aircraft.surfaceControls ?? []) {
+        expect(() => SurfaceControlSnapshotSchema.parse(surface)).not.toThrow();
+      }
+    }
+
+    expect(
+      blueFrames.some((aircraft) =>
+        (aircraft.surfaceControls ?? []).some((surface) => Math.abs(surface.deflectionDeg) > 0.1),
+      ),
+    ).toBe(true);
+    expect(
+      blueFrames.some((aircraft) =>
+        (aircraft.surfaceControls ?? []).some(
+          (surface) =>
+            Math.abs(surface.effectiveAoADeg) > 0.01 &&
+            Math.abs(surface.effectiveAoADeg) < Math.abs(surface.deflectionDeg),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      blueFrames.some((aircraft) =>
+        (aircraft.surfaceControls ?? []).some(
+          (surface) =>
+            surface.localAoADeg !== undefined &&
+            surface.totalAoADeg !== undefined &&
+            surface.stallSeverity !== undefined &&
+            surface.loadN !== undefined &&
+            surface.loadN > 100,
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("creates an orientation that points the aircraft forward vector at the desired heading", () => {

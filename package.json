@@ -12,7 +12,8 @@
     "match": "tsx src/headless/runMatch.ts > match.json",
     "sweep": "tsx --env-file=.env src/headless/sweep.ts",
     "film": "tsx --env-file=.env src/headless/film.ts",
-    "demo:physics": "tsx src/headless/surfaceDemo.ts"
+    "demo:physics": "tsx src/headless/surfaceDemo.ts",
+    "clip:controls": "tsx src/headless/cockpitClip.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.79.3",

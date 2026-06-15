@@ -2,14 +2,30 @@ import { Line, OrbitControls, Sky } from "@react-three/drei";
 import { useFrame, useThree } from "@react-three/fiber";
 import { useCallback, useMemo, useRef, type MutableRefObject } from "react";
 import * as THREE from "three";
-import type { AircraftSnapshot, MatchReplay, Part, ReplayFrame, Vec3 } from "../protocol/schema";
+import type {
+  AircraftSnapshot,
+  ControlInput,
+  MatchReplay,
+  Part,
+  PartPose,
+  ReplayFrame,
+  SurfaceControlSnapshot,
+  Vec3,
+} from "../protocol/schema";
 import { defaultAirframe } from "../sim/airframe";
-import { PartMeshes } from "./airframeMesh";
+import { PART_VISUAL_SCALE, PartMeshes } from "./airframeMesh";
+import { deriveSurfaceControls } from "./surfaceTelemetry";
 import type { PlaybackClock } from "./usePlayback";
 
 export type CameraMode = "orbit" | "cabin";
 
 const SCENE_SCALE = 0.01;
+const ACTIVE_AIRCRAFT_SCALE = 1.42;
+const DEAD_AIRCRAFT_SCALE = 1.05;
+const DEFAULT_COCKPIT_VIEW: PartPose = {
+  offset: { x: 0, y: 0.45, z: -4.2 },
+  rotation: { x: 0, y: 0, z: 0, w: 1 },
+};
 
 interface FlightSceneProps {
   frame: ReplayFrame;
@@ -36,6 +52,8 @@ export function FlightScene({
   // The plane each aircraft flew. Legacy replays (no airframes) fall back to the default so they still
   // render a recognizable jet rather than nothing.
   const fallbackParts = useMemo(() => defaultAirframe().parts, []);
+  const pilotParts = replay.airframes?.[pilotId]?.parts ?? fallbackParts;
+  const cockpitView = cockpitViewPose(pilotParts);
 
   return (
     <>
@@ -58,6 +76,7 @@ export function FlightScene({
         clock={clock}
         cameraMode={cameraMode}
         pilotId={pilotId}
+        cockpitView={cockpitView}
         shipRefs={shipRefs}
         controlsRef={controlsRef}
         onIndex={onIndex}
@@ -82,6 +101,7 @@ export function FlightScene({
             ship={ship}
             shipId={entry.id}
             parts={parts}
+            showCockpit={entry.id === pilotId}
             refMap={shipRefs}
           />
         );
@@ -120,22 +140,35 @@ function Terrain() {
   );
 }
 
+function cockpitViewPose(parts: Part[]): PartPose {
+  const cockpit = parts.find(
+    (part) => part.kind === "sensor" && part.modality === "camera" && part.id === "cockpit-cam",
+  );
+  if (cockpit?.kind === "sensor") return cockpit.pose;
+
+  const camera = parts.find((part) => part.kind === "sensor" && part.modality === "camera");
+  return camera?.kind === "sensor" ? camera.pose : DEFAULT_COCKPIT_VIEW;
+}
+
 // Single render-loop driver: advances the clock, interpolates every aircraft between the
 // bracketing recorded frames (position lerp + orientation slerp), drives the camera from the
 // same interpolated state, and reports the integer frame up to React at tick rate.
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
-const UP_FALLBACK = new THREE.Vector3(0, 0, -1); // only used in near-vertical flight
 const tmpQa = new THREE.Quaternion();
 const tmpQb = new THREE.Quaternion();
+const tmpPilotQ = new THREE.Quaternion();
+const tmpSensorQ = new THREE.Quaternion();
+const tmpCameraQ = new THREE.Quaternion();
 const tmpVec = new THREE.Vector3();
+const tmpLocalOffset = new THREE.Vector3();
 const tmpEye = new THREE.Vector3();
-const tmpTarget = new THREE.Vector3();
 
 function SceneDriver({
   replay,
   clock,
   cameraMode,
   pilotId,
+  cockpitView,
   shipRefs,
   controlsRef,
   onIndex,
@@ -144,13 +177,12 @@ function SceneDriver({
   clock: PlaybackClock;
   cameraMode: CameraMode;
   pilotId: string;
+  cockpitView: PartPose;
   shipRefs: MutableRefObject<Record<string, THREE.Group | null>>;
   controlsRef: MutableRefObject<any>;
   onIndex: (index: number) => void;
 }) {
   const { camera } = useThree();
-  const camPosition = useRef<THREE.Vector3 | null>(null);
-  const camForward = useRef<THREE.Vector3 | null>(null);
   const orbitTarget = useRef<THREE.Vector3 | null>(null);
   const lastReported = useRef(-1);
   const lastMode = useRef<CameraMode | null>(null);
@@ -179,9 +211,7 @@ function SceneDriver({
     let pilotX = 0;
     let pilotY = 0;
     let pilotZ = 0;
-    let pilotVx = 0;
-    let pilotVy = 0;
-    let pilotVz = 0;
+    let pilotScale = ACTIVE_AIRCRAFT_SCALE;
     let havePilot = false;
 
     for (const a of fa.aircraft) {
@@ -194,11 +224,11 @@ function SceneDriver({
       centerZ += pz;
       count += 1;
 
+      tmpQa.set(a.orientation.x, a.orientation.y, a.orientation.z, a.orientation.w);
+      tmpQb.set(b.orientation.x, b.orientation.y, b.orientation.z, b.orientation.w);
       const group = shipRefs.current[a.id];
       if (group) {
         group.position.set(px * SCENE_SCALE, py * SCENE_SCALE, pz * SCENE_SCALE);
-        tmpQa.set(a.orientation.x, a.orientation.y, a.orientation.z, a.orientation.w);
-        tmpQb.set(b.orientation.x, b.orientation.y, b.orientation.z, b.orientation.w);
         group.quaternion.slerpQuaternions(tmpQa, tmpQb, t);
       }
 
@@ -207,12 +237,12 @@ function SceneDriver({
         pilotX = px;
         pilotY = py;
         pilotZ = pz;
-        pilotVx = THREE.MathUtils.lerp(a.velocity.x, b.velocity.x, t);
-        pilotVy = THREE.MathUtils.lerp(a.velocity.y, b.velocity.y, t);
-        pilotVz = THREE.MathUtils.lerp(a.velocity.z, b.velocity.z, t);
+        pilotScale = a.health <= 0 ? DEAD_AIRCRAFT_SCALE : ACTIVE_AIRCRAFT_SCALE;
+        tmpPilotQ.slerpQuaternions(tmpQa, tmpQb, t);
       }
     }
     if (count === 0) return;
+    if (!havePilot) tmpPilotQ.identity();
 
     const cx = (centerX / count) * SCENE_SCALE;
     const cy = (centerY / count) * SCENE_SCALE;
@@ -226,21 +256,22 @@ function SceneDriver({
       const ey = (havePilot ? pilotY : centerY / count) * SCENE_SCALE;
       const ez = (havePilot ? pilotZ : centerZ / count) * SCENE_SCALE;
 
-      tmpVec.set(pilotVx, pilotVy, pilotVz);
-      if (tmpVec.lengthSq() < 1e-6) tmpVec.set(0, 0, -1);
-      tmpVec.normalize();
-      if (entering || !camForward.current) camForward.current = tmpVec.clone();
-      else camForward.current.lerp(tmpVec, 0.08).normalize();
+      tmpLocalOffset
+        .set(cockpitView.offset.x, cockpitView.offset.y, cockpitView.offset.z)
+        .multiplyScalar(PART_VISUAL_SCALE * pilotScale)
+        .applyQuaternion(tmpPilotQ);
+      tmpEye.set(ex, ey, ez).add(tmpLocalOffset);
+      tmpSensorQ.set(
+        cockpitView.rotation.x,
+        cockpitView.rotation.y,
+        cockpitView.rotation.z,
+        cockpitView.rotation.w,
+      );
+      tmpCameraQ.copy(tmpPilotQ).multiply(tmpSensorQ);
 
-      tmpEye.set(ex, ey, ez).addScaledVector(camForward.current, 0.25);
-      tmpEye.y += 0.12;
-      if (entering || !camPosition.current) camPosition.current = tmpEye.clone();
-      else camPosition.current.lerp(tmpEye, 0.2);
-
-      camera.up.copy(Math.abs(camForward.current.y) > 0.95 ? UP_FALLBACK : WORLD_UP);
-      camera.position.copy(camPosition.current);
-      tmpTarget.copy(camPosition.current).addScaledVector(camForward.current, 10);
-      camera.lookAt(tmpTarget);
+      camera.position.copy(tmpEye);
+      camera.quaternion.copy(tmpCameraQ);
+      camera.updateMatrixWorld();
     } else {
       if (entering || !orbitTarget.current) {
         // Snap to a clean chase view when (re)entering orbit, then let OrbitControls own the
@@ -276,11 +307,13 @@ function AircraftMesh({
   ship,
   shipId,
   parts,
+  showCockpit,
   refMap,
 }: {
   ship: AircraftSnapshot;
   shipId: string;
   parts: Part[];
+  showCockpit: boolean;
   refMap: MutableRefObject<Record<string, THREE.Group | null>>;
 }) {
   // Stable ref callback so the persistent group isn't torn down on per-tick re-renders.
@@ -295,8 +328,291 @@ function AircraftMesh({
   // parts (the plane you built) and the discrete visual props (colour, death scale, stall tint) from
   // the current frame's snapshot.
   return (
-    <group ref={register} scale={ship.health <= 0 ? 1.05 : 1.42}>
-      <PartMeshes parts={parts} color={ship.color} stalled={ship.stalled} />
+    <group ref={register} scale={ship.health <= 0 ? DEAD_AIRCRAFT_SCALE : ACTIVE_AIRCRAFT_SCALE}>
+      <PartMeshes
+        parts={parts}
+        color={ship.color}
+        stalled={ship.stalled}
+        surfaceControls={ship.surfaceControls ?? deriveSurfaceControls(parts, ship.controls)}
+      />
+      {showCockpit ? (
+        <AircraftCockpitControls
+          controls={ship.controls}
+          surfaceControls={ship.surfaceControls ?? deriveSurfaceControls(parts, ship.controls)}
+        />
+      ) : null}
+    </group>
+  );
+}
+
+function AircraftCockpitControls({
+  controls,
+  surfaceControls,
+}: {
+  controls: ControlInput;
+  surfaceControls: SurfaceControlSnapshot[];
+}) {
+  const s = PART_VISUAL_SCALE;
+  const stickPitch = THREE.MathUtils.clamp(controls.pitch, -1, 1) * 0.42;
+  const stickRoll = THREE.MathUtils.clamp(-controls.roll, -1, 1) * 0.36;
+  const throttleAngle = -0.55 + THREE.MathUtils.clamp(controls.throttle, 0, 1) * 1.05;
+  const yaw = THREE.MathUtils.clamp(controls.yaw, -1, 1);
+  const pedalTravel = yaw * 0.42 * s;
+  const pedalAngle = yaw * 0.24;
+
+  return (
+    <group>
+      <mesh position={[0, -0.38 * s, -5.25 * s]} castShadow>
+        <boxGeometry args={[1.7 * s, 0.16 * s, 0.64 * s]} />
+        <meshStandardMaterial color="#172229" roughness={0.62} metalness={0.12} />
+      </mesh>
+      <mesh position={[0, 0.05 * s, -5.75 * s]} castShadow>
+        <boxGeometry args={[1.8 * s, 0.12 * s, 0.12 * s]} />
+        <meshStandardMaterial color="#24333b" roughness={0.5} metalness={0.2} />
+      </mesh>
+
+      <group position={[0.18 * s, -0.3 * s, -5.65 * s]} rotation={[stickPitch, 0, stickRoll]}>
+        <mesh position={[0, 0.32 * s, 0]} castShadow>
+          <cylinderGeometry args={[0.035 * s, 0.045 * s, 0.64 * s, 12]} />
+          <meshStandardMaterial color="#d7e5ea" roughness={0.42} metalness={0.25} />
+        </mesh>
+        <mesh position={[0, 0.68 * s, 0]} castShadow>
+          <boxGeometry args={[0.28 * s, 0.13 * s, 0.1 * s]} />
+          <meshStandardMaterial
+            color={controls.trigger ? "#f2c94c" : "#4da3ff"}
+            emissive={controls.trigger ? "#5b4200" : "#061d35"}
+            emissiveIntensity={0.28}
+            roughness={0.36}
+            metalness={0.18}
+          />
+        </mesh>
+      </group>
+
+      <mesh position={[-0.46 * s, -0.32 * s, -5.52 * s]} castShadow>
+        <boxGeometry args={[0.24 * s, 0.08 * s, 0.36 * s]} />
+        <meshStandardMaterial color="#11191f" roughness={0.58} metalness={0.16} />
+      </mesh>
+      <group position={[-0.46 * s, -0.28 * s, -5.52 * s]} rotation={[throttleAngle, 0, 0]}>
+        <mesh position={[0, 0.25 * s, 0]} castShadow>
+          <cylinderGeometry args={[0.026 * s, 0.034 * s, 0.52 * s, 10]} />
+          <meshStandardMaterial color="#33424a" roughness={0.45} metalness={0.25} />
+        </mesh>
+        <mesh position={[0, 0.55 * s, 0]} castShadow>
+          <sphereGeometry args={[0.09 * s, 12, 8]} />
+          <meshStandardMaterial color="#58d38c" emissive="#0d321d" emissiveIntensity={0.2} />
+        </mesh>
+      </group>
+
+      <mesh position={[0, -0.17 * s, -6.12 * s]} castShadow>
+        <boxGeometry args={[1.05 * s, 0.05 * s, 0.08 * s]} />
+        <meshStandardMaterial color="#26343c" roughness={0.52} metalness={0.2} />
+      </mesh>
+      <CockpitPedal position={[-0.32 * s, -0.15 * s, -6.02 * s + pedalTravel]} rotationX={-0.24 + pedalAngle} />
+      <CockpitPedal position={[0.32 * s, -0.15 * s, -6.02 * s - pedalTravel]} rotationX={-0.24 - pedalAngle} />
+      <SurfaceRepeaterPanel surfaceControls={surfaceControls} />
+    </group>
+  );
+}
+
+function SurfaceRepeaterPanel({ surfaceControls }: { surfaceControls: SurfaceControlSnapshot[] }) {
+  const s = PART_VISUAL_SCALE;
+  const rows = surfaceControlsForPanel(surfaceControls);
+
+  return (
+    <group position={[0.02 * s, 0.08 * s, -5.44 * s]} rotation={[-0.12, 0, 0]}>
+      <mesh castShadow>
+        <boxGeometry args={[1.16 * s, 0.86 * s, 0.08 * s]} />
+        <meshBasicMaterial color="#101a20" />
+      </mesh>
+      <mesh position={[0, 0, 0.046 * s]}>
+        <boxGeometry args={[1.02 * s, 0.72 * s, 0.014 * s]} />
+        <meshBasicMaterial color="#17252d" />
+      </mesh>
+      <SurfaceSynoptic surfaceControls={surfaceControls} />
+      {rows.map((surface, index) => (
+        <SurfaceRepeaterRow
+          key={surface.id}
+          surface={surface}
+          position={[0, (-0.09 - index * 0.115) * s, 0.07 * s]}
+        />
+      ))}
+    </group>
+  );
+}
+
+function SurfaceSynoptic({ surfaceControls }: { surfaceControls: SurfaceControlSnapshot[] }) {
+  const s = PART_VISUAL_SCALE;
+  const surfaces = surfaceControlsForSynoptic(surfaceControls);
+
+  return (
+    <group position={[0, 0.16 * s, 0.076 * s]} scale={[0.62, 0.62, 1]}>
+      <mesh position={[0, 0.02 * s, 0]}>
+        <boxGeometry args={[0.055 * s, 0.58 * s, 0.018 * s]} />
+        <meshBasicMaterial color="#6f8188" />
+      </mesh>
+      <mesh position={[0, 0.06 * s, 0]}>
+        <boxGeometry args={[0.72 * s, 0.038 * s, 0.018 * s]} />
+        <meshBasicMaterial color="#52666f" />
+      </mesh>
+      <mesh position={[0, -0.22 * s, 0]}>
+        <boxGeometry args={[0.4 * s, 0.034 * s, 0.018 * s]} />
+        <meshBasicMaterial color="#52666f" />
+      </mesh>
+      <mesh position={[0.055 * s, -0.14 * s, -0.002 * s]} rotation={[0, 0, -0.36]}>
+        <boxGeometry args={[0.035 * s, 0.2 * s, 0.016 * s]} />
+        <meshBasicMaterial color="#52666f" />
+      </mesh>
+
+      <SynopticSurfacePlate
+        surface={surfaces.leftAileron}
+        position={[-0.34 * s, 0.015 * s, -0.018 * s]}
+        size={[0.22 * s, 0.072 * s, 0.032 * s]}
+      />
+      <SynopticSurfacePlate
+        surface={surfaces.rightAileron}
+        position={[0.34 * s, 0.015 * s, -0.018 * s]}
+        size={[0.22 * s, 0.072 * s, 0.032 * s]}
+      />
+      <SynopticSurfacePlate
+        surface={surfaces.elevator}
+        position={[0, -0.255 * s, -0.018 * s]}
+        size={[0.28 * s, 0.064 * s, 0.032 * s]}
+      />
+      <SynopticSurfacePlate
+        surface={surfaces.rudder}
+        position={[0.09 * s, -0.105 * s, -0.02 * s]}
+        size={[0.072 * s, 0.18 * s, 0.032 * s]}
+        rotationScale={0.72}
+      />
+    </group>
+  );
+}
+
+function SynopticSurfacePlate({
+  surface,
+  position,
+  size,
+  rotationScale = 1,
+}: {
+  surface?: SurfaceControlSnapshot;
+  position: [number, number, number];
+  size: [number, number, number];
+  rotationScale?: number;
+}) {
+  const s = PART_VISUAL_SCALE;
+  const deflectionRad = ((surface?.deflectionDeg ?? 0) * Math.PI) / 180;
+  const flowRad = (((surface?.totalAoADeg ?? surface?.effectiveAoADeg ?? 0) * Math.PI) / 180) * 0.55;
+  const load = THREE.MathUtils.clamp((surface?.loadN ?? 0) / 65_000, 0, 1);
+  const stalled = (surface?.stallSeverity ?? 0) > 0.2;
+  const plateColor = stalled ? "#f2c94c" : "#f4a340";
+  const loadColor = stalled ? "#f2c94c" : "#58d38c";
+
+  return (
+    <group position={position}>
+      <mesh position={[0, 0, 0.01 * s]} rotation={[0, 0, deflectionRad * rotationScale]} castShadow>
+        <boxGeometry args={size} />
+        <meshBasicMaterial color={plateColor} />
+      </mesh>
+      <mesh position={[0, 0, 0.029 * s]} rotation={[0, 0, flowRad]} castShadow>
+        <boxGeometry args={[size[0] * 1.18, Math.max(size[1] * 0.22, 0.014 * s), 0.018 * s]} />
+        <meshBasicMaterial color="#00ffff" />
+      </mesh>
+      <mesh position={[0, -size[1] * 0.56, 0.026 * s]} castShadow>
+        <boxGeometry args={[Math.max(size[0] * (0.25 + load * 0.75), 0.024 * s), 0.016 * s, 0.016 * s]} />
+        <meshBasicMaterial color={loadColor} />
+      </mesh>
+    </group>
+  );
+}
+
+function SurfaceRepeaterRow({
+  surface,
+  position,
+}: {
+  surface: SurfaceControlSnapshot;
+  position: [number, number, number];
+}) {
+  const s = PART_VISUAL_SCALE;
+  const travel = THREE.MathUtils.clamp(surface.deflectionDeg / 14, -1, 1) * 0.42 * s;
+  const flow = THREE.MathUtils.clamp((surface.totalAoADeg ?? surface.effectiveAoADeg) / 12, -1, 1) * 0.28 * s;
+  const loadWidth = THREE.MathUtils.clamp((surface.loadN ?? 0) / 65_000, 0, 1) * 0.84 * s;
+  const loadColor = (surface.stallSeverity ?? 0) > 0.2 ? "#f2c94c" : "#58d38c";
+
+  return (
+    <group position={position}>
+      <mesh position={[0, 0, 0]} castShadow>
+        <boxGeometry args={[0.86 * s, 0.035 * s, 0.02 * s]} />
+        <meshBasicMaterial color="#39515b" />
+      </mesh>
+      <mesh position={[0, 0, -0.012 * s]} castShadow>
+        <boxGeometry args={[0.024 * s, 0.11 * s, 0.024 * s]} />
+        <meshBasicMaterial color="#dce7eb" />
+      </mesh>
+      <mesh position={[travel, 0, -0.03 * s]} rotation={[0, 0, surface.deflectionDeg * (Math.PI / 180)]} castShadow>
+        <boxGeometry args={[0.22 * s, 0.1 * s, 0.052 * s]} />
+        <meshBasicMaterial color="#ff4fd8" />
+      </mesh>
+      <mesh position={[flow, -0.028 * s, -0.034 * s]} castShadow>
+        <boxGeometry args={[0.22 * s, 0.1 * s, 0.05 * s]} />
+        <meshBasicMaterial color="#00ffff" />
+      </mesh>
+      <mesh position={[-0.42 * s + loadWidth / 2, -0.062 * s, -0.036 * s]} castShadow>
+        <boxGeometry args={[Math.max(loadWidth, 0.012 * s), 0.028 * s, 0.032 * s]} />
+        <meshBasicMaterial color={loadColor} />
+      </mesh>
+    </group>
+  );
+}
+
+function surfaceControlsForPanel(surfaces: SurfaceControlSnapshot[]): SurfaceControlSnapshot[] {
+  const byId = new Map(surfaces.map((surface) => [surface.id, surface]));
+  const preferred = ["main-wing-left", "main-wing-right", "tailplane", "fin"]
+    .map((id) => byId.get(id))
+    .filter((surface): surface is SurfaceControlSnapshot => Boolean(surface));
+  if (preferred.length > 0) return preferred;
+
+  return [...surfaces].sort((a, b) => a.id.localeCompare(b.id)).slice(0, 4);
+}
+
+function surfaceControlsForSynoptic(surfaces: SurfaceControlSnapshot[]) {
+  const sorted = [...surfaces].sort((a, b) => a.id.localeCompare(b.id));
+  const byId = new Map(sorted.map((surface) => [surface.id, surface]));
+  const roll = sorted.filter((surface) => surface.axis === "roll");
+  const pitch = sorted.filter((surface) => surface.axis === "pitch");
+  const yaw = sorted.filter((surface) => surface.axis === "yaw");
+
+  return {
+    leftAileron:
+      byId.get("main-wing-left") ??
+      roll.find((surface) => surface.id.endsWith("-left")) ??
+      roll[0],
+    rightAileron:
+      byId.get("main-wing-right") ??
+      roll.find((surface) => surface.id.endsWith("-right")) ??
+      roll[1] ??
+      roll[0],
+    elevator: byId.get("tailplane") ?? pitch[0],
+    rudder: byId.get("fin") ?? yaw[0],
+  };
+}
+
+function CockpitPedal({
+  position,
+  rotationX,
+}: {
+  position: [number, number, number];
+  rotationX: number;
+}) {
+  return (
+    <group position={position} rotation={[rotationX, 0, 0]}>
+      <mesh castShadow>
+        <boxGeometry args={[0.24 * PART_VISUAL_SCALE, 0.08 * PART_VISUAL_SCALE, 0.16 * PART_VISUAL_SCALE]} />
+        <meshStandardMaterial color="#f4a340" emissive="#432100" emissiveIntensity={0.16} />
+      </mesh>
+      <mesh position={[0, 0.07 * PART_VISUAL_SCALE, 0.07 * PART_VISUAL_SCALE]} castShadow>
+        <boxGeometry args={[0.19 * PART_VISUAL_SCALE, 0.05 * PART_VISUAL_SCALE, 0.05 * PART_VISUAL_SCALE]} />
+        <meshStandardMaterial color="#fff0c2" roughness={0.35} />
+      </mesh>
     </group>
   );
 }

@@ -4,6 +4,7 @@ import type {
   ControlInput,
   Quaternion,
   ReplayEvent,
+  SurfaceControlSnapshot,
   Vec3,
 } from "../protocol/schema";
 import type { SensorDevice } from "./parts";
@@ -98,6 +99,9 @@ export interface AircraftState {
   // Config-time metadata, NOT copied into AircraftSnapshot — runMatch records it onto the replay so the
   // viewer can render the plane that was built.
   airframe?: Airframe;
+  // Populated by the physics step, then copied into AircraftSnapshot. This is per-frame measured
+  // surface state; when absent, snapshots still expose command-derived deflections.
+  surfaceControls?: SurfaceControlSnapshot[];
 }
 
 export interface FlightMetrics {
@@ -111,6 +115,48 @@ export interface FlightMetrics {
 export interface StepResult {
   aircraft: AircraftState[];
   events: ReplayEvent[];
+}
+
+export function surfaceHingeDeflectionRad(surface: AeroSurface, controls: ControlInput): number {
+  if (!surface.control) return 0;
+  return controls[surface.control.axis] * surface.control.sign * surface.control.maxDeflectionRad;
+}
+
+export function surfaceEffectiveDeflectionRad(surface: AeroSurface, controls: ControlInput): number {
+  if (!surface.control) return 0;
+  return surfaceHingeDeflectionRad(surface, controls) * surface.control.effectiveness;
+}
+
+export interface SurfaceAerodynamicState {
+  localAoADeg: number;
+  totalAoADeg: number;
+  stallSeverity: number;
+  loadN: number;
+}
+
+export function surfaceControlSnapshot(
+  surface: AeroSurface,
+  aircraft: AircraftState,
+  measured?: Partial<SurfaceAerodynamicState>,
+): SurfaceControlSnapshot | null {
+  if (!surface.control) return null;
+
+  const control = surface.control;
+  return {
+    id: surface.id,
+    axis: control.axis,
+    input: aircraft.controls[control.axis],
+    deflectionDeg: surfaceHingeDeflectionRad(surface, aircraft.controls) * (180 / Math.PI),
+    effectiveAoADeg: surfaceEffectiveDeflectionRad(surface, aircraft.controls) * (180 / Math.PI),
+    ...(measured ?? {}),
+  };
+}
+
+export function surfaceControlSnapshots(aircraft: AircraftState): SurfaceControlSnapshot[] {
+  const measuredById = new Map((aircraft.surfaceControls ?? []).map((surface) => [surface.id, surface]));
+  return aircraft.model.aeroSurfaces
+    .filter((surface) => surface.control)
+    .map((surface) => surfaceControlSnapshot(surface, aircraft, measuredById.get(surface.id))!);
 }
 
 export function toSnapshot(aircraft: AircraftState): AircraftSnapshot {
@@ -130,5 +176,6 @@ export function toSnapshot(aircraft: AircraftState): AircraftSnapshot {
     health: aircraft.health,
     weaponCooldown: aircraft.weaponCooldown,
     stalled: aircraft.metrics.stalled,
+    surfaceControls: surfaceControlSnapshots(aircraft),
   };
 }

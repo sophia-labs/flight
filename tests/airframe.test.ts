@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { AirframeSchema, SensorDeviceSchema, type WingPart } from "../src/protocol/schema";
 import {
   airframeReport,
+  cockpitCamera,
   compileAirframe,
   defaultAirframe,
   noseCamera,
@@ -42,7 +43,7 @@ describe("airframe compiler", () => {
   });
 
   it("mounts the default airframe's sensor part as a device", () => {
-    expect(compileAirframe(defaultAirframe()).devices).toEqual([noseCamera()]);
+    expect(compileAirframe(defaultAirframe()).devices).toEqual([cockpitCamera(), noseCamera()]);
   });
 
   it("is a pure fold — two compiles of the same airframe are identical", () => {

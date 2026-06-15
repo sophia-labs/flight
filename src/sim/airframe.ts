@@ -26,10 +26,23 @@ export function noseCamera(): SensorDevice {
   };
 }
 
-// The canonical default airframe. By construction it compiles to exactly DEFAULT_MODEL (verified by a
-// test), so all 24 existing replays and the scripted duel stay byte-identical. A factory (fresh objects)
-// so two aircraft never share a mutable part reference. Part masses are integers summing to 9200; wing
-// areas sum to 22.5 (13*1.5 + 4*0.75, the fin's 2*1 excluded as a vertical/yaw surface).
+// A pilot-seat camera for the viewer's mounted cockpit view. Kept as a real sensor part rather than
+// a renderer-only offset so HUD/cockpit rendering can share the same mount-pose vocabulary as sensors.
+export function cockpitCamera(): SensorDevice {
+  return {
+    id: "cockpit-cam",
+    kind: "sensor",
+    modality: "camera",
+    pose: { offset: vec3(0, 0.45, -4.2), rotation: quatIdentity() },
+    for: { halfAngleRad: 0.82, maxRangeM: 8_000 },
+    optics: { hFovRad: Math.PI / 2.8, aspect: 1.6 },
+  };
+}
+
+// The canonical default airframe. By construction its physical model compiles to exactly DEFAULT_MODEL
+// (verified by a test). A factory (fresh objects) so two aircraft never share a mutable part reference.
+// Part masses are integers summing to 9200; wing areas sum to 22.5 (13*1.5 + 4*0.75, the fin's 2*1
+// excluded as a vertical/yaw surface).
 export function defaultAirframe(): Airframe {
   const body = quatIdentity();
   return {
@@ -74,6 +87,7 @@ export function defaultAirframe(): Airframe {
         massKg: 1_000,
         dims: { radius: 0.5, length: 2.4 },
       },
+      cockpitCamera(),
       noseCamera(),
     ],
   };

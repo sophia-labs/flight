@@ -25,6 +25,18 @@ export const ControlInputSchema = z.object({
   trigger: z.boolean(),
 });
 
+export const SurfaceControlSnapshotSchema = z.object({
+  id: z.string(),
+  axis: z.enum(["pitch", "roll", "yaw"]),
+  input: z.number().min(-1).max(1),
+  deflectionDeg: z.number(),
+  effectiveAoADeg: z.number(),
+  localAoADeg: finiteNumber.optional(),
+  totalAoADeg: finiteNumber.optional(),
+  stallSeverity: finiteNumber.optional(),
+  loadN: finiteNumber.optional(),
+});
+
 export const AircraftSnapshotSchema = z.object({
   id: z.string(),
   callsign: z.string(),
@@ -41,6 +53,7 @@ export const AircraftSnapshotSchema = z.object({
   health: z.number(),
   weaponCooldown: z.number(),
   stalled: z.boolean(),
+  surfaceControls: z.array(SurfaceControlSnapshotSchema).optional(),
 });
 
 export const ReplayEventSchema = z.object({
@@ -329,6 +342,7 @@ export type MatchSummary = z.infer<typeof MatchSummarySchema>;
 export type Vec3 = z.infer<typeof Vec3Schema>;
 export type Quaternion = z.infer<typeof QuaternionSchema>;
 export type ControlInput = z.infer<typeof ControlInputSchema>;
+export type SurfaceControlSnapshot = z.infer<typeof SurfaceControlSnapshotSchema>;
 export type AircraftSnapshot = z.infer<typeof AircraftSnapshotSchema>;
 export type ReplayEvent = z.infer<typeof ReplayEventSchema>;
 export type ReplayFrame = z.infer<typeof ReplayFrameSchema>;

@@ -14,7 +14,15 @@ import {
   sub,
   vec3,
 } from "./math";
-import type { AeroSurface, AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
+import { surfaceControlSnapshot, surfaceEffectiveDeflectionRad } from "./types";
+import type {
+  AeroSurface,
+  AircraftModel,
+  AircraftState,
+  FlightMetrics,
+  StepResult,
+  SurfaceAerodynamicState,
+} from "./types";
 
 const GRAVITY = vec3(0, -9.81, 0);
 const SEA_LEVEL_DENSITY = 1.225;
@@ -49,21 +57,12 @@ function bodyOmegaWorld(aircraft: AircraftState) {
   );
 }
 
-function controlDeflection(surface: AeroSurface, controls: ControlInput): number {
-  if (!surface.control) return 0;
-  return (
-    controls[surface.control.axis] *
-    surface.control.sign *
-    surface.control.maxDeflectionRad *
-    surface.control.effectiveness
-  );
-}
-
 interface SurfaceSample {
   force: ReturnType<typeof vec3>;
   liftForce: ReturnType<typeof vec3>;
   torque: ReturnType<typeof vec3>;
   alpha: number;
+  alphaEffective: number;
   stallSeverity: number;
 }
 
@@ -80,7 +79,14 @@ function sampleSurface(
   const surfaceSpeed = length(surfaceVelocity);
   if (surfaceSpeed < 0.5 || surface.areaM2 <= 0) {
     const zero = vec3(0, 0, 0);
-    return { force: zero, liftForce: zero, torque: zero, alpha: 0, stallSeverity: 0 };
+    return {
+      force: zero,
+      liftForce: zero,
+      torque: zero,
+      alpha: 0,
+      alphaEffective: 0,
+      stallSeverity: 0,
+    };
   }
 
   const forward = normalize(rotateVec(aircraft.orientation, surface.localForward), basis.forward);
@@ -88,7 +94,7 @@ function sampleSurface(
   const vForward = dot(surfaceVelocity, forward);
   const vLift = dot(surfaceVelocity, up);
   const alpha = Math.atan2(-vLift, Math.max(Math.abs(vForward), 1));
-  const deflection = controlDeflection(surface, controls);
+  const deflection = surfaceEffectiveDeflectionRad(surface, controls);
   const alphaEffective = alpha + deflection;
   const stallSeverity = clamp(
     (Math.abs(alphaEffective) - surface.stallAoARad) / Math.max(surface.stallAoARad * 0.85, 1e-3),
@@ -114,6 +120,7 @@ function sampleSurface(
     liftForce,
     torque: cross(rWorld, force),
     alpha,
+    alphaEffective,
     stallSeverity,
   };
 }
@@ -179,6 +186,7 @@ function stepAircraft(
   let maxSurfaceStall = 0;
   let horizontalAlphaArea = 0;
   let horizontalArea = 0;
+  const surfaceControls: NonNullable<AircraftState["surfaceControls"]> = [];
 
   for (const surface of model.aeroSurfaces) {
     const sample = sampleSurface(surface, aircraft, controls, density, omegaWorld);
@@ -186,11 +194,22 @@ function stepAircraft(
     totalTorque = add(totalTorque, sample.torque);
     loadForce = add(loadForce, sample.liftForce);
     maxSurfaceStall = Math.max(maxSurfaceStall, sample.stallSeverity);
+    if (surface.control) {
+      const measured: SurfaceAerodynamicState = {
+        localAoADeg: (sample.alpha * 180) / Math.PI,
+        totalAoADeg: (sample.alphaEffective * 180) / Math.PI,
+        stallSeverity: sample.stallSeverity,
+        loadN: length(sample.liftForce),
+      };
+      const snapshot = surfaceControlSnapshot(surface, aircraft, measured);
+      if (snapshot) surfaceControls.push(snapshot);
+    }
     if (surface.kind === "horizontal") {
       horizontalAlphaArea += sample.alpha * surface.areaM2;
       horizontalArea += surface.areaM2;
     }
   }
+  aircraft.surfaceControls = surfaceControls;
 
   if (speed > 0.5 && model.parasiteDragAreaM2 > 0) {
     totalForce = add(
