@@ -10,9 +10,17 @@ export interface PiBodyModelOptions {
   timeoutMs?: number;
 }
 
-function resolveOpenRouterModel(slug: string) {
+function resolveModel(slug: string) {
+  // Prefer first-party DeepSeek (direct api.deepseek.com endpoint, no OpenRouter hop) when a
+  // DEEPSEEK_API_KEY is configured and the slug names a first-party deepseek model id (e.g.
+  // "deepseek-v4-flash", no "deepseek/" prefix). pi-ai routes by the model's provider and picks
+  // up DEEPSEEK_API_KEY automatically. Otherwise fall back to OpenRouter.
+  if (process.env.DEEPSEEK_API_KEY) {
+    const direct = getModels("deepseek").find((m) => m.id === slug);
+    if (direct) return direct;
+  }
   const model = getModels("openrouter").find((m) => m.id === slug);
-  if (!model) throw new Error(`OpenRouter model not in pi-ai registry: ${slug}`);
+  if (!model) throw new Error(`Model not in pi-ai deepseek/openrouter registry: ${slug}`);
   return model;
 }
 
@@ -37,7 +45,7 @@ function contentTypes(content: unknown[]): string {
 }
 
 export function piBodyModel(options: PiBodyModelOptions): BodyModel {
-  const model = resolveOpenRouterModel(options.slug);
+  const model = resolveModel(options.slug);
   const maxTokens = options.maxTokens ?? 96;
   const maxRetries = options.maxRetries ?? 2;
   const emptyRetries = options.emptyRetries ?? 1;

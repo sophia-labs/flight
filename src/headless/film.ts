@@ -24,6 +24,7 @@ import type { AddressInfo } from "node:net";
 import { dirname } from "node:path";
 import { chromium } from "@playwright/test";
 import { actionSpecs, type ActionMode } from "../agent/actionSpec";
+import { cameraAsciiEncoderV2 } from "../agent/encoders/cameraAscii";
 import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import { FLIGHT_RULES, piController, resolveOpenRouterModel } from "../agent/controllers/pi";
 import { defensiveController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
@@ -38,6 +39,8 @@ import { DEFAULT_MODEL } from "../sim/flight";
 import { lerp, quatNormalize } from "../sim/math";
 import { cameraDevices, mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
 import type { AircraftState } from "../sim/types";
+import { cameraSensor } from "../agent/perception";
+import { glyphFieldOverlay } from "./glyphFieldOverlay";
 import {
   SCRIPTED_BODY_MODEL,
   bodyModelLabel,
@@ -185,8 +188,23 @@ interface ShipView {
   alive: boolean;
 }
 
+// Pull the W x H camera-ascii@2 glyph grid out of its bordered viewport text. The text is: header,
+// top border "+---+", H grid rows "|...|", bottom border, then footer/legend. We return ONLY the grid
+// cell rows (between the "|" borders) — the registered overlay places each cell at its frustum rect.
+function parseFieldGrid(asciiText: string): { rows: string[]; W: number; H: number } {
+  const rows: string[] = [];
+  for (const line of asciiText.split("\n")) {
+    if (line.startsWith("|") && line.endsWith("|") && line.length > 2) rows.push(line.slice(1, -1));
+  }
+  return { rows, W: rows.length > 0 ? rows[0].length : 0, H: rows.length };
+}
+
 interface FilmFrame {
   cam: string;
+  // The camera-ascii@2 glyph-field the Body navigates on, as a registered overlay over the LEFT
+  // (pilot) cinema viewport. The viewport renders the SAME frustum at PILOT_ASPECT, so each cell maps
+  // 1:1 to a pixel rect across the full panel (no letterbox bars) via glyphFieldOverlay.
+  fieldCells: string;
   sub: string;
   hud: string;
   // cinema-only payload (ignored by the ascii renderer):
@@ -234,8 +252,19 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
 
     const pose = mountedSensorPose(device, self, { aspectOverride: PILOT_ASPECT });
     const percept = senseAndEncode(device, world, self);
+    // camera-ascii@2 — the TRUE-PROJECTION glyph-field the Body actually flies on. Sensed at the same
+    // PILOT_ASPECT the left viewport renders, so the grid is a uniform raster of the SAME frustum and
+    // each cell registers exactly. The left viewport fills the WLxH panel at its native aspect (no
+    // letterbox bars), so the overlay rect is the full panel.
+    const hFovRad = device.optics?.hFovRad ?? Math.PI / 3;
+    const fieldDevice = { ...device, optics: { hFovRad, aspect: PILOT_ASPECT } };
+    const field = parseFieldGrid(
+      cameraAsciiEncoderV2.encode(cameraSensor.sense(fieldDevice, world, self)).text ?? "",
+    );
+    const fieldCells = glyphFieldOverlay(field, { x0: 0, y0: 0, w: WL, h: H });
     result.push({
       cam: percept.text ?? "",
+      fieldCells,
       sub: rationaleByTurn.get(fa.turn) ?? "",
       hud: `${device.id.toUpperCase()}   turn ${fa.turn}/${turns}   t=${t.toFixed(1)}s`,
       selfId: self.id,
@@ -314,10 +343,13 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
             font-family:'SFMono-Regular',Menlo,Consolas,'Liberation Mono',monospace;}
   #gl{position:absolute;left:0;top:0;}
   #divider{position:absolute;left:${WL}px;top:0;width:2px;height:${H}px;background:rgba(124,252,154,.25);}
-  /* ascii HUD over the LEFT (pilot) viewport, the 3D world showing through the spaces */
-  #camwrap{position:absolute;left:0;top:0;width:${WL}px;height:${H}px;display:flex;align-items:center;justify-content:center;pointer-events:none;}
-  #cam{color:#7CFC9A;font-size:21px;line-height:1.12;white-space:pre;margin:0;opacity:.92;
-       text-shadow:0 0 2px #0b1116,0 0 7px rgba(124,252,154,.5);}
+  /* The camera-ascii@2 glyph-field the Body flies on, registered cell-by-cell over the LEFT (pilot)
+     viewport via glyphFieldOverlay: each cell sits at its exact frustum pixel rect, the 3D world
+     showing through the blank cells. Higher opacity + dark halo so glyphs read over sky and ground. */
+  #fieldgrid{position:absolute;left:0;top:0;width:${WL}px;height:${H}px;pointer-events:none;}
+  #fieldgrid .cell{position:absolute;display:flex;align-items:center;justify-content:center;
+       text-align:center;color:#7CFC9A;opacity:0.82;font-weight:700;
+       text-shadow:0 0 2px #000,0 0 3px #000,1px 1px 1px #000;}
   .label{position:absolute;top:12px;color:#9fb6bd;font-size:12px;letter-spacing:2px;text-transform:uppercase;text-shadow:0 0 4px #000;}
   #hud{left:16px;} #orbitlabel{left:${WL + 16}px;}
   #subwrap{position:absolute;bottom:18px;left:0;width:${WL + WR}px;text-align:center;pointer-events:none;}
@@ -327,7 +359,7 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
 </style></head><body>
   <canvas id="gl" width="${WL + WR}" height="${H}"></canvas>
   <div id="divider"></div>
-  <div id="camwrap"><pre id="cam"></pre></div>
+  <div id="fieldgrid"></div>
   <div class="label" id="hud"></div>
   <div class="label" id="orbitlabel">orbit</div>
   <div id="subwrap"><span id="sub"><span id="speaker"></span><span id="subtext"></span></span></div>
@@ -396,7 +428,7 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
       // RIGHT: orbit chase — show everything.
       renderer.setViewport(WL,0,WR,H); renderer.setScissor(WL,0,WR,H); renderer.render(scene, orbitCam);
 
-      document.getElementById('cam').textContent = f.cam;
+      document.getElementById('fieldgrid').innerHTML = f.fieldCells;
       document.getElementById('hud').textContent = f.hud;
       document.getElementById('subtext').textContent = f.sub;
       document.getElementById('subwrap').style.visibility = f.sub ? 'visible' : 'hidden';
