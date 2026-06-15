@@ -7,6 +7,10 @@ import type {
   Usage,
 } from "../protocol/schema";
 import { clampControlInput } from "../protocol/schema";
+import { cameraSensor } from "../agent/perception";
+import { cameraAsciiEncoderV2 } from "../agent/encoders/cameraAscii";
+import { selectCameraDevice } from "../sim/mountedSensor";
+import type { SensorDevice } from "../sim/parts";
 import type { AircraftState } from "../sim/types";
 import type { BodyManifest } from "./manifest";
 import type { BodyModel, BodyModelResult } from "./model";
@@ -245,9 +249,19 @@ export async function runBodyTick(input: {
   self: AircraftState;
   aircraft: AircraftState[];
   pilotIntent: PilotIntentAction;
+  /**
+   * The camera device whose camera-ascii@2 glyph-field the Body sees. FIELD-FEED computes this
+   * percept fresh EACH tick from the live world + self, so the field tracks the plane as it moves.
+   * Omitted ⇒ the self airframe's cockpit-cam (or the default cockpit camera) is selected.
+   */
+  device?: SensorDevice;
 }): Promise<PendingBodyTick> {
   const { config, state, turn, agentId, time, dt, self, aircraft, pilotIntent } = input;
-  const proprioception = encodeProprioception(self, aircraft, state);
+  // Sense the live world through the cockpit camera and encode it as the @2 glyph-field. Pure and
+  // deterministic (no clock/RNG/GPU): two ticks on the same world + self produce byte-identical text.
+  const device = input.device ?? selectCameraDevice(self.devices);
+  const field = cameraAsciiEncoderV2.encode(cameraSensor.sense(device, aircraft, self)).text ?? "";
+  const proprioception = encodeProprioception(self, state, field);
   const promptText = buildBodyPrompt(config.manifest, pilotIntent, proprioception, state.memory);
   const bodyCall = await callBodyModel({
     config,

@@ -84,7 +84,7 @@ export function BodyPanel({
       <div className="body-sense">
         <p>
           <span>Sense</span> {tick.proprioception.energy} · {tick.proprioception.stallMargin} ·{" "}
-          {tick.proprioception.target}
+          {tick.proprioception.terrain}
         </p>
         <p>
           <span>Expect</span> {tick.parsed.expect?.roll ?? "-"} / {tick.parsed.expect?.pitch ?? "-"} /{" "}

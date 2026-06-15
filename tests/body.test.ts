@@ -12,6 +12,14 @@ import {
 import { buildBodyPrompt, compareExpectation, encodeProprioception, snapshotKinematics } from "../src/body/telemetry";
 import type { PilotIntentAction } from "../src/protocol/schema";
 import { createInitialAircraft, FRAME_DT } from "../src/runtime/scenario";
+import { cameraSensor } from "../src/agent/perception";
+import { cameraAsciiEncoderV2 } from "../src/agent/encoders/cameraAscii";
+import { selectCameraDevice } from "../src/sim/mountedSensor";
+
+// The camera-ascii@2 glyph-field the Body now senses, computed exactly as runBodyTick does.
+function fieldFor(self: ReturnType<typeof createInitialAircraft>[number], world: ReturnType<typeof createInitialAircraft>) {
+  return cameraAsciiEncoderV2.encode(cameraSensor.sense(selectCameraDevice(self.devices), world, self)).text ?? "";
+}
 
 const TEST_INTENT: PilotIntentAction = {
   kind: "pilot-intent",
@@ -36,7 +44,7 @@ describe("Body motor grammar", () => {
         stallMargin: "safe",
         authority: { pitch: "ok", roll: "ok", yaw: "ok", thrust: "strong_lagging" },
         terrain: "ground_safe",
-        target: "right_10 level_0 ahead 1200m",
+        field: " cockpit-cam  33x15  FOV 60deg\n+---------------------------------+\n|                                 |\n+---------------------------------+\n own  spd 180  alt 1000  bank +0  pitch +0\n (no contacts in view)",
         pain: { wingBuffet: 0, pitchMush: 0, overG: 0, groundRush: 0 },
         affordances: ["can_roll_left", "can_roll_right", "can_pull_gently"],
       },
@@ -47,6 +55,34 @@ describe("Body motor grammar", () => {
     expect(prompt).toContain("Never use word-values like gentle_right or throttle_up");
     expect(prompt).toContain("controls are rate-limited");
     expect(prompt).toContain("Only use TONE reverse");
+  });
+
+  // FIELD-FEED: the Body's primary spatial SENSE is now the camera-ascii@2 glyph-field, not a single
+  // `target` token. The assembled prompt must carry that field (grid + legend) and must NOT carry the
+  // old `target:` line. The field is computed exactly as runBodyTick computes it from the live world.
+  it("feeds the camera-ascii@2 glyph-field into the Body prompt and drops the target token", () => {
+    const aircraft = createInitialAircraft();
+    const self = aircraft[0];
+    const state = createBodyRuntimeState(self.controls);
+    const field = fieldFor(self, aircraft);
+    const proprioception = encodeProprioception(self, state, field);
+
+    // The encoded proprioception carries the field verbatim and no longer carries a `target` token.
+    expect(proprioception.field).toBe(field);
+    expect(proprioception).not.toHaveProperty("target");
+
+    const prompt = buildBodyPrompt(fixedWingBodyManifest, TEST_INTENT, proprioception, state.memory);
+
+    // The whole @2 field — its grid AND its legend — is present in the prompt.
+    expect(field).toContain("33x15"); // the @2 grid header (legend line 1)
+    expect(field).toContain("FOV"); // legend carries FOV
+    expect(field.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(15); // 15 grid rows
+    expect(prompt).toContain(field);
+    expect(prompt).toContain("FIELD (what you see");
+
+    // The old single spatial token is gone from the prompt entirely.
+    expect(prompt).not.toContain("\ntarget: ");
+    expect(prompt).not.toMatch(/^target:/m);
   });
 
   it("parses a complete fixed-wing Body output", () => {
@@ -220,7 +256,7 @@ describe("Body motor grammar", () => {
       reason: "regular_tick",
       manifestId: fixedWingBodyManifest.bodyId,
       pilotIntent: TEST_INTENT,
-      proprioception: encodeProprioception(self, aircraft, state),
+      proprioception: encodeProprioception(self, state, fieldFor(self, aircraft)),
       promptText: "",
       rawOutput: "",
       parsed: {
@@ -240,7 +276,7 @@ describe("Body motor grammar", () => {
     const prompt = buildBodyPrompt(
       fixedWingBodyManifest,
       TEST_INTENT,
-      encodeProprioception(self, aircraft, state),
+      encodeProprioception(self, state, fieldFor(self, aircraft)),
       state.memory,
     );
 

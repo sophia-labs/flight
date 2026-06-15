@@ -6,7 +6,7 @@ import type {
   ControlInput,
   PilotIntentAction,
 } from "../protocol/schema";
-import { basisFromQuat, clamp, cross, dot, length, normalize, scale, sub, vec3 } from "../sim/math";
+import { basisFromQuat, clamp, cross, dot, normalize, scale, sub, vec3 } from "../sim/math";
 import type { AircraftState } from "../sim/types";
 import type { BodyManifest } from "./manifest";
 
@@ -72,24 +72,6 @@ function stallMargin(self: AircraftState) {
 
 function painLevel(value: number) {
   return Math.max(0, Math.min(5, Math.round(value)));
-}
-
-function targetRelation(self: AircraftState, aircraft: AircraftState[]) {
-  const enemy = aircraft
-    .filter((candidate) => candidate.team !== self.team && candidate.health > 0)
-    .sort((a, b) => length(sub(a.position, self.position)) - length(sub(b.position, self.position)))[0];
-  if (!enemy) return "none";
-  const { basis } = attitude(self);
-  const toTarget = sub(enemy.position, self.position);
-  const range = Math.max(length(toTarget), 1);
-  const dir = scale(toTarget, 1 / range);
-  const forward = dot(dir, basis.forward);
-  const right = dot(dir, basis.right);
-  const up = dot(dir, basis.up);
-  const side = Math.abs(right) < 0.08 ? "center" : right < 0 ? "left" : "right";
-  const vertical = Math.abs(up) < 0.08 ? "level" : up > 0 ? "above" : "below";
-  const aspect = forward > 0.45 ? "ahead" : forward < -0.25 ? "behind" : "abeam";
-  return `${side}_${Math.round(Math.abs(right) * 90)} ${vertical}_${Math.round(Math.abs(up) * 90)} ${aspect} ${Math.round(range)}m`;
 }
 
 function authority(self: AircraftState) {
@@ -223,8 +205,8 @@ export function compareExpectation(
 
 export function encodeProprioception(
   self: AircraftState,
-  aircraft: AircraftState[],
   history: BodyHistory,
+  field: string,
 ): BodyProprioception {
   const { bankDeg, pitchDeg } = attitude(self);
   const bank = signed("bank", bankDeg);
@@ -235,7 +217,9 @@ export function encodeProprioception(
     stallMargin: stallMargin(self),
     authority: authority(self),
     terrain: self.position.y < 120 ? "ground_rush" : self.position.y < 260 ? "ground_near" : "ground_safe",
-    target: targetRelation(self, aircraft),
+    // FIELD-FEED: the camera-ascii@2 glyph-field replaces the old `target` token. Spatial/target
+    // information now lives in the field's grid + legend (felt scalars below stay as proprioception).
+    field,
     pain: pain(self),
     affordances: affordances(self),
   };
@@ -347,13 +331,15 @@ export function buildBodyPrompt(
     ...calibrationLines(proprioception),
     "",
     "SENSE",
+    "FIELD (what you see — the grid is your view frustum; the legend reads own state then each contact):",
+    proprioception.field,
+    "",
     `attitude: ${proprioception.attitude}`,
     `motion: ${proprioception.motion}`,
     `energy: ${proprioception.energy}`,
     `stall_margin: ${proprioception.stallMargin}`,
     `authority: pitch_${proprioception.authority.pitch}; roll_${proprioception.authority.roll}; yaw_${proprioception.authority.yaw}; thrust_${proprioception.authority.thrust}`,
     `terrain: ${proprioception.terrain}`,
-    `target: ${proprioception.target}`,
     `pain: wing_buffet=${proprioception.pain.wingBuffet} pitch_mush=${proprioception.pain.pitchMush} over_g=${proprioception.pain.overG} ground_rush=${proprioception.pain.groundRush}`,
     `afford: ${proprioception.affordances.join("; ")}`,
     "",

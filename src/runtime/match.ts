@@ -23,6 +23,7 @@ import {
   type BodyRuntimeState,
   type PendingBodyTick,
 } from "../body/runtime";
+import { selectCameraDevice } from "../sim/mountedSensor";
 import { stepSimulation } from "../sim/flight";
 import { toSnapshot, type AircraftState } from "../sim/types";
 import type { AgentEntry, MatchConfig } from "./config";
@@ -154,6 +155,8 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
         const entry = config.agents[ship.id];
         if (entry?.body && isPilotIntentAction(action)) {
           bodyStates[ship.id] ??= createBodyRuntimeState(ship.controls);
+          // FIELD-FEED: the Body sees the cockpit-cam glyph-field, recomputed inside runBodyTick from
+          // the live `aircraft` world + `ship` each frame, so the field tracks the plane as it moves.
           const pending = await runBodyTick({
             config: entry.body,
             state: bodyStates[ship.id],
@@ -164,6 +167,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
             self: ship,
             aircraft,
             pilotIntent: action,
+            device: selectCameraDevice(ship.devices),
           });
           controlsById[ship.id] = pending.controlInput;
           pendingBodyTicks[ship.id] = pending;

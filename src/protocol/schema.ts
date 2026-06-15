@@ -285,7 +285,10 @@ export const BodyProprioceptionSchema = z.object({
   stallMargin: z.string(),
   authority: BodyAuthoritySchema,
   terrain: z.string(),
-  target: z.string(),
+  // FIELD-FEED: the camera-ascii@2 glyph-field — the 33x15 frustum grid plus its legend lines
+  // (own state + each in-view contact). This is the Body's PRIMARY spatial sense; it replaces the
+  // old single `target` token, carrying the same target/spatial information at much higher fidelity.
+  field: z.string(),
   pain: BodyPainSchema,
   affordances: z.array(z.string()),
   last: z

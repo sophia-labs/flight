@@ -310,7 +310,7 @@ export function buildFlightTranscriptMoments(
       calibration,
       controlMotion: motion,
       pilotWant: actionText(decision),
-      senseText: `${tick.proprioception.attitude}; ${tick.proprioception.motion}; energy=${tick.proprioception.energy}; stall=${tick.proprioception.stallMargin}; target=${tick.proprioception.target}`,
+      senseText: `${tick.proprioception.attitude}; ${tick.proprioception.motion}; energy=${tick.proprioception.energy}; stall=${tick.proprioception.stallMargin}`,
       geometryText: `range=${fmt(geometry.rangeM)}m nose=${fmt(geometry.noseAngleDeg, 1)}deg cooldown_ready=${yesNo(geometry.weaponReady)} firing_window=${yesNo(geometry.firingWindow)} near_window=${yesNo(geometry.nearWindow)}`,
       bodyOutputText: `status=${tick.parsed.status}; muscle=${muscleText(tick)}; tone=${toneText(tick)}; feel=${tick.parsed.feel ?? "none"}; mem=${tick.parsed.memory ?? "none"}`,
       controlText: controlText(tick),

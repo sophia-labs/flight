@@ -153,7 +153,7 @@ function replay(): MatchReplay {
           stallMargin: "safe",
           authority: { pitch: "ok", roll: "ok", yaw: "ok", thrust: "strong_lagging" },
           terrain: "ground_safe",
-          target: "right_0 level_0 ahead 2000m",
+          field: " cockpit-cam  33x15  FOV 60deg\n bandit  1 o'clock level  rng 2000  beam-R  hp 100",
           pain: { wingBuffet: 0, pitchMush: 0, overG: 0, groundRush: 0 },
           affordances: ["can_pull_gently"],
         },
