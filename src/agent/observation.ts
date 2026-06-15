@@ -49,6 +49,7 @@ export function toObservation(
       // range rate along the line of sight (matches the old controllers' `closure`): + opening, - closing
       closureRate: dot(sub(target.velocity, self.velocity), direction),
       health: target.health,
+      ...(target.static ? { balloon: true } : {}),
     };
   });
 

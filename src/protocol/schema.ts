@@ -54,6 +54,9 @@ export const AircraftSnapshotSchema = z.object({
   weaponCooldown: z.number(),
   stalled: z.boolean(),
   surfaceControls: z.array(SurfaceControlSnapshotSchema).optional(),
+  // v0.8.x: a static balloon target. Optional + only emitted when true, so legacy-shaped replays and
+  // ordinary aircraft snapshots stay byte-identical; the film renderer draws a flagged contact as a sphere.
+  static: z.boolean().optional(),
 });
 
 export const ReplayEventSchema = z.object({
@@ -153,6 +156,10 @@ export const ContactPerceptSchema = z.object({
   bearingUp: z.number(), // + = contact is above
   closureRate: z.number(), // range rate along the line of sight: + = opening, - = closing
   health: z.number(),
+  // v0.8.x: a fat static balloon target. Optional + only set when true, so ordinary-aircraft contacts
+  // and existing observations stay byte-identical. The scripted Pilot uses it to open its trigger gate
+  // to the balloon's generous weapon range/cone (a balloon is a big slow target you can shoot from far).
+  balloon: z.boolean().optional(),
 });
 
 export const ObservationSchema = z.object({

@@ -19,8 +19,17 @@ import {
 import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
 import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
 import type { AircraftState, FlightMetrics } from "../src/sim/types";
-import { buildScriptedMatchConfig, generateDemoMatch } from "../src/runtime/scenario";
+import {
+  buildScriptedMatchConfig,
+  createBalloonScenarioAircraft,
+  createBalloonTarget,
+  generateBalloonMatch,
+  generateDemoMatch,
+} from "../src/runtime/scenario";
 import { runMatch } from "../src/runtime/match";
+import { toObservation, perfectSensor } from "../src/agent/observation";
+import { senseAndEncode } from "../src/agent/perception";
+import { selectCameraDevice } from "../src/sim/mountedSensor";
 
 describe("flight sim replay generation", () => {
   it("produces deterministic replay data", async () => {
@@ -521,5 +530,72 @@ describe("fuel as consumable mass", () => {
     step([empty], { "blue-1": controls({ throttle: 1 }) }, 5);
     expect(Number.isFinite(empty.position.x)).toBe(true);
     expect(Number.isFinite(empty.metrics.airspeed)).toBe(true);
+  });
+});
+
+// The founding challenge made real: a static red BALLOON the embodied Body can perceive + pop. These
+// pin the three load-bearing properties: it is perceived as a contact, it HOVERS, and a roughly-aimed
+// in-range trigger destroys it.
+describe("balloon target", () => {
+  it("hovers in place — static skips flight integration (no fall/stall/move)", () => {
+    const balloon = createBalloonTarget(vec3(0, 1000, 0));
+    const before = { ...balloon.position };
+    // Step it for a couple of seconds with whatever controls — a static entity must not budge or fall.
+    step([balloon], { balloon: controls({ throttle: 1, pitch: -1 }) }, 25);
+    expect(balloon.position).toEqual(before);
+    expect(balloon.velocity).toEqual(vec3(0, 0, 0));
+    expect(balloon.metrics.stalled).toBe(false);
+    expect(balloon.health).toBe(12); // untouched, no terrain scrape
+  });
+
+  it("is perceived by the Body as a contact in the camera field and the Observation", () => {
+    const [self, balloon] = createBalloonScenarioAircraft();
+    // Point the Body straight at the balloon so it falls inside the cockpit-cam viewport.
+    self.orientation = quatLookRotation(normalize(vec3(
+      balloon.position.x - self.position.x,
+      balloon.position.y - self.position.y,
+      balloon.position.z - self.position.z,
+    )));
+    const device = selectCameraDevice(self.devices);
+    const percept = senseAndEncode(device, [self, balloon], self);
+    const contact = (percept.contacts ?? []).find((c) => c.id === "balloon");
+    expect(contact).toBeDefined();
+    expect(contact!.inView).toBe(true);
+    // The fat balloon subtends a far bigger glyph than a 16 m airframe would at the same ~5 km range.
+    expect(contact!.angularSizeDeg).toBeGreaterThan(0.6);
+
+    // It is also the nearest (only) enemy in the scripted Pilot's Observation.
+    const obs = toObservation(self, [self, balloon], 1, 0, perfectSensor);
+    expect(obs.contacts[0]?.id).toBe("balloon");
+  });
+
+  it("is destroyed by a roughly-aimed in-range trigger (health -> 0, hit event)", () => {
+    const balloon = createBalloonTarget(vec3(0, 1000, -600));
+    // Shooter 600 m back, nose on the balloon, trigger down — a generous balloon cone makes this hit.
+    const shooter = makeAircraft({
+      id: "blue-1",
+      position: vec3(0, 1000, 0),
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      weaponCooldown: 0,
+      controls: controls({ trigger: true }),
+    });
+    const events = step([shooter, balloon], { "blue-1": controls({ trigger: true }) }, 30);
+    const hit = events.find((e) => e.type === "hit" && e.targetId === "balloon");
+    expect(hit).toBeDefined();
+    expect(balloon.health).toBe(0); // popped
+  });
+
+  it("the scripted Body match pursues + pops the balloon end to end", async () => {
+    const replay = await generateBalloonMatch(16);
+    const balloonFrames = replay.frames.flatMap((f) => f.aircraft.filter((a) => a.id === "balloon"));
+    // The balloon never moves across the whole match (hovers).
+    const p0 = balloonFrames[0].position;
+    for (const b of balloonFrames) expect(b.position).toEqual(p0);
+    // The balloon snapshot carries the static flag for the renderer.
+    expect(balloonFrames[0].static).toBe(true);
+    // And the scripted Body kills it: a hit event on the balloon and its health reaches 0.
+    const hit = replay.frames.flatMap((f) => f.events).some((e) => e.type === "hit" && e.targetId === "balloon");
+    expect(hit).toBe(true);
+    expect(balloonFrames[balloonFrames.length - 1].health).toBe(0);
   });
 });

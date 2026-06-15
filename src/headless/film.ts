@@ -34,7 +34,13 @@ import { competenceEvaluator } from "../eval/outcome";
 import type { AircraftSnapshot, MatchReplay, Part, Quaternion } from "../protocol/schema";
 import type { MatchConfig } from "../runtime/config";
 import { runMatch } from "../runtime/match";
-import { FRAME_DT, TURN_DURATION, createInitialAircraft } from "../runtime/scenario";
+import {
+  FRAME_DT,
+  TURN_DURATION,
+  createBalloonScenarioAircraft,
+  createInitialAircraft,
+  staticController,
+} from "../runtime/scenario";
 import { DEFAULT_MODEL } from "../sim/flight";
 import { lerp, quatNormalize } from "../sim/math";
 import { cameraDevices, mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
@@ -86,6 +92,7 @@ const bodyMaxTokens = Number(process.env.BODY_MAX_TOKENS ?? 96);
 const bodyMaxRetries = Number(process.env.BODY_MAX_RETRIES ?? 2);
 const bodyEmptyRetries = Number(process.env.BODY_EMPTY_RETRIES ?? 1);
 const sensorId = process.env.FILM_SENSOR_ID ?? "cockpit-cam";
+const scenario = process.env.FILM_SCENARIO ?? "duel"; // "duel" (default) | "balloon"
 const label = scripted ? "Pursuit" : (model.split("/").pop() ?? model);
 
 function parseActionMode(raw: string): ActionMode {
@@ -109,13 +116,19 @@ function buildConfig(): MatchConfig {
       ? bodyPilotController(0.82)
       : pursuitController(0.82)
     : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES });
+  // FILM_SCENARIO=balloon: the founding challenge — the embodied Body hunts a single static red balloon
+  // instead of dueling a maneuvering jet. Red becomes the hovering no-op balloon (staticController).
+  const balloon = scenario === "balloon";
+  const redEntry = balloon
+    ? { meta: { id: "balloon", kind: "scripted" as const, label: "balloon (static)" }, controller: staticController }
+    : { meta: { id: "red-1", kind: "scripted" as const, label: "defensive" }, controller: defensiveController(0.64) };
   return {
-    id: `film|${scripted ? "scripted" : model}|${mode}${usesBody ? `|body:${bodyModelLabel(bodyModel)}` : ""}`,
+    id: `film|${scripted ? "scripted" : model}|${mode}${usesBody ? `|body:${bodyModelLabel(bodyModel)}` : ""}${balloon ? "|balloon" : ""}`,
     turnDuration: TURN_DURATION,
     frameDt: FRAME_DT,
     maxTurns: turns,
     decisionTimeoutMs: 30_000,
-    initialAircraft: createInitialAircraft(),
+    initialAircraft: balloon ? createBalloonScenarioAircraft() : createInitialAircraft(),
     sensor: perfectSensor,
     evaluator: competenceEvaluator,
     fallback: pursuitFallback,
@@ -132,12 +145,16 @@ function buildConfig(): MatchConfig {
         controller: blue,
         ...(body ? { body } : {}),
       },
-      "red-1": { meta: { id: "red-1", kind: "scripted", label: "defensive" }, controller: defensiveController(0.64) },
+      [redEntry.meta.id]: redEntry,
     },
   };
 }
 
 // ---- interpolation: rebuild a sense-able AircraftState world at an arbitrary time ----
+// BALLOON_PERCEIVED_RADIUS_M mirrors the spawn value in createBalloonTarget: the snapshot drops the
+// perceivedRadiusM field, so re-sensing the replay restores it for flagged (static) contacts only —
+// keeping the balloon a fat '@' glyph in the re-sensed overlay-field exactly as it was in the match.
+const BALLOON_PERCEIVED_RADIUS_M = 42;
 function fromSnapshot(s: AircraftSnapshot, parts: Part[] | undefined): AircraftState {
   const devices = cameraDevices(parts);
   return {
@@ -156,6 +173,7 @@ function fromSnapshot(s: AircraftSnapshot, parts: Part[] | undefined): AircraftS
     angularVelocity: { x: 0, y: 0, z: 0 },
     fuelKg: DEFAULT_MODEL.fuelCapacityKg,
     devices,
+    ...(s.static ? { static: true, perceivedRadiusM: BALLOON_PERCEIVED_RADIUS_M } : {}),
   };
 }
 
@@ -186,6 +204,7 @@ interface ShipView {
   qx: number; qy: number; qz: number; qw: number;
   stalled: boolean;
   alive: boolean;
+  balloon: boolean; // static balloon target → rendered as a sphere, not an airframe
 }
 
 // Pull the W x H camera-ascii@2 glyph grid out of its bordered viewport text. The text is: header,
@@ -275,6 +294,7 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
         qx: s.orientation.x, qy: s.orientation.y, qz: s.orientation.z, qw: s.orientation.w,
         stalled: s.metrics.stalled,
         alive: s.health > 0,
+        balloon: s.static === true,
       })),
       eye: pose.eye,
       fwd: pose.boresight,
@@ -397,17 +417,39 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
       const tv = m(new THREE.BoxGeometry(0.08,0.36,0.17), color); tv.position.set(0,0.12,0.3); g.add(tv);
       const glow = new THREE.Mesh(new THREE.SphereGeometry(0.12,16,16), new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.7}));
       g.add(glow); scene.add(g);
-      return { group:g, glow };
+      return { group:g, glow, balloon:false };
+    }
+    // A balloon target: a big bright canopy sphere over a small basket, a tether line below. Drawn at a
+    // generous scale so it reads as a recognizable BALLOON from the pilot eye, the way it perceives fat.
+    function makeBalloon(color){
+      const g = new THREE.Group(); g.scale.setScalar(3.0);
+      const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.7,28,24),
+        new THREE.MeshStandardMaterial({color, roughness:0.35, metalness:0.05, emissive:color, emissiveIntensity:0.35}));
+      canopy.scale.set(1,1.18,1); g.add(canopy);
+      const basket = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.18,0.22),
+        new THREE.MeshStandardMaterial({color:'#6b4a2a', roughness:0.8})); basket.position.y = -1.0; g.add(basket);
+      const tether = new THREE.Mesh(new THREE.CylinderGeometry(0.015,0.015,0.62,8),
+        new THREE.MeshStandardMaterial({color:'#cfd6d8'})); tether.position.y = -0.6; g.add(tether);
+      const glow = new THREE.Mesh(new THREE.SphereGeometry(0.78,20,16),
+        new THREE.MeshBasicMaterial({color, transparent:true, opacity:0.28})); g.add(glow);
+      scene.add(g);
+      return { group:g, glow, balloon:true };
     }
 
     window.renderFrame = (f) => {
       let cx=0, cy=0, cz=0, n=0;
       for (const a of f.aircraft){
-        let s = ships[a.id]; if(!s){ s = makeShip(a.color); ships[a.id]=s; }
+        let s = ships[a.id]; if(!s){ s = a.balloon ? makeBalloon(a.color) : makeShip(a.color); ships[a.id]=s; }
         s.group.position.set(a.x*S, a.y*S, a.z*S);
-        s.group.quaternion.set(a.qx, a.qy, a.qz, a.qw);
-        s.group.scale.setScalar(a.alive ? 1.42 : 1.05);
-        s.glow.material.color.set(a.stalled ? '#f2c94c' : a.color);
+        if (s.balloon){
+          // A popped balloon collapses to a tiny dim remnant; otherwise it floats upright (no quaternion).
+          s.group.scale.setScalar(a.alive ? 3.0 : 0.5);
+          s.glow.material.opacity = a.alive ? 0.28 : 0.0;
+        } else {
+          s.group.quaternion.set(a.qx, a.qy, a.qz, a.qw);
+          s.group.scale.setScalar(a.alive ? 1.42 : 1.05);
+          s.glow.material.color.set(a.stalled ? '#f2c94c' : a.color);
+        }
         cx+=a.x*S; cy+=a.y*S; cz+=a.z*S; n++;
       }
       pilotCam.fov = f.fovDeg; pilotCam.updateProjectionMatrix();

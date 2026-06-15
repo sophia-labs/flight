@@ -134,6 +134,10 @@ export function stepSimulation(
   const events: ReplayEvent[] = [];
 
   for (const ship of aircraft) {
+    // A static balloon hovers in place: skip flight integration entirely (no fall/stall/move). It keeps
+    // its spawn position/velocity/orientation and its initial metrics, but still takes damage below.
+    if (ship.static) continue;
+
     const controls = clampControlInput(controlsById[ship.id] ?? ship.controls);
     ship.controls = controls;
     ship.metrics = stepAircraft(ship, controls, dt);
@@ -320,8 +324,16 @@ function resolveWeapons(aircraft: AircraftState[]): ReplayEvent[] {
       impact,
     });
 
-    if (range < 1_180 && angle < 0.155) {
-      const damage = clamp(36 * (1 - range / 1_420) * (1 - angle / 0.19), 7, 28);
+    // A fat balloon is a generous target: widen the gun cone + range so a weak shooter who lines up
+    // roughly on it can actually pop it (gettable, not frustrating). Its angular size scales the cone,
+    // so a ~50 m balloon subtends far more sky than a 16 m airframe. Aircraft keep the tight default.
+    const balloon = target.static === true;
+    const coneRad = balloon ? 0.42 : 0.155;
+    const maxRangeM = balloon ? 2_900 : 1_180;
+    if (range < maxRangeM && angle < coneRad) {
+      const damage = balloon
+        ? clamp(30 * (1 - angle / (coneRad + 0.06)), 12, 30)
+        : clamp(36 * (1 - range / 1_420) * (1 - angle / 0.19), 7, 28);
       target.health = clamp(target.health - damage, 0, 100);
       events.push({
         type: "hit",

@@ -86,7 +86,10 @@ export const cameraSensor: Sensor = {
       const ndcX = ahead ? dot(dir, basis.right) / f / tanH : 0;
       const ndcY = ahead ? dot(dir, basis.up) / f / tanV : 0;
 
-      const angularRadiusRad = Math.atan2(AIRFRAME_RADIUS_M, Math.max(range, 1));
+      // Per-entity perceived size: a fat balloon (perceivedRadiusM ~30-50) subtends a big glyph from
+      // far away, so a weak shooter can spot and frame it. Ordinary airframes use AIRFRAME_RADIUS_M.
+      const perceivedRadiusM = other.perceivedRadiusM ?? AIRFRAME_RADIUS_M;
+      const angularRadiusRad = Math.atan2(perceivedRadiusM, Math.max(range, 1));
 
       // Aspect: where the target's nose points relative to the line from it to us.
       const toUs = normalize(sub(eye, other.position), boresight);

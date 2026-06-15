@@ -120,6 +120,15 @@ export interface AircraftState {
   // Populated by the physics step, then copied into AircraftSnapshot. This is per-frame measured
   // surface state; when absent, snapshots still expose command-derived deflections.
   surfaceControls?: SurfaceControlSnapshot[];
+  // v0.8.x balloon target: a STATIC contact (a tethered balloon). When set, the physics step skips
+  // flight integration entirely (it hovers in place — no fall/stall/move), but it still lives in the
+  // world `aircraft` list so perception, the Pilot's Observation, and resolveWeapons treat it as a
+  // normal contact with health. Config-time metadata; copied into AircraftSnapshot so the replay
+  // renderer can draw it as a sphere instead of an airframe.
+  static?: boolean;
+  // Perceived size override (m). When set, perception uses this instead of AIRFRAME_RADIUS_M so a fat
+  // balloon shows as a big glyph from far away and is acquirable by a weak shooter. Static config.
+  perceivedRadiusM?: number;
 }
 
 export interface FlightMetrics {
@@ -195,5 +204,6 @@ export function toSnapshot(aircraft: AircraftState): AircraftSnapshot {
     weaponCooldown: aircraft.weaponCooldown,
     stalled: aircraft.metrics.stalled,
     surfaceControls: surfaceControlSnapshots(aircraft),
+    ...(aircraft.static ? { static: true } : {}),
   };
 }
