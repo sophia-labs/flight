@@ -1,6 +1,6 @@
 {
   "name": "flight",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,9 +8,27 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "match": "tsx src/headless/runMatch.ts > match.json",
+    "sweep": "tsx --env-file=.env src/headless/sweep.ts",
+    "film": "tsx --env-file=.env src/headless/film.ts",
+    "bench:balloon": "tsx --env-file=.env src/headless/balloonBench.ts",
+    "export:native-timeline": "tsx src/headless/renderNative.ts --timeline-only",
+    "render:native": "tsx src/headless/renderNative.ts",
+    "demo:physics": "tsx src/headless/surfaceDemo.ts",
+    "audit:props": "tsx src/headless/propPerformanceAudit.ts",
+    "audit:envelopes": "tsx src/headless/performanceEnvelopeReport.ts",
+    "clip:controls": "tsx src/headless/cockpitClip.ts",
+    "probe:pilot-capture": "tsx src/headless/probePilotCapture.ts",
+    "stills:pairs": "tsx src/headless/cockpitStills.ts",
+    "clip:ensemble": "tsx --env-file=.env src/headless/ensembleClip.ts",
+    "verify:replay": "tsx src/headless/verifyReplay.ts",
+    "critique:replay": "tsx src/headless/critiqueReplay.ts",
+    "transcript:replay": "tsx src/headless/transcriptReplay.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "^0.79.3",
+    "@pixiv/three-vrm": "^3.5.4",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.4.2",
     "lucide-react": "^0.468.0",
@@ -22,10 +40,12 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.56.0",
+    "@types/node": "^25.9.3",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@types/three": "^0.181.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.0",
     "vite": "^8.0.16",
     "vitest": "^4.0.0"

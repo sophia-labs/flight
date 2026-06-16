@@ -1,0 +1,4208 @@
+================================================================================
+FLIGHT - simulation / aircraft / control code bundle
+Conceptual checkpoint: v0.7.0 (surface-force aircraft + flight-director control). For external review.
+================================================================================
+
+WHAT THIS IS
+  A turn-based, deterministic, headless physics flight-combat sim whose real goal is to be an
+  interface an LLM can fly and fight through. Each turn a controller (scripted or LLM) sees an
+  Observation and returns an Action (an intent, not a raw control); a deterministic inner loop
+  tracks that intent across physics frames; the result is a serializable replay.
+
+ARCHITECTURE (the seams)
+  protocol/schema.ts  Serializable contracts: Observation, Action (raw-stick | setpoint |
+  flight-director), Part/Airframe, Percept, ReplayFrame, MatchReplay.
+  sim/                Pure physics substrate. compileAirframe folds parts into mass/inertia,
+  aerodynamic surfaces, thrust points, sensors, and builder ratings. stepSimulation integrates
+  per-surface lift/drag forces, thrust moments, gravity, fuel, terrain, and weapons.
+  agent/              Control seam. ActionAdapter turns intent into ControlInput per frame;
+  flight-director commands bank + load/G + throttle/energy priority while protecting AoA/energy.
+  runtime/            Deterministic match loop, reusable configs, batch/scenario helpers.
+  eval/outcome.ts     Opponent-agnostic competence metrics.
+
+KEY FINDINGS / STATE
+  - The aircraft are now surface-force machines: elevators, ailerons, rudders, wing incidence,
+    CoM, local angular velocity, and engine offsets all feed forces and moments.
+  - There is no hidden control-authority floor. A build without moving surfaces is physically bad,
+    not silently rescued by scalar max-rate motors.
+  - The LLM-facing seam remains intent-first. raw-stick and pitch setpoint still exist, but the
+    preferred vocabulary is flight-director: bank, target load, throttle, speed priority, trigger.
+  - Replays are schemaVersion 3, and runMatch clones initialAircraft so configs are reusable data.
+
+INVARIANTS
+  Determinism, headless/batch execution, additive replay schema, and strict separation between
+  perception, control intent, adapter, and physics substrate.
+
+OPEN QUESTIONS FOR NEXT REVIEW
+  1. Aerodynamic fidelity: surface model is still arcade-tuned; next knobs are better stall curves,
+     lateral/spiral modes, trim/fuel CoM drift, and propulsive effects across speed/altitude.
+  2. Control vocabulary: whether flight-director is the right tactical granularity for BFM studies.
+  3. Perception: making camera/radar/IR operative inputs rather than recorded audit artifacts.
+  4. Baselines: stronger non-LLM BFM pilots and richer evaluation gates.
+
+================================================================================
+FILE INDEX
+================================================================================
+  src/protocol/schema.ts
+  src/sim/math.ts
+  src/sim/types.ts
+  src/sim/parts.ts
+  src/sim/airframe.ts
+  src/sim/flight.ts
+  src/agent/controller.ts
+  src/agent/observation.ts
+  src/agent/action.ts
+  src/agent/actionSpec.ts
+  src/agent/controllers/scripted.ts
+  src/agent/controllers/pi.ts
+  src/agent/perception.ts
+  src/agent/encoders/cameraAscii.ts
+  src/runtime/config.ts
+  src/runtime/match.ts
+  src/runtime/scenario.ts
+  src/runtime/batch.ts
+  src/eval/outcome.ts
+  src/headless/turn.ts
+  src/headless/runMatch.ts
+  src/headless/sweep.ts
+  tests/sim.test.ts
+  tests/airframe.test.ts
+  tests/perception.test.ts
+
+================================================================================
+# FILE: src/protocol/schema.ts
+================================================================================
+
+import { z } from "zod";
+
+// A number that must be real (not NaN/±Infinity). Bare z.number() ACCEPTS both, which would let a
+// degenerate projection silently poison a recorded replay; perception numbers go through this.
+export const finiteNumber = z.number().refine(Number.isFinite, { message: "must be a finite number" });
+
+export const Vec3Schema = z.object({
+  x: z.number(),
+  y: z.number(),
+  z: z.number(),
+});
+
+export const QuaternionSchema = z.object({
+  x: z.number(),
+  y: z.number(),
+  z: z.number(),
+  w: z.number(),
+});
+
+export const ControlInputSchema = z.object({
+  pitch: z.number().min(-1).max(1),
+  roll: z.number().min(-1).max(1),
+  yaw: z.number().min(-1).max(1),
+  throttle: z.number().min(0).max(1),
+  trigger: z.boolean(),
+});
+
+export const AircraftSnapshotSchema = z.object({
+  id: z.string(),
+  callsign: z.string(),
+  team: z.enum(["blue", "red"]),
+  color: z.string(),
+  position: Vec3Schema,
+  velocity: Vec3Schema,
+  orientation: QuaternionSchema,
+  controls: ControlInputSchema,
+  airspeed: z.number(),
+  altitude: z.number(),
+  aoaDeg: z.number(),
+  gLoad: z.number(),
+  health: z.number(),
+  weaponCooldown: z.number(),
+  stalled: z.boolean(),
+});
+
+export const ReplayEventSchema = z.object({
+  type: z.enum(["shot", "hit", "miss", "terrain"]),
+  message: z.string(),
+  actorId: z.string().optional(),
+  targetId: z.string().optional(),
+  origin: Vec3Schema.optional(),
+  impact: Vec3Schema.optional(),
+});
+
+export const ReplayFrameSchema = z.object({
+  index: z.number().int().nonnegative(),
+  time: z.number(),
+  turn: z.number().int().nonnegative(),
+  aircraft: z.array(AircraftSnapshotSchema),
+  events: z.array(ReplayEventSchema),
+});
+
+// --- v0.2.0 agent contract: actions, observations, decisions, outcome ---
+
+// StickCommand is the LLM's structured-output shape (no discriminator; `reason` first so the
+// model commits to intent before numbers). The controller wraps it into a RawStickAction.
+export const StickCommandSchema = z.object({
+  reason: z.string(),
+  pitch: z.number(),
+  roll: z.number(),
+  yaw: z.number(),
+  throttle: z.number(),
+  trigger: z.boolean(),
+});
+
+export const RawStickActionSchema = z.object({
+  kind: z.literal("raw-stick"),
+  pitch: z.number(),
+  roll: z.number(),
+  yaw: z.number(),
+  throttle: z.number(),
+  trigger: z.boolean(),
+});
+
+export const SetpointActionSchema = z.object({
+  kind: z.literal("setpoint"),
+  targetBankDeg: z.number(), // desired bank angle, degrees (+ = roll right)
+  targetPitchDeg: z.number(), // desired pitch attitude vs horizon, degrees (+ = nose up)
+  throttle: z.number(),
+  trigger: z.boolean(),
+});
+
+export const FlightDirectorActionSchema = z.object({
+  kind: z.literal("flight-director"),
+  targetBankDeg: z.number(), // tactical turn direction, degrees (+ = bank right)
+  targetLoadG: z.number(), // commanded pull/load; adapter protects AoA and low energy
+  throttle: z.number(),
+  speedPriority: z.enum(["gain", "hold", "bleed"]),
+  trigger: z.boolean(),
+});
+
+// Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
+export const ActionSchema = z.discriminatedUnion("kind", [
+  RawStickActionSchema,
+  SetpointActionSchema,
+  FlightDirectorActionSchema,
+]);
+
+export const SelfPerceptSchema = z.object({
+  airspeed: z.number(),
+  altitude: z.number(),
+  aoaDeg: z.number(),
+  gLoad: z.number(),
+  health: z.number(),
+  weaponCooldown: z.number(),
+  stalled: z.boolean(),
+});
+
+// Ego-relative percept of one contact. The direction cosines are the dot products the
+// scripted controllers used to take against the raw basis — pre-projected here so an agent
+// never needs the omniscient world state.
+export const ContactPerceptSchema = z.object({
+  id: z.string(),
+  team: z.enum(["blue", "red"]),
+  range: z.number(),
+  bearingForward: z.number(), // cos of angle to contact vs own nose; 1 = dead ahead
+  bearingRight: z.number(), // + = contact is to the right
+  bearingUp: z.number(), // + = contact is above
+  closureRate: z.number(), // range rate along the line of sight: + = opening, - = closing
+  health: z.number(),
+});
+
+export const ObservationSchema = z.object({
+  schemaVersion: z.literal(1),
+  selfId: z.string(),
+  turn: z.number().int().nonnegative(),
+  time: z.number(),
+  self: SelfPerceptSchema,
+  contacts: z.array(ContactPerceptSchema),
+  text: z.string().optional(), // natural-language framing — reserved for 0.3.0
+});
+
+export const AgentMetaSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["scripted", "llm"]),
+  label: z.string(),
+  config: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const ScoreSchema = z.object({
+  damageDealt: z.number(),
+  damageTaken: z.number(),
+  survived: z.boolean(),
+});
+
+// Opponent-agnostic piloting-quality metrics, per aircraft id (computed from frames + decisions).
+export const CompetenceSchema = z.object({
+  survived: z.boolean(),
+  damageDealt: z.number(),
+  damageTaken: z.number(),
+  shots: z.number(),
+  hits: z.number(),
+  fracStalled: z.number(), // fraction of frames the aircraft was stalled
+  fracOnDeck: z.number(), // fraction of frames below the low-altitude threshold
+  minAltitude: z.number(),
+  meanAirspeed: z.number(),
+  energyRetainedRatio: z.number(), // end specific-energy / start specific-energy
+  controlSmoothness: z.number(), // 1 - mean |Δ stick| between turns (1 = perfectly smooth)
+});
+
+export const MatchOutcomeSchema = z.object({
+  resolved: z.boolean(),
+  reason: z.enum(["destroyed", "timeout", "draw"]),
+  winnerTeam: z.enum(["blue", "red"]).nullable(),
+  turnsRun: z.number().int().nonnegative(),
+  scores: z.record(z.string(), ScoreSchema), // keyed by team
+  finalHealth: z.record(z.string(), z.number()), // keyed by aircraft id
+  competence: z.record(z.string(), CompetenceSchema).optional(), // keyed by aircraft id
+});
+
+export const UsageSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  costUsd: z.number(),
+});
+
+// --- v0.4.0 perception: a sensor Percept, recorded per turn for the viewer/audit ---
+// A Percept is the model-readable artifact a mounted sensor's encoder produces from its SenseFrame
+// — the perception-side mirror of a ControlInput. In v0.4.0 it is RECORDED (for the v0.5.0
+// instrument and as a capability proof) but NOT fed to the controller: pilots fly on the same
+// Observation as before.
+
+// One contact as a camera sees it: image-plane position + size/aspect cues, no rendering. ndc are
+// the projected screen coords in [-1,1] (x right, y up) and are meaningful only when inView.
+export const PerceptContactSchema = z.object({
+  id: z.string(),
+  team: z.enum(["blue", "red"]),
+  ndcX: finiteNumber,
+  ndcY: finiteNumber,
+  rangeM: finiteNumber,
+  aspectDeg: finiteNumber, // 0 = pointing at us (nose-on), 180 = we see its tail
+  angularSizeDeg: finiteNumber, // subtended diameter — the rendering-free range cue
+  inView: z.boolean(), // passes the device cone + range gate
+  health: finiteNumber,
+});
+
+export const PerceptSchema = z.object({
+  deviceId: z.string(),
+  modality: z.enum(["camera", "radar", "ir"]),
+  encoderId: z.string(), // recorded so a result is attributable to the interface under test
+  text: z.string().optional(), // what a model would read (the ASCII viewport)
+  contacts: z.array(PerceptContactSchema).optional(),
+  attitude: z.object({ bankDeg: finiteNumber, pitchDeg: finiteNumber }).optional(), // for the horizon overlay
+});
+
+export const TurnDecisionSchema = z.object({
+  turn: z.number().int().nonnegative(),
+  agentId: z.string(),
+  observation: ObservationSchema,
+  action: ActionSchema,
+  controlInput: ControlInputSchema,
+  source: z.enum(["controller", "fallback"]),
+  rationale: z.string().optional(),
+  latencyMs: z.number().optional(),
+  usage: UsageSchema.optional(),
+  percepts: z.array(PerceptSchema).optional(), // v0.4.0: recorded sensor output (camera, …)
+});
+
+// --- aircraft builder: an Airframe is a list of Parts that COMPILE into a physical AircraftModel ---
+// compileAirframe (src/sim/airframe.ts) folds these parts into mass/inertia, aerodynamic surfaces,
+// thrust points, and mounted SensorDevices. The Airframe is recorded on the replay (additive/optional)
+// so the viewer can render the plane you built and a build round-trips. Numeric fields use
+// finiteNumber: an airframe rides in a JSON replay, and NaN/±Infinity can't.
+
+export const PartPoseSchema = z.object({
+  offset: Vec3Schema, // metres, body frame (forward = -Z)
+  rotation: QuaternionSchema, // mount/boresight rotation vs the body basis
+});
+
+// Serialization mirror of SensorDevice (src/sim/parts.ts). Kept structurally identical; a test parses
+// noseCamera() through it to guard drift. maxRangeM is finite here (a JSON replay can't carry Infinity
+// — model an "unlimited" sensor as a large finite range).
+export const SensorDeviceSchema = z.object({
+  id: z.string(),
+  kind: z.literal("sensor"),
+  modality: z.enum(["camera", "radar", "ir"]),
+  pose: PartPoseSchema,
+  for: z.object({ halfAngleRad: finiteNumber, maxRangeM: finiteNumber }),
+  optics: z.object({ hFovRad: finiteNumber, aspect: finiteNumber }).optional(),
+});
+
+export const FuselagePartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("fuselage"),
+  pose: PartPoseSchema,
+  dims: z.object({ length: finiteNumber, width: finiteNumber, height: finiteNumber }), // metres
+  massKg: finiteNumber,
+});
+
+export const WingPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("wing"),
+  pose: PartPoseSchema,
+  planform: z.object({ span: finiteNumber, chord: finiteNumber }), // area = span * chord (rectangular)
+  massKg: finiteNumber,
+  // A moving control surface on this wing + the axis it drives; area (m²) changes the surface's
+  // deflection effectiveness. Omit for a plain lifting surface. A "yaw" surface is vertical.
+  control: z.object({ axis: z.enum(["roll", "pitch", "yaw"]), area: finiteNumber }).optional(),
+});
+
+export const EnginePartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("engine"),
+  pose: PartPoseSchema,
+  thrustN: finiteNumber,
+  massKg: finiteNumber,
+  dims: z.object({ radius: finiteNumber, length: finiteNumber }), // mesh-only nacelle size
+});
+
+export const TankPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("tank"),
+  pose: PartPoseSchema,
+  fuelKg: finiteNumber, // full fuel load (mass carried when full; burns down to 0)
+  dryMassKg: finiteNumber, // empty tank structure mass
+  dims: z.object({ radius: finiteNumber, length: finiteNumber }), // mesh + box-inertia extents
+});
+
+export const PartSchema = z.discriminatedUnion("kind", [
+  FuselagePartSchema,
+  WingPartSchema,
+  EnginePartSchema,
+  TankPartSchema,
+  SensorDeviceSchema,
+]);
+
+export const AirframeSchema = z.object({
+  id: z.string(),
+  parts: z.array(PartSchema),
+});
+
+export const MatchReplaySchema = z.object({
+  id: z.string(),
+  turnDuration: z.number(),
+  frameDt: z.number(),
+  frames: z.array(ReplayFrameSchema).min(1),
+  // All optional ⇒ v0.1.0 replays still validate and the viewer (reads only `frames`) is unchanged.
+  schemaVersion: z.union([z.literal(2), z.literal(3)]).optional(),
+  agents: z.array(AgentMetaSchema).optional(),
+  decisions: z.array(TurnDecisionSchema).optional(),
+  outcome: MatchOutcomeSchema.optional(),
+  airframes: z.record(z.string(), AirframeSchema).optional(), // keyed by aircraft id; the plane each flew
+});
+
+// One entry per recorded match in the browser manifest (public/matches/index.json).
+export const MatchSummarySchema = z.object({
+  id: z.string(),
+  file: z.string(), // path relative to /matches/
+  model: z.string(),
+  mode: z.string(),
+  repeat: z.number().int().nonnegative(),
+  winnerTeam: z.enum(["blue", "red"]).nullable(),
+  costUsd: z.number(),
+  fallbackRate: z.number(),
+  competence: CompetenceSchema.optional(), // the pilot seat's competence
+});
+export type MatchSummary = z.infer<typeof MatchSummarySchema>;
+
+export type Vec3 = z.infer<typeof Vec3Schema>;
+export type Quaternion = z.infer<typeof QuaternionSchema>;
+export type ControlInput = z.infer<typeof ControlInputSchema>;
+export type AircraftSnapshot = z.infer<typeof AircraftSnapshotSchema>;
+export type ReplayEvent = z.infer<typeof ReplayEventSchema>;
+export type ReplayFrame = z.infer<typeof ReplayFrameSchema>;
+export type MatchReplay = z.infer<typeof MatchReplaySchema>;
+export type StickCommand = z.infer<typeof StickCommandSchema>;
+export type RawStickAction = z.infer<typeof RawStickActionSchema>;
+export type SetpointAction = z.infer<typeof SetpointActionSchema>;
+export type FlightDirectorAction = z.infer<typeof FlightDirectorActionSchema>;
+export type Action = z.infer<typeof ActionSchema>;
+export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
+export type ContactPercept = z.infer<typeof ContactPerceptSchema>;
+export type Observation = z.infer<typeof ObservationSchema>;
+export type AgentMeta = z.infer<typeof AgentMetaSchema>;
+export type Score = z.infer<typeof ScoreSchema>;
+export type MatchOutcome = z.infer<typeof MatchOutcomeSchema>;
+export type TurnDecision = z.infer<typeof TurnDecisionSchema>;
+export type Usage = z.infer<typeof UsageSchema>;
+export type PerceptContact = z.infer<typeof PerceptContactSchema>;
+export type Percept = z.infer<typeof PerceptSchema>;
+export type Competence = z.infer<typeof CompetenceSchema>;
+export type PartPose = z.infer<typeof PartPoseSchema>;
+export type FuselagePart = z.infer<typeof FuselagePartSchema>;
+export type WingPart = z.infer<typeof WingPartSchema>;
+export type EnginePart = z.infer<typeof EnginePartSchema>;
+export type TankPart = z.infer<typeof TankPartSchema>;
+export type Part = z.infer<typeof PartSchema>;
+export type Airframe = z.infer<typeof AirframeSchema>;
+
+export function clampControlInput(input: ControlInput): ControlInput {
+  const clampSigned = (value: number) => Math.max(-1, Math.min(1, value));
+  const clampUnit = (value: number) => Math.max(0, Math.min(1, value));
+
+  return ControlInputSchema.parse({
+    pitch: clampSigned(input.pitch),
+    roll: clampSigned(input.roll),
+    yaw: clampSigned(input.yaw),
+    throttle: clampUnit(input.throttle),
+    trigger: input.trigger,
+  });
+}
+
+================================================================================
+# FILE: src/sim/math.ts
+================================================================================
+
+import type { Quaternion, Vec3 } from "../protocol/schema";
+
+export const ZERO: Vec3 = { x: 0, y: 0, z: 0 };
+export const WORLD_UP: Vec3 = { x: 0, y: 1, z: 0 };
+
+export function vec3(x: number, y: number, z: number): Vec3 {
+  return { x, y, z };
+}
+
+export function add(a: Vec3, b: Vec3): Vec3 {
+  return vec3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+export function sub(a: Vec3, b: Vec3): Vec3 {
+  return vec3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+export function scale(v: Vec3, scalar: number): Vec3 {
+  return vec3(v.x * scalar, v.y * scalar, v.z * scalar);
+}
+
+export function dot(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+export function cross(a: Vec3, b: Vec3): Vec3 {
+  return vec3(
+    a.y * b.z - a.z * b.y,
+    a.z * b.x - a.x * b.z,
+    a.x * b.y - a.y * b.x,
+  );
+}
+
+export function length(v: Vec3): number {
+  return Math.hypot(v.x, v.y, v.z);
+}
+
+export function normalize(v: Vec3, fallback: Vec3 = ZERO): Vec3 {
+  const magnitude = length(v);
+  if (magnitude < 1e-8) {
+    return fallback;
+  }
+
+  return scale(v, 1 / magnitude);
+}
+
+export function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+export function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+export function quatIdentity(): Quaternion {
+  return { x: 0, y: 0, z: 0, w: 1 };
+}
+
+export function quatNormalize(q: Quaternion): Quaternion {
+  const magnitude = Math.hypot(q.x, q.y, q.z, q.w);
+  if (magnitude < 1e-8) {
+    return quatIdentity();
+  }
+
+  return {
+    x: q.x / magnitude,
+    y: q.y / magnitude,
+    z: q.z / magnitude,
+    w: q.w / magnitude,
+  };
+}
+
+export function quatMultiply(a: Quaternion, b: Quaternion): Quaternion {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  };
+}
+
+export function quatFromAxisAngle(axis: Vec3, angle: number): Quaternion {
+  const normal = normalize(axis, WORLD_UP);
+  const half = angle / 2;
+  const sine = Math.sin(half);
+
+  return quatNormalize({
+    x: normal.x * sine,
+    y: normal.y * sine,
+    z: normal.z * sine,
+    w: Math.cos(half),
+  });
+}
+
+export function rotateVec(q: Quaternion, v: Vec3): Vec3 {
+  const x2 = q.x + q.x;
+  const y2 = q.y + q.y;
+  const z2 = q.z + q.z;
+  const xx = q.x * x2;
+  const xy = q.x * y2;
+  const xz = q.x * z2;
+  const yy = q.y * y2;
+  const yz = q.y * z2;
+  const zz = q.z * z2;
+  const wx = q.w * x2;
+  const wy = q.w * y2;
+  const wz = q.w * z2;
+
+  return vec3(
+    (1 - (yy + zz)) * v.x + (xy - wz) * v.y + (xz + wy) * v.z,
+    (xy + wz) * v.x + (1 - (xx + zz)) * v.y + (yz - wx) * v.z,
+    (xz - wy) * v.x + (yz + wx) * v.y + (1 - (xx + yy)) * v.z,
+  );
+}
+
+export function basisFromQuat(q: Quaternion) {
+  return {
+    right: rotateVec(q, vec3(1, 0, 0)),
+    up: rotateVec(q, vec3(0, 1, 0)),
+    forward: rotateVec(q, vec3(0, 0, -1)),
+  };
+}
+
+export function rotateAroundWorldAxis(q: Quaternion, axis: Vec3, angle: number): Quaternion {
+  return quatNormalize(quatMultiply(quatFromAxisAngle(axis, angle), q));
+}
+
+export function quatLookRotation(forwardInput: Vec3, upInput: Vec3 = WORLD_UP): Quaternion {
+  const forward = normalize(forwardInput, vec3(0, 0, -1));
+  let right = normalize(cross(forward, upInput), vec3(1, 0, 0));
+  let up = normalize(cross(right, forward), WORLD_UP);
+
+  if (length(right) < 1e-8) {
+    right = vec3(1, 0, 0);
+    up = WORLD_UP;
+  }
+
+  const back = scale(forward, -1);
+  const m00 = right.x;
+  const m01 = up.x;
+  const m02 = back.x;
+  const m10 = right.y;
+  const m11 = up.y;
+  const m12 = back.y;
+  const m20 = right.z;
+  const m21 = up.z;
+  const m22 = back.z;
+  const trace = m00 + m11 + m22;
+
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    return quatNormalize({
+      w: 0.25 * s,
+      x: (m21 - m12) / s,
+      y: (m02 - m20) / s,
+      z: (m10 - m01) / s,
+    });
+  }
+
+  if (m00 > m11 && m00 > m22) {
+    const s = Math.sqrt(1 + m00 - m11 - m22) * 2;
+    return quatNormalize({
+      w: (m21 - m12) / s,
+      x: 0.25 * s,
+      y: (m01 + m10) / s,
+      z: (m02 + m20) / s,
+    });
+  }
+
+  if (m11 > m22) {
+    const s = Math.sqrt(1 + m11 - m00 - m22) * 2;
+    return quatNormalize({
+      w: (m02 - m20) / s,
+      x: (m01 + m10) / s,
+      y: 0.25 * s,
+      z: (m12 + m21) / s,
+    });
+  }
+
+  const s = Math.sqrt(1 + m22 - m00 - m11) * 2;
+  return quatNormalize({
+    w: (m10 - m01) / s,
+    x: (m02 + m20) / s,
+    y: (m12 + m21) / s,
+    z: 0.25 * s,
+  });
+}
+
+================================================================================
+# FILE: src/sim/types.ts
+================================================================================
+
+import type {
+  Airframe,
+  AircraftSnapshot,
+  ControlInput,
+  Quaternion,
+  ReplayEvent,
+  Vec3,
+} from "../protocol/schema";
+import type { SensorDevice } from "./parts";
+
+export type Team = "blue" | "red";
+
+// Body-axis moments of inertia (kg·m²): roll about the longitudinal (forward/-Z) axis, pitch about
+// the lateral (right/+X) axis, yaw about the vertical (up/+Y) axis.
+export interface Inertia {
+  roll: number;
+  pitch: number;
+  yaw: number;
+}
+
+export type ControlAxis = "pitch" | "roll" | "yaw";
+
+export interface AeroSurfaceControl {
+  axis: ControlAxis;
+  sign: number;
+  maxDeflectionRad: number;
+  effectiveness: number;
+}
+
+export interface AeroSurface {
+  id: string;
+  areaM2: number;
+  spanM: number;
+  chordM: number;
+  aspectRatio: number;
+  localOffset: Vec3;
+  localForward: Vec3;
+  localUp: Vec3;
+  kind: "horizontal" | "vertical";
+  liftSlope: number;
+  zeroLiftCl: number;
+  cd0: number;
+  stallAoARad: number;
+  control?: AeroSurfaceControl;
+}
+
+export interface ThrustPoint {
+  id: string;
+  maxThrustN: number;
+  localOffset: Vec3;
+  localForward: Vec3;
+}
+
+export interface AircraftModel {
+  // --- builder summary scalars and compatibility ratings ---
+  massKg: number;
+  wingAreaM2: number;
+  maxThrustN: number;
+  // Handling ratings derived from control area and lever arms. They are displayed/reported but the
+  // v0.7 surface-force physics below reads aeroSurfaces instead of treating rates as torque motors.
+  maxPitchRate: number;
+  maxRollRate: number;
+  maxYawRate: number;
+  stallAoARad: number;
+  // --- v0.7 surface-force rigid body: derived from airframe geometry by compileAirframe ---
+  inertia: Inertia; // resists angular acceleration; from part masses + layout (box self + parallel axis)
+  com: Vec3; // centre of mass, body frame (m); the point moment arms + inertia are measured from
+  aeroCenterZ: number; // area-weighted longitudinal centre of the lifting surfaces (m, body Z)
+  staticMarginM: number; // aeroCenterZ − com.z; > 0 = CoM ahead of AC = statically stable
+  aspectRatio: number; // span²/area of the lifting surfaces; drives induced drag
+  aeroSurfaces: AeroSurface[];
+  thrustPoints: ThrustPoint[];
+  controlAuthority: Record<ControlAxis, number>;
+  parasiteDragAreaM2: number;
+  dryMassKg: number; // massKg − fuelCapacityKg (structure + payload, no fuel)
+  fuelCapacityKg: number; // total fuel a full airframe carries (0 = no tanks ⇒ effectively infinite)
+}
+
+export interface AircraftState {
+  id: string;
+  callsign: string;
+  team: Team;
+  color: string;
+  position: Vec3;
+  velocity: Vec3;
+  orientation: Quaternion;
+  controls: ControlInput;
+  health: number;
+  weaponCooldown: number;
+  model: AircraftModel;
+  metrics: FlightMetrics;
+  // Rigid-body state: body-frame angular velocity (rad/s; x=roll, y=pitch, z=yaw) carried
+  // between frames — the momentum the kinematic puppet never had — and remaining fuel mass (kg).
+  angularVelocity: Vec3;
+  fuelKg: number;
+  devices?: SensorDevice[]; // v0.4.0: mounted sensors (camera, …). Static config, not per-frame state.
+  // v0.5.0: the source airframe this aircraft was compiled from (model + devices above are its output).
+  // Config-time metadata, NOT copied into AircraftSnapshot — runMatch records it onto the replay so the
+  // viewer can render the plane that was built.
+  airframe?: Airframe;
+}
+
+export interface FlightMetrics {
+  airspeed: number;
+  altitude: number;
+  aoaDeg: number;
+  gLoad: number;
+  stalled: boolean;
+}
+
+export interface StepResult {
+  aircraft: AircraftState[];
+  events: ReplayEvent[];
+}
+
+export function toSnapshot(aircraft: AircraftState): AircraftSnapshot {
+  return {
+    id: aircraft.id,
+    callsign: aircraft.callsign,
+    team: aircraft.team,
+    color: aircraft.color,
+    position: aircraft.position,
+    velocity: aircraft.velocity,
+    orientation: aircraft.orientation,
+    controls: aircraft.controls,
+    airspeed: aircraft.metrics.airspeed,
+    altitude: aircraft.metrics.altitude,
+    aoaDeg: aircraft.metrics.aoaDeg,
+    gLoad: aircraft.metrics.gLoad,
+    health: aircraft.health,
+    weaponCooldown: aircraft.weaponCooldown,
+    stalled: aircraft.metrics.stalled,
+  };
+}
+
+================================================================================
+# FILE: src/sim/parts.ts
+================================================================================
+
+import type { Quaternion, Vec3 } from "../protocol/schema";
+
+// v0.4.0: a sensor is a first-class DEVICE mounted at a pose on the airframe. This is the seam the
+// camera study and (later) radar/IR ride on, and the same mount-pose concept a KSP-style builder
+// will place. Deliberately NOT an airframe compiler or a multi-variant Part union yet — the only
+// structural change the sensor foundation needs is `AircraftState.devices?: SensorDevice[]`. The
+// compiler arrives with the builder (a later version), as a clean additive fold over these parts.
+
+export type Modality = "camera" | "radar" | "ir";
+
+// Where a device sits and which way it looks, in the aircraft's body frame.
+// Body forward is -Z (see basisFromQuat in math.ts); rotation is the boresight offset vs that basis
+// (identity = looks straight down the nose).
+export interface DevicePose {
+  offset: Vec3; // metres, body frame
+  rotation: Quaternion; // boresight rotation vs the body basis
+}
+
+// What a device can physically perceive: a cone about its boresight, out to a range ceiling.
+// halfAngleRad = Math.PI means omnidirectional; maxRangeM = Infinity means no range limit.
+export interface FieldOfRegard {
+  halfAngleRad: number;
+  maxRangeM: number;
+}
+
+export interface SensorDevice {
+  id: string; // stable, e.g. "nose-cam" — keys a recorded Percept back to its device
+  kind: "sensor";
+  modality: Modality;
+  pose: DevicePose;
+  for: FieldOfRegard;
+  // Camera framing (rectangular image plane). Ignored by radar/ir. hFovRad = horizontal field of
+  // view; aspect = width/height, used to derive the vertical field of view.
+  optics?: { hFovRad: number; aspect: number };
+}
+
+================================================================================
+# FILE: src/sim/airframe.ts
+================================================================================
+
+import type { Airframe, Part, Vec3 } from "../protocol/schema";
+import { add, clamp, normalize, quatIdentity, rotateVec, scale, vec3 } from "./math";
+import type { SensorDevice } from "./parts";
+import type { AeroSurface, AircraftModel, ControlAxis, Inertia, ThrustPoint } from "./types";
+
+// The aircraft builder's keystone: a PURE fold from a parts list to the physical AircraftModel that
+// stepAircraft consumes. Wings become aerodynamic surfaces with local axes and optional moving control
+// panels; engines become thrust points; massful parts set CoM + inertia. A sensor is still a part, so
+// "place a camera" and "fly from a camera" are one data path.
+//
+// Determinism is load-bearing. The legacy handling ratings still anchor to the DEFAULT airframe's own
+// computed authority (so reports stay stable), but the v0.7 physics no longer reads those ratings as
+// torque motors. The plane now handles because surfaces push on air at their placed locations.
+
+// The forward nose camera, expressed as a part so it serializes inside the airframe. Lives here (not in
+// runtime/scenario) so the default airframe — the determinism anchor — can include it with no import
+// cycle. A fresh instance per call (devices are static config, never mutated, but never shared either).
+export function noseCamera(): SensorDevice {
+  return {
+    id: "nose-cam",
+    kind: "sensor",
+    modality: "camera",
+    pose: { offset: vec3(0, 0, -18), rotation: quatIdentity() },
+    for: { halfAngleRad: 0.7, maxRangeM: 8_000 },
+    optics: { hFovRad: Math.PI / 3, aspect: 1.6 },
+  };
+}
+
+// The canonical default airframe. By construction it compiles to exactly DEFAULT_MODEL (verified by a
+// test), so all 24 existing replays and the scripted duel stay byte-identical. A factory (fresh objects)
+// so two aircraft never share a mutable part reference. Part masses are integers summing to 9200; wing
+// areas sum to 22.5 (13*1.5 + 4*0.75, the fin's 2*1 excluded as a vertical/yaw surface).
+export function defaultAirframe(): Airframe {
+  const body = quatIdentity();
+  return {
+    id: "default",
+    parts: [
+      {
+        id: "fuselage",
+        kind: "fuselage",
+        pose: { offset: vec3(0, 0, 0), rotation: body },
+        dims: { length: 12, width: 1.2, height: 1.2 },
+        massKg: 6_000,
+      },
+      {
+        id: "main-wing",
+        kind: "wing",
+        pose: { offset: vec3(0, 0, 0.3), rotation: body },
+        planform: { span: 13, chord: 1.5 }, // 19.5 m²
+        massKg: 1_500,
+        control: { axis: "roll", area: 2 },
+      },
+      {
+        id: "tailplane",
+        kind: "wing",
+        pose: { offset: vec3(0, 0.4, 5), rotation: body },
+        planform: { span: 4, chord: 0.75 }, // 3.0 m²
+        massKg: 400,
+        control: { axis: "pitch", area: 2.4 },
+      },
+      {
+        id: "fin",
+        kind: "wing",
+        pose: { offset: vec3(0, 0.8, 5), rotation: body },
+        planform: { span: 2, chord: 1 }, // vertical: excluded from lift area
+        massKg: 300,
+        control: { axis: "yaw", area: 1.4 },
+      },
+      {
+        id: "engine",
+        kind: "engine",
+        pose: { offset: vec3(0, 0, 4), rotation: body },
+        thrustN: 74_000,
+        massKg: 1_000,
+        dims: { radius: 0.5, length: 2.4 },
+      },
+      noseCamera(),
+    ],
+  };
+}
+
+interface Authorities {
+  roll: number;
+  pitch: number;
+  yaw: number;
+}
+
+// Control authority per axis = surface area * moment arm. Ailerons act at the wing semi-span; the
+// elevator/rudder act at their longitudinal distance down the tail. This is the lever the existing sim
+// actually rewards (control-surface size, NOT wing area, which only adds drag). A crude stand-in for
+// torque/inertia — when the rigid-body stage lands, these same numbers feed a real moment.
+function authorities(parts: Part[]): Authorities {
+  const auth: Authorities = { roll: 0, pitch: 0, yaw: 0 };
+  for (const part of parts) {
+    if (part.kind !== "wing" || !part.control) continue;
+    const arm =
+      part.control.axis === "roll" ? part.planform.span / 2 : Math.abs(part.pose.offset.z);
+    auth[part.control.axis] += part.control.area * arm;
+  }
+  return auth;
+}
+
+// Computed once from the default. The anchor that makes the default's rate ratio exactly 1.0.
+const DEFAULT_AUTHORITY = authorities(defaultAirframe().parts);
+
+// The default's reference handling ratings (rad/s) and stall AoA. These remain useful UI/reporting
+// numbers, but surface-force physics reads model.aeroSurfaces.
+const BASE_PITCH_RATE = 0.92;
+const BASE_ROLL_RATE = 1.75;
+const BASE_YAW_RATE = 0.34;
+const STALL_AOA_RAD = 0.42;
+const WING_THICKNESS_M = 0.1; // nominal slab thickness for a wing's box-inertia/mesh extents
+const DEFAULT_DIHEDRAL_RAD = 0.075;
+
+// No hidden safety floor: a control-surface-free build really has no control authority on that axis.
+const RATE_RATIO_MIN = 0;
+const RATE_RATIO_MAX = 3.0;
+
+function rateFor(base: number, authority: number, defaultAuthority: number): number {
+  if (defaultAuthority <= 0) return base;
+  const ratio = Math.max(RATE_RATIO_MIN, Math.min(RATE_RATIO_MAX, authority / defaultAuthority));
+  return base * ratio;
+}
+
+export interface CompiledAirframe {
+  model: AircraftModel;
+  devices: SensorDevice[];
+}
+
+interface PartBox {
+  mass: number;
+  offset: Vec3;
+  dimX: number; // body lateral extent (m)
+  dimY: number; // body vertical extent
+  dimZ: number; // body longitudinal extent
+}
+
+function normalizedAreaFraction(controlArea: number | undefined, totalArea: number): number {
+  if (!controlArea || totalArea <= 0) return 0;
+  return clamp(controlArea / totalArea, 0, 1.4);
+}
+
+function controlFor(axis: ControlAxis, sign: number, fraction: number): AeroSurface["control"] {
+  if (fraction <= 0) return undefined;
+  return {
+    axis,
+    sign,
+    maxDeflectionRad: 0.24,
+    // A small aileron should matter, and a huge full-span surface should saturate rather than explode.
+    effectiveness: clamp(0.06 + fraction * 0.24, 0.06, 0.34),
+  };
+}
+
+function makeSurface(
+  part: Extract<Part, { kind: "wing" }>,
+  opts: {
+    id: string;
+    areaM2: number;
+    spanM: number;
+    offset: Vec3;
+    forward: Vec3;
+    up: Vec3;
+    kind: AeroSurface["kind"];
+    control?: AeroSurface["control"];
+  },
+): AeroSurface {
+  const aspectRatio = opts.areaM2 > 0 ? (opts.spanM * opts.spanM) / opts.areaM2 : 1;
+  const vertical = opts.kind === "vertical";
+  return {
+    id: opts.id,
+    areaM2: opts.areaM2,
+    spanM: opts.spanM,
+    chordM: part.planform.chord,
+    aspectRatio: Math.max(aspectRatio, 0.2),
+    localOffset: opts.offset,
+    localForward: opts.forward,
+    localUp: opts.up,
+    kind: opts.kind,
+    liftSlope: vertical ? 3.8 : 4.7,
+    zeroLiftCl: vertical ? 0 : 0.24,
+    cd0: vertical ? 0.018 : 0.026,
+    stallAoARad: STALL_AOA_RAD,
+    ...(opts.control ? { control: opts.control } : {}),
+  };
+}
+
+function wingSurfaces(part: Extract<Part, { kind: "wing" }>): AeroSurface[] {
+  const area = part.planform.span * part.planform.chord;
+  if (area <= 0) return [];
+
+  const yawSurface = part.control?.axis === "yaw";
+  const forward = rotateVec(part.pose.rotation, vec3(0, 0, -1));
+  const up = rotateVec(part.pose.rotation, yawSurface ? vec3(1, 0, 0) : vec3(0, 1, 0));
+  const spanAxis = rotateVec(part.pose.rotation, yawSurface ? vec3(0, 1, 0) : vec3(1, 0, 0));
+  const fraction = normalizedAreaFraction(part.control?.area, area);
+
+  if (part.control?.axis === "roll") {
+    const halfArea = area / 2;
+    const halfSpan = part.planform.span / 2;
+    return [-1, 1].map((side) =>
+      {
+        const panelUp = normalize(add(up, scale(spanAxis, -side * Math.sin(DEFAULT_DIHEDRAL_RAD))), up);
+        return makeSurface(part, {
+          id: `${part.id}-${side < 0 ? "left" : "right"}`,
+          areaM2: halfArea,
+          spanM: halfSpan,
+          offset: add(part.pose.offset, scale(spanAxis, side * part.planform.span * 0.25)),
+          forward,
+          up: panelUp,
+          kind: "horizontal",
+          control: controlFor("roll", -side, fraction),
+        });
+      },
+    );
+  }
+
+  const control =
+    part.control?.axis === "pitch"
+      ? controlFor("pitch", -1, fraction)
+      : part.control?.axis === "yaw"
+        ? controlFor("yaw", -1, fraction)
+        : undefined;
+
+  return [
+    makeSurface(part, {
+      id: part.id,
+      areaM2: area,
+      spanM: part.planform.span,
+      offset: part.pose.offset,
+      forward,
+      up,
+      kind: yawSurface ? "vertical" : "horizontal",
+      control,
+    }),
+  ];
+}
+
+function thrustPoint(part: Extract<Part, { kind: "engine" }>): ThrustPoint {
+  return {
+    id: part.id,
+    maxThrustN: part.thrustN,
+    localOffset: part.pose.offset,
+    localForward: rotateVec(part.pose.rotation, vec3(0, 0, -1)),
+  };
+}
+
+// A massive part's mass, body-frame position, and bounding-box extents — the inputs to CoM + box
+// inertia. Sensors are treated as massless structure and contribute nothing. (Tanks: fuel milestone.)
+function partBox(part: Part): PartBox | null {
+  switch (part.kind) {
+    case "fuselage":
+      return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.width, dimY: part.dims.height, dimZ: part.dims.length };
+    case "wing": {
+      const vertical = part.control?.axis === "yaw"; // a fin's span runs up the Y axis
+      return vertical
+        ? { mass: part.massKg, offset: part.pose.offset, dimX: WING_THICKNESS_M, dimY: part.planform.span, dimZ: part.planform.chord }
+        : { mass: part.massKg, offset: part.pose.offset, dimX: part.planform.span, dimY: WING_THICKNESS_M, dimZ: part.planform.chord };
+    }
+    case "engine":
+      return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
+    case "tank":
+      // Full (wet) mass for CoM + inertia; inertia is held at the wet value as fuel burns (a stated cut).
+      return { mass: part.dryMassKg + part.fuelKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
+    default:
+      return null; // sensor
+  }
+}
+
+// Solid-box inertia about the part's own centroid + parallel-axis transfer to the aircraft CoM.
+// roll = about body Z (forward); pitch = about body X (right); yaw = about body Y (up). The box self
+// term is what gives a long fuselage its real pitch/yaw inertia (m·L²/12) — a point mass would miss it.
+function addBoxInertia(acc: Inertia, box: PartBox, com: Vec3): void {
+  const { mass: m, dimX, dimY, dimZ } = box;
+  const dx = box.offset.x - com.x;
+  const dy = box.offset.y - com.y;
+  const dz = box.offset.z - com.z;
+  acc.roll += (m * (dimX * dimX + dimY * dimY)) / 12 + m * (dx * dx + dy * dy);
+  acc.pitch += (m * (dimY * dimY + dimZ * dimZ)) / 12 + m * (dy * dy + dz * dz);
+  acc.yaw += (m * (dimX * dimX + dimZ * dimZ)) / 12 + m * (dx * dx + dz * dz);
+}
+
+export function compileAirframe(airframe: Airframe): CompiledAirframe {
+  let massKg = 0;
+  let wingAreaM2 = 0;
+  let maxThrustN = 0;
+  let parasiteDragAreaM2 = 0;
+  let fuelCapacityKg = 0; // Σ tank fuel; 0 (no tanks) ⇒ effectively infinite fuel (no burn)
+  let liftArea = 0;
+  let liftAreaZ = 0;
+  let maxLiftSpan = 0;
+  const devices: SensorDevice[] = [];
+  const aeroSurfaces: AeroSurface[] = [];
+  const thrustPoints: ThrustPoint[] = [];
+
+  // Pass 1: scalar sums, lift geometry, and mass-weighted CoM accumulation.
+  let comMassX = 0;
+  let comMassY = 0;
+  let comMassZ = 0;
+  for (const part of airframe.parts) {
+    const box = partBox(part);
+    if (box) {
+      comMassX += box.mass * box.offset.x;
+      comMassY += box.mass * box.offset.y;
+      comMassZ += box.mass * box.offset.z;
+    }
+    switch (part.kind) {
+      case "fuselage":
+        massKg += part.massKg;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.25;
+        break;
+      case "wing":
+        massKg += part.massKg;
+        aeroSurfaces.push(...wingSurfaces(part));
+        // Vertical (yaw) surfaces drive yaw but make no lift, so they don't add to the lift area.
+        if (part.control?.axis !== "yaw") {
+          const area = part.planform.span * part.planform.chord;
+          wingAreaM2 += area;
+          liftArea += area;
+          liftAreaZ += area * part.pose.offset.z;
+          if (part.planform.span > maxLiftSpan) maxLiftSpan = part.planform.span;
+        }
+        break;
+      case "engine":
+        massKg += part.massKg;
+        maxThrustN += part.thrustN;
+        thrustPoints.push(thrustPoint(part));
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.25;
+        break;
+      case "tank":
+        massKg += part.dryMassKg + part.fuelKg; // full mass; the fuel portion is burnable
+        fuelCapacityKg += part.fuelKg;
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.2;
+        break;
+      case "sensor":
+        devices.push(part);
+        break;
+    }
+  }
+
+  const com: Vec3 = massKg > 0 ? vec3(comMassX / massKg, comMassY / massKg, comMassZ / massKg) : vec3(0, 0, 0);
+
+  // Pass 2: inertia about the CoM. Floor each axis so a degenerate (massless) build can't divide by 0.
+  const inertia: Inertia = { roll: 0, pitch: 0, yaw: 0 };
+  for (const part of airframe.parts) {
+    const box = partBox(part);
+    if (box) addBoxInertia(inertia, box, com);
+  }
+  inertia.roll = Math.max(inertia.roll, 1);
+  inertia.pitch = Math.max(inertia.pitch, 1);
+  inertia.yaw = Math.max(inertia.yaw, 1);
+
+  // Aerodynamic centre = area-weighted longitudinal centre of the lifting surfaces; aspect ratio from
+  // the widest lifting span. Both fall back to safe values for a wingless build.
+  const aeroCenterZ = liftArea > 0 ? liftAreaZ / liftArea : com.z;
+  const aspectRatio = liftArea > 0 && maxLiftSpan > 0 ? (maxLiftSpan * maxLiftSpan) / liftArea : 6;
+
+  const auth = authorities(airframe.parts);
+  const controlAuthority: Record<ControlAxis, number> = {
+    roll: auth.roll,
+    pitch: auth.pitch,
+    yaw: auth.yaw,
+  };
+  const model: AircraftModel = {
+    massKg,
+    wingAreaM2,
+    maxThrustN,
+    maxPitchRate: rateFor(BASE_PITCH_RATE, auth.pitch, DEFAULT_AUTHORITY.pitch),
+    maxRollRate: rateFor(BASE_ROLL_RATE, auth.roll, DEFAULT_AUTHORITY.roll),
+    maxYawRate: rateFor(BASE_YAW_RATE, auth.yaw, DEFAULT_AUTHORITY.yaw),
+    stallAoARad: STALL_AOA_RAD,
+    inertia,
+    com,
+    aeroCenterZ,
+    staticMarginM: aeroCenterZ - com.z, // > 0 ⇒ CoM ahead of AC ⇒ statically stable
+    aspectRatio,
+    aeroSurfaces,
+    thrustPoints,
+    controlAuthority,
+    parasiteDragAreaM2,
+    dryMassKg: massKg - fuelCapacityKg,
+    fuelCapacityKg,
+  };
+
+  return { model, devices };
+}
+
+export interface AirframeReport {
+  thrustToWeight: number;
+  wingLoadingNm2: number;
+  maxPitchRate: number;
+  maxRollRate: number;
+  maxYawRate: number;
+  surfaceCount: number;
+  thrustPointCount: number;
+  controlAuthority: Record<ControlAxis, number>;
+  warnings: string[];
+}
+
+// Flyability cues for the builder, computed against the EXACT sim constants (9.81 m/s², the 62 m/s
+// stall floor that stepAircraft enforces). Warnings, not hard blocks — feeling a bad design is the game.
+export function airframeReport(model: AircraftModel): AirframeReport {
+  const weightN = model.massKg * 9.81;
+  const thrustToWeight = model.maxThrustN / weightN;
+  const wingLoadingNm2 = model.wingAreaM2 > 0 ? weightN / model.wingAreaM2 : Infinity;
+  const warnings: string[] = [];
+
+  if (model.wingAreaM2 <= 0) {
+    warnings.push("no wing area: the aircraft cannot generate lift");
+  } else if (wingLoadingNm2 > 6_000) {
+    warnings.push("very high wing loading: needs high speed to stay airborne");
+  }
+  if (thrustToWeight < 0.3) {
+    warnings.push("low thrust-to-weight (<0.3): may not accelerate past the 62 m/s stall floor");
+  }
+  if (model.aeroSurfaces.length === 0) {
+    warnings.push("no aerodynamic surfaces: the aircraft is ballistic");
+  }
+  if (model.thrustPoints.length === 0 && model.maxThrustN > 0) {
+    warnings.push("thrust has no mounted engine point");
+  }
+  for (const axis of ["roll", "pitch", "yaw"] as const) {
+    if (model.controlAuthority[axis] <= 0) warnings.push(`no ${axis} control surface`);
+  }
+  const flagRate = (axis: string, rate: number, base: number) => {
+    if (rate > 0 && rate < base * 0.3) warnings.push(`weak ${axis} authority (<0.3× default rating)`);
+  };
+  flagRate("roll", model.maxRollRate, BASE_ROLL_RATE);
+  flagRate("pitch", model.maxPitchRate, BASE_PITCH_RATE);
+  flagRate("yaw", model.maxYawRate, BASE_YAW_RATE);
+
+  return {
+    thrustToWeight,
+    wingLoadingNm2,
+    maxPitchRate: model.maxPitchRate,
+    maxRollRate: model.maxRollRate,
+    maxYawRate: model.maxYawRate,
+    surfaceCount: model.aeroSurfaces.length,
+    thrustPointCount: model.thrustPoints.length,
+    controlAuthority: model.controlAuthority,
+    warnings,
+  };
+}
+
+================================================================================
+# FILE: src/sim/flight.ts
+================================================================================
+
+import { clampControlInput, type ControlInput, type ReplayEvent } from "../protocol/schema";
+import { compileAirframe, defaultAirframe } from "./airframe";
+import {
+  add,
+  basisFromQuat,
+  clamp,
+  cross,
+  dot,
+  length,
+  normalize,
+  rotateAroundWorldAxis,
+  rotateVec,
+  scale,
+  sub,
+  vec3,
+} from "./math";
+import type { AeroSurface, AircraftModel, AircraftState, FlightMetrics, StepResult } from "./types";
+
+const GRAVITY = vec3(0, -9.81, 0);
+const SEA_LEVEL_DENSITY = 1.225;
+const TERRAIN_FLOOR_M = 55;
+
+// Oswald span efficiency for the induced-drag polar cd_i = cl²/(π·AR·e). With the default AR≈7.5 this
+// lands at ≈0.053 — essentially the old constant 0.052 — so the default is undisturbed, while a stubby
+// low-AR build now pays a real induced-drag penalty and a long-winged build is rewarded.
+const OSWALD_E = 0.8;
+
+// Numerical guardrail, not an authority model: forces still decide the acceleration, but absurd builds
+// and high-speed stalls cannot integrate to unbounded spin rates in one coarse replay frame.
+const MAX_BODY_RATE_RAD_S = 5.5;
+
+// Specific fuel consumption (kg burned per N of thrust per second). Sized so an ~1800 kg tank gives
+// ~400 s of full-throttle endurance — visible drain over a long fight, not match-ending in a short one.
+const SFC = 6e-5;
+
+// The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
+// source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
+export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
+
+function densityAtAltitude(altitudeM: number): number {
+  return SEA_LEVEL_DENSITY * Math.exp(-Math.max(altitudeM, 0) / 8_800);
+}
+
+function bodyOmegaWorld(aircraft: AircraftState) {
+  const basis = basisFromQuat(aircraft.orientation);
+  return add(
+    add(scale(basis.forward, aircraft.angularVelocity.x), scale(basis.right, aircraft.angularVelocity.y)),
+    scale(basis.up, aircraft.angularVelocity.z),
+  );
+}
+
+function controlDeflection(surface: AeroSurface, controls: ControlInput): number {
+  if (!surface.control) return 0;
+  return (
+    controls[surface.control.axis] *
+    surface.control.sign *
+    surface.control.maxDeflectionRad *
+    surface.control.effectiveness
+  );
+}
+
+interface SurfaceSample {
+  force: ReturnType<typeof vec3>;
+  liftForce: ReturnType<typeof vec3>;
+  torque: ReturnType<typeof vec3>;
+  alpha: number;
+  stallSeverity: number;
+}
+
+function sampleSurface(
+  surface: AeroSurface,
+  aircraft: AircraftState,
+  controls: ControlInput,
+  density: number,
+  omegaWorld: ReturnType<typeof vec3>,
+): SurfaceSample {
+  const basis = basisFromQuat(aircraft.orientation);
+  const rWorld = rotateVec(aircraft.orientation, sub(surface.localOffset, aircraft.model.com));
+  const surfaceVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
+  const surfaceSpeed = length(surfaceVelocity);
+  if (surfaceSpeed < 0.5 || surface.areaM2 <= 0) {
+    const zero = vec3(0, 0, 0);
+    return { force: zero, liftForce: zero, torque: zero, alpha: 0, stallSeverity: 0 };
+  }
+
+  const forward = normalize(rotateVec(aircraft.orientation, surface.localForward), basis.forward);
+  const up = normalize(rotateVec(aircraft.orientation, surface.localUp), basis.up);
+  const vForward = dot(surfaceVelocity, forward);
+  const vLift = dot(surfaceVelocity, up);
+  const alpha = Math.atan2(-vLift, Math.max(Math.abs(vForward), 1));
+  const deflection = controlDeflection(surface, controls);
+  const alphaEffective = alpha + deflection;
+  const stallSeverity = clamp(
+    (Math.abs(alphaEffective) - surface.stallAoARad) / Math.max(surface.stallAoARad * 0.85, 1e-3),
+    0,
+    1,
+  );
+
+  const clLinear = surface.zeroLiftCl + surface.liftSlope * alphaEffective;
+  const cl = clamp(clLinear, -1.28, 1.55) * (1 - stallSeverity * 0.78);
+  const inducedDrag = (cl * cl) / (Math.PI * Math.max(surface.aspectRatio, 0.3) * OSWALD_E);
+  const aileronDrag = surface.control?.axis === "roll" ? Math.max(0, -deflection) * 0.11 : 0;
+  const cd =
+    surface.cd0 + inducedDrag + stallSeverity * 0.38 + Math.abs(deflection) * 0.035 + aileronDrag;
+  const qbar = 0.5 * density * surfaceSpeed * surfaceSpeed;
+
+  const vhat = normalize(surfaceVelocity, forward);
+  const liftDir = normalize(sub(up, scale(vhat, dot(up, vhat))), up);
+  const liftForce = scale(liftDir, qbar * surface.areaM2 * cl);
+  const dragForce = scale(vhat, -qbar * surface.areaM2 * cd);
+  const force = add(liftForce, dragForce);
+  return {
+    force,
+    liftForce,
+    torque: cross(rWorld, force),
+    alpha,
+    stallSeverity,
+  };
+}
+
+export function stepSimulation(
+  aircraft: AircraftState[],
+  controlsById: Record<string, ControlInput>,
+  dt: number,
+): StepResult {
+  const events: ReplayEvent[] = [];
+
+  for (const ship of aircraft) {
+    const controls = clampControlInput(controlsById[ship.id] ?? ship.controls);
+    ship.controls = controls;
+    ship.metrics = stepAircraft(ship, controls, dt);
+
+    if (ship.position.y <= TERRAIN_FLOOR_M + 0.5 && length(ship.velocity) > 55) {
+      ship.health = clamp(ship.health - 4.5 * dt, 0, 100);
+      if (Math.round(ship.health) % 9 === 0) {
+        events.push({
+          type: "terrain",
+          actorId: ship.id,
+          message: `${ship.callsign} is scraping the floor`,
+          origin: ship.position,
+        });
+      }
+    }
+  }
+
+  events.push(...resolveWeapons(aircraft));
+
+  return { aircraft, events };
+}
+
+function stepAircraft(
+  aircraft: AircraftState,
+  controls: ControlInput,
+  dt: number,
+): FlightMetrics {
+  const model = aircraft.model;
+  const basis = basisFromQuat(aircraft.orientation);
+  const speed = length(aircraft.velocity);
+  const forwardSpeed = dot(aircraft.velocity, basis.forward);
+  const bodyVerticalSpeed = dot(aircraft.velocity, basis.up);
+  const aoa = Math.atan2(-bodyVerticalSpeed, Math.max(Math.abs(forwardSpeed), 1));
+  const density = densityAtAltitude(aircraft.position.y);
+  const qbar = 0.5 * density * speed * speed;
+
+  // Fuel: a tanked airframe (fuelCapacityKg > 0) burns ∝ thrust and cuts thrust when dry; a tankless
+  // one has infinite fuel. effectiveMass shrinks as fuel burns, so the aircraft accelerates/climbs
+  // better light. (CoM + inertia are held at the wet value — a stated cut.)
+  const tanked = model.fuelCapacityKg > 0;
+  const hasFuel = !tanked || aircraft.fuelKg > 0;
+  const thrustSetting = hasFuel ? 0.14 + controls.throttle * 0.86 : 0;
+  const commandedThrustN = model.maxThrustN * thrustSetting;
+  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * commandedThrustN * dt);
+  const effectiveMassKg = Math.max(model.dryMassKg + aircraft.fuelKg, 1); // floor guards a fully-empty build
+
+  const omegaWorld = bodyOmegaWorld(aircraft);
+  let totalForce = vec3(0, 0, 0);
+  let totalTorque = vec3(0, 0, 0);
+  let loadForce = vec3(0, 0, 0);
+  let maxSurfaceStall = 0;
+  let horizontalAlphaArea = 0;
+  let horizontalArea = 0;
+
+  for (const surface of model.aeroSurfaces) {
+    const sample = sampleSurface(surface, aircraft, controls, density, omegaWorld);
+    totalForce = add(totalForce, sample.force);
+    totalTorque = add(totalTorque, sample.torque);
+    loadForce = add(loadForce, sample.liftForce);
+    maxSurfaceStall = Math.max(maxSurfaceStall, sample.stallSeverity);
+    if (surface.kind === "horizontal") {
+      horizontalAlphaArea += sample.alpha * surface.areaM2;
+      horizontalArea += surface.areaM2;
+    }
+  }
+
+  if (speed > 0.5 && model.parasiteDragAreaM2 > 0) {
+    totalForce = add(
+      totalForce,
+      scale(normalize(aircraft.velocity), -qbar * model.parasiteDragAreaM2),
+    );
+  }
+
+  if (commandedThrustN > 0) {
+    if (model.thrustPoints.length > 0) {
+      for (const point of model.thrustPoints) {
+        const force = scale(rotateVec(aircraft.orientation, point.localForward), point.maxThrustN * thrustSetting);
+        const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+        totalForce = add(totalForce, force);
+        totalTorque = add(totalTorque, cross(rWorld, force));
+      }
+    } else {
+      totalForce = add(totalForce, scale(basis.forward, commandedThrustN));
+    }
+  }
+
+  const acceleration = add(scale(totalForce, 1 / effectiveMassKg), GRAVITY);
+
+  aircraft.velocity = add(aircraft.velocity, scale(acceleration, dt));
+  aircraft.position = add(aircraft.position, scale(aircraft.velocity, dt));
+
+  if (aircraft.position.y < TERRAIN_FLOOR_M) {
+    aircraft.position = { ...aircraft.position, y: TERRAIN_FLOOR_M };
+    aircraft.velocity = {
+      ...aircraft.velocity,
+      y: Math.max(12, Math.abs(aircraft.velocity.y) * 0.22),
+    };
+  }
+
+  const omega = aircraft.angularVelocity;
+  const nextRoll = omega.x + (dot(totalTorque, basis.forward) / model.inertia.roll) * dt;
+  const nextPitch = omega.y + (dot(totalTorque, basis.right) / model.inertia.pitch) * dt;
+  const nextYaw = omega.z + (dot(totalTorque, basis.up) / model.inertia.yaw) * dt;
+  aircraft.angularVelocity = vec3(
+    clamp(Number.isFinite(nextRoll) ? nextRoll : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextPitch) ? nextPitch : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextYaw) ? nextYaw : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+  );
+
+  let orientation = aircraft.orientation;
+  orientation = rotateAroundWorldAxis(orientation, basis.forward, aircraft.angularVelocity.x * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.right, aircraft.angularVelocity.y * dt);
+  orientation = rotateAroundWorldAxis(orientation, basis.up, aircraft.angularVelocity.z * dt);
+  aircraft.orientation = orientation;
+  aircraft.weaponCooldown = Math.max(0, aircraft.weaponCooldown - dt);
+
+  const metricAoa = horizontalArea > 0 ? horizontalAlphaArea / horizontalArea : aoa;
+  const stalled = speed < 62 || maxSurfaceStall > 0.2;
+  const gLoad = length(loadForce) / (effectiveMassKg * 9.81);
+
+  return {
+    airspeed: length(aircraft.velocity),
+    altitude: aircraft.position.y,
+    aoaDeg: (metricAoa * 180) / Math.PI,
+    gLoad,
+    stalled,
+  };
+}
+
+function resolveWeapons(aircraft: AircraftState[]): ReplayEvent[] {
+  const events: ReplayEvent[] = [];
+
+  for (const shooter of aircraft) {
+    if (!shooter.controls.trigger || shooter.weaponCooldown > 0 || shooter.health <= 0) {
+      continue;
+    }
+
+    shooter.weaponCooldown = 2.65;
+    const target = nearestOpponent(shooter, aircraft);
+    if (!target) {
+      continue;
+    }
+
+    const toTarget = sub(target.position, shooter.position);
+    const range = length(toTarget);
+    const direction = normalize(toTarget);
+    const forward = basisFromQuat(shooter.orientation).forward;
+    const angle = Math.acos(clamp(dot(direction, forward), -1, 1));
+    const origin = add(shooter.position, scale(forward, 18));
+    const impact = target.position;
+
+    events.push({
+      type: "shot",
+      actorId: shooter.id,
+      targetId: target.id,
+      message: `${shooter.callsign} fires`,
+      origin,
+      impact,
+    });
+
+    if (range < 1_180 && angle < 0.155) {
+      const damage = clamp(36 * (1 - range / 1_420) * (1 - angle / 0.19), 7, 28);
+      target.health = clamp(target.health - damage, 0, 100);
+      events.push({
+        type: "hit",
+        actorId: shooter.id,
+        targetId: target.id,
+        message: `${shooter.callsign} scores ${Math.round(damage)} damage on ${target.callsign}`,
+        origin,
+        impact,
+      });
+    } else {
+      events.push({
+        type: "miss",
+        actorId: shooter.id,
+        targetId: target.id,
+        message: `${shooter.callsign} misses ${target.callsign}`,
+        origin,
+        impact,
+      });
+    }
+  }
+
+  return events;
+}
+
+function nearestOpponent(shooter: AircraftState, aircraft: AircraftState[]) {
+  return aircraft
+    .filter((candidate) => candidate.team !== shooter.team && candidate.health > 0)
+    .sort(
+      (a, b) =>
+        length(sub(a.position, shooter.position)) - length(sub(b.position, shooter.position)),
+    )[0];
+}
+
+================================================================================
+# FILE: src/agent/controller.ts
+================================================================================
+
+import type { Action, AgentMeta, Observation, Usage } from "../protocol/schema";
+
+export type { AgentMeta };
+
+// What the runner hands a controller each turn besides the percept.
+export interface ControllerContext {
+  turn: number;
+  agentId: string;
+  deadlineMs: number; // latency budget; the controller should resolve before this
+  signal: AbortSignal; // aborted on timeout — long-running controllers should bail
+}
+
+// A decision, not a bare Action: carries the expressed intent plus optional audit trail.
+export interface ControllerDecision {
+  action: Action;
+  rationale?: string; // free-text "why" (LLM); recorded into the replay
+  usage?: Usage; // per-call tokens + cost (LLM controllers); recorded for the cost study
+  raw?: unknown; // raw provider response, kept in-memory for debugging (not persisted)
+}
+
+// The seam. Async from day one even for scripted agents (they resolve immediately), so an
+// LLM controller — a network round-trip — drops in without changing the runtime.
+export type Controller = (
+  observation: Observation,
+  context: ControllerContext,
+) => Promise<ControllerDecision>;
+
+================================================================================
+# FILE: src/agent/observation.ts
+================================================================================
+
+import { ObservationSchema, type ContactPercept, type Observation } from "../protocol/schema";
+import { basisFromQuat, dot, length, normalize, sub } from "../sim/math";
+import type { AircraftState } from "../sim/types";
+
+export interface DetectedContact {
+  target: AircraftState;
+  confidence: number;
+}
+
+// Visibility filter: world truth -> what THIS agent is allowed to perceive. Splitting the
+// sensor (who can I see) from the projection (how is it framed) means a fog-of-war experiment
+// in 0.3.0 swaps the sensor while controllers stay untouched.
+export interface SensorModel {
+  detect(world: AircraftState[], self: AircraftState): DetectedContact[];
+}
+
+// 0.2.0: perfect information. Keeps the thread deterministic; the seam is what matters.
+export const perfectSensor: SensorModel = {
+  detect(world, self) {
+    return world
+      .filter((candidate) => candidate.team !== self.team && candidate.health > 0)
+      .map((target) => ({ target, confidence: 1 }));
+  },
+};
+
+// Projects internal AircraftState into an ego-relative percept. Reads internal state (not the
+// public snapshot) so the projection decides what is revealed. The per-contact direction
+// cosines are exactly the dot products the scripted controllers used to take against the raw
+// basis — pre-projected here so a controller never needs omniscient world state.
+export function toObservation(
+  self: AircraftState,
+  world: AircraftState[],
+  turn: number,
+  time: number,
+  sensor: SensorModel = perfectSensor,
+): Observation {
+  const basis = basisFromQuat(self.orientation);
+
+  const contacts: ContactPercept[] = sensor.detect(world, self).map(({ target }) => {
+    const relative = sub(target.position, self.position);
+    const direction = normalize(relative);
+    return {
+      id: target.id,
+      team: target.team,
+      range: length(relative),
+      bearingForward: dot(direction, basis.forward),
+      bearingRight: dot(direction, basis.right),
+      bearingUp: dot(direction, basis.up),
+      // range rate along the line of sight (matches the old controllers' `closure`): + opening, - closing
+      closureRate: dot(sub(target.velocity, self.velocity), direction),
+      health: target.health,
+    };
+  });
+
+  return ObservationSchema.parse({
+    schemaVersion: 1,
+    selfId: self.id,
+    turn,
+    time,
+    self: {
+      airspeed: self.metrics.airspeed,
+      altitude: self.metrics.altitude,
+      aoaDeg: self.metrics.aoaDeg,
+      gLoad: self.metrics.gLoad,
+      health: self.health,
+      weaponCooldown: self.weaponCooldown,
+      stalled: self.metrics.stalled,
+    },
+    contacts,
+  });
+}
+
+================================================================================
+# FILE: src/agent/action.ts
+================================================================================
+
+import {
+  clampControlInput,
+  type Action,
+  type ControlInput,
+  type FlightDirectorAction,
+  type RawStickAction,
+  type SetpointAction,
+} from "../protocol/schema";
+import { basisFromQuat, clamp, cross, dot, length, normalize, scale, sub, vec3 } from "../sim/math";
+import type { AircraftState } from "../sim/types";
+
+// Converts an expressed intent into a clamped ControlInput. Called once PER FRAME (15×/turn), so
+// a closed-loop adapter can track a setpoint and protect the flight envelope as state evolves.
+// raw-stick ignores state and returns the same stick every frame (behaviour identical to v0.2).
+export interface ActionAdapter {
+  readonly vocabulary: Action["kind"];
+  controlFor(action: Action, self: AircraftState): ControlInput;
+}
+
+export const rawStickAdapter: ActionAdapter = {
+  vocabulary: "raw-stick",
+  controlFor(action) {
+    const a = action as RawStickAction;
+    return clampControlInput({
+      pitch: a.pitch,
+      roll: a.roll,
+      yaw: a.yaw,
+      throttle: a.throttle,
+      trigger: a.trigger,
+    });
+  },
+};
+
+const DEG = Math.PI / 180;
+// PD attitude hold. On the v0.7.0 surface-force plant (stick -> surface force -> torque -> omega ->
+// attitude is 2nd-order), a pure-P loop would PIO, so each axis subtracts a rate-damping term that
+// reads the true body angular velocity.
+const KP_BANK = 1.2;
+const KD_BANK = 0.45;
+const KP_PITCH = 1.4;
+const KD_PITCH = 0.7;
+const KP_LOAD = 0.34;
+const KD_LOAD = 0.28;
+
+function attitude(self: AircraftState) {
+  const basis = basisFromQuat(self.orientation);
+  const worldUp = vec3(0, 1, 0);
+
+  // Bank: signed angle (about the nose) from the level reference-up to the body up.
+  const refUp = normalize(sub(worldUp, scale(basis.forward, dot(worldUp, basis.forward))), basis.up);
+  const bankRad = Math.atan2(dot(cross(refUp, basis.up), basis.forward), dot(refUp, basis.up));
+  // Pitch attitude relative to the horizon.
+  const pitchRad = Math.asin(clamp(basis.forward.y, -1, 1));
+  return { basis, bankRad, pitchRad };
+}
+
+function protectPitchCommand(pitchCmd: number, throttle: number, self: AircraftState) {
+  const { basis } = attitude(self);
+  const speed = length(self.velocity);
+  const forwardSpeed = dot(self.velocity, basis.forward);
+  const bodyVertical = dot(self.velocity, basis.up);
+  const aoa = Math.atan2(-bodyVertical, Math.max(Math.abs(forwardSpeed), 1));
+  const stall = self.model.stallAoARad;
+  const margin = stall * 0.82;
+  let protectedPitch = pitchCmd;
+  let protectedThrottle = throttle;
+
+  if (protectedPitch > 0 && aoa > margin) {
+    protectedPitch *= clamp(1 - (aoa - margin) / Math.max(stall - margin, 1e-3), 0, 1);
+  }
+  if (aoa > stall * 1.05 || self.metrics.stalled) {
+    protectedPitch = Math.min(protectedPitch, -0.38);
+    protectedThrottle = Math.max(protectedThrottle, 0.95);
+  }
+  // Low-energy recovery: if slow, stop pulling and add power to rebuild speed.
+  if (speed < 68) {
+    protectedPitch = Math.min(protectedPitch, 0.08);
+    protectedThrottle = Math.max(protectedThrottle, 0.92);
+  } else if (speed < 112) {
+    protectedPitch = Math.min(protectedPitch, 0.18);
+    protectedThrottle = Math.max(protectedThrottle, 0.9);
+  }
+
+  return { pitch: protectedPitch, throttle: protectedThrottle };
+}
+
+// Setpoint adapter: the agent commands a target bank + pitch attitude (and throttle/trigger), and
+// this attitude-hold loop produces the stick each frame — feathering toward the setpoint and
+// refusing to drive past the stall (the thing the raw-stick LLM pilot couldn't do for itself).
+export const setpointAdapter: ActionAdapter = {
+  vocabulary: "setpoint",
+  controlFor(action, self) {
+    const a = action as SetpointAction;
+    const { bankRad, pitchRad } = attitude(self);
+
+    // Rate-damping (D) term: angularVelocity.x = body roll rate, .y = body pitch rate.
+    const rollRate = self.angularVelocity.x;
+    const pitchRate = self.angularVelocity.y;
+    let rollCmd = clamp((a.targetBankDeg * DEG - bankRad) * KP_BANK - rollRate * KD_BANK, -1, 1);
+    let pitchCmd = clamp((a.targetPitchDeg * DEG - pitchRad) * KP_PITCH - pitchRate * KD_PITCH, -1, 1);
+    let throttle = a.throttle;
+
+    ({ pitch: pitchCmd, throttle } = protectPitchCommand(pitchCmd, throttle, self));
+
+    return clampControlInput({ pitch: pitchCmd, roll: rollCmd, yaw: 0, throttle, trigger: a.trigger });
+  },
+};
+
+export const flightDirectorAdapter: ActionAdapter = {
+  vocabulary: "flight-director",
+  controlFor(action, self) {
+    const a = action as FlightDirectorAction;
+    const { bankRad } = attitude(self);
+    const rollRate = self.angularVelocity.x;
+    const pitchRate = self.angularVelocity.y;
+    const rollCmd = clamp((a.targetBankDeg * DEG - bankRad) * KP_BANK - rollRate * KD_BANK, -1, 1);
+    const loadError = clamp(a.targetLoadG, -0.5, 7.5) - self.metrics.gLoad;
+    let pitchCmd = clamp(loadError * KP_LOAD - pitchRate * KD_LOAD, -1, 1);
+    let throttle =
+      a.speedPriority === "gain"
+        ? Math.max(a.throttle, 0.92)
+        : a.speedPriority === "bleed"
+          ? Math.min(a.throttle, 0.48)
+          : a.throttle;
+
+    ({ pitch: pitchCmd, throttle } = protectPitchCommand(pitchCmd, throttle, self));
+
+    return clampControlInput({ pitch: pitchCmd, roll: rollCmd, yaw: 0, throttle, trigger: a.trigger });
+  },
+};
+
+const ADAPTERS: Record<Action["kind"], ActionAdapter> = {
+  "raw-stick": rawStickAdapter,
+  setpoint: setpointAdapter,
+  "flight-director": flightDirectorAdapter,
+};
+
+export function adapterFor(kind: Action["kind"]): ActionAdapter {
+  return ADAPTERS[kind];
+}
+
+================================================================================
+# FILE: src/agent/actionSpec.ts
+================================================================================
+
+import { Type, type TSchema } from "@earendil-works/pi-ai";
+import type { Action } from "../protocol/schema";
+import { clamp } from "../sim/math";
+
+// An ActionSpec is the LLM-facing description of an action vocabulary: the tool schema the model
+// fills, the system-prompt fragment describing it, and a coercion from raw args -> validated Action.
+export interface ActionSpec {
+  name: string;
+  description: string;
+  toolSchema: TSchema;
+  rules: string;
+  toAction: (args: Record<string, unknown>) => Action;
+}
+
+function num(value: unknown, field: string): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) throw new Error(`field "${field}" must be a finite number`);
+  return n;
+}
+
+export const rawStickSpec: ActionSpec = {
+  name: "set_controls",
+  description: "Set the raw flight-stick controls held for this turn.",
+  toolSchema: Type.Object({
+    reason: Type.String({ description: "one short phrase: your intent this turn" }),
+    pitch: Type.Number({ description: "elevator, -1 (nose down) .. 1 (nose up)" }),
+    roll: Type.Number({ description: "aileron, -1 (roll left) .. 1 (roll right)" }),
+    yaw: Type.Number({ description: "rudder, -1 .. 1" }),
+    throttle: Type.Number({ description: "0 (idle) .. 1 (full)" }),
+    trigger: Type.Boolean({ description: "fire guns this turn" }),
+  }),
+  rules: [
+    "ACTION (raw stick): output pitch, roll, yaw in [-1,1], throttle in [0,1], and trigger.",
+    "Each input is HELD for the whole ~2.4s turn, so small deflections go a long way and a hard pull will stall you.",
+  ].join("\n"),
+  toAction: (a) => ({
+    kind: "raw-stick",
+    pitch: clamp(num(a.pitch, "pitch"), -1, 1),
+    roll: clamp(num(a.roll, "roll"), -1, 1),
+    yaw: clamp(num(a.yaw, "yaw"), -1, 1),
+    throttle: clamp(num(a.throttle, "throttle"), 0, 1),
+    trigger: Boolean(a.trigger),
+  }),
+};
+
+export const setpointSpec: ActionSpec = {
+  name: "set_flight",
+  description: "Command a target attitude; an autopilot holds it and prevents stalls.",
+  toolSchema: Type.Object({
+    reason: Type.String({ description: "one short phrase: your intent this turn" }),
+    targetBankDeg: Type.Number({ description: "desired bank angle, -90..90 (+ = roll right)" }),
+    targetPitchDeg: Type.Number({ description: "desired pitch attitude, -30..30 (+ = nose up)" }),
+    throttle: Type.Number({ description: "0 (idle) .. 1 (full)" }),
+    trigger: Type.Boolean({ description: "fire guns this turn" }),
+  }),
+  rules: [
+    "ACTION (setpoint): command targetBankDeg (-90..90, + = right) and targetPitchDeg (-30..30, + = nose up).",
+    "An autopilot smoothly flies to that attitude and will NOT let you stall, so you can commit to aggressive banks.",
+    "To turn toward the enemy: bank toward it (sign of bearingRight) and hold a little nose-up; set throttle and trigger as needed.",
+  ].join("\n"),
+  toAction: (a) => ({
+    kind: "setpoint",
+    targetBankDeg: clamp(num(a.targetBankDeg, "targetBankDeg"), -90, 90),
+    targetPitchDeg: clamp(num(a.targetPitchDeg, "targetPitchDeg"), -30, 30),
+    throttle: clamp(num(a.throttle, "throttle"), 0, 1),
+    trigger: Boolean(a.trigger),
+  }),
+};
+
+export const flightDirectorSpec: ActionSpec = {
+  name: "set_flight_director",
+  description: "Command bank, pull/load, and energy priority; the flight controller protects the envelope.",
+  toolSchema: Type.Object({
+    reason: Type.String({ description: "one short phrase: your tactical intent this turn" }),
+    targetBankDeg: Type.Number({ description: "desired bank angle, -90..90 (+ = roll right)" }),
+    targetLoadG: Type.Number({ description: "desired pull/load, 0.2..7.0 G" }),
+    throttle: Type.Number({ description: "0 (idle) .. 1 (full)" }),
+    speedPriority: Type.String({ description: "gain, hold, or bleed" }),
+    trigger: Type.Boolean({ description: "fire guns this turn" }),
+  }),
+  rules: [
+    "ACTION (flight-director): command targetBankDeg (-90..90, + = right), targetLoadG (0.2..7.0), throttle, speedPriority, and trigger.",
+    "Use bank to choose turn direction and loadG to choose how hard to pull. Higher load turns harder but bleeds energy and can approach stall.",
+    "Set speedPriority='gain' when slow or extending, 'hold' in most turns, and 'bleed' only to force an overshoot or tighten briefly.",
+  ].join("\n"),
+  toAction: (a) => {
+    const rawPriority = typeof a.speedPriority === "string" ? a.speedPriority : "hold";
+    const speedPriority =
+      rawPriority === "gain" || rawPriority === "bleed" || rawPriority === "hold" ? rawPriority : "hold";
+    return {
+      kind: "flight-director",
+      targetBankDeg: clamp(num(a.targetBankDeg, "targetBankDeg"), -90, 90),
+      targetLoadG: clamp(num(a.targetLoadG, "targetLoadG"), 0.2, 7.0),
+      throttle: clamp(num(a.throttle, "throttle"), 0, 1),
+      speedPriority,
+      trigger: Boolean(a.trigger),
+    };
+  },
+};
+
+export const actionSpecs = {
+  "raw-stick": rawStickSpec,
+  setpoint: setpointSpec,
+  "flight-director": flightDirectorSpec,
+} as const;
+export type ActionMode = keyof typeof actionSpecs;
+
+================================================================================
+# FILE: src/agent/controllers/scripted.ts
+================================================================================
+
+import { clamp } from "../../sim/math";
+import type { Action, FlightDirectorAction, Observation } from "../../protocol/schema";
+import type { Controller } from "../controller";
+
+const RAD2DEG = 180 / Math.PI;
+
+// Geometric pursuit, ported verbatim from the old src/sim/agents.ts but now reading the
+// ego-relative Observation instead of omniscient AircraftState. The direction cosines
+// (bearingForward/right/up) and closureRate are exactly the dot products the original took.
+export function pursuitAction(observation: Observation, aggression: number): FlightDirectorAction {
+  const enemy = observation.contacts[0];
+  if (!enemy) {
+    return {
+      kind: "flight-director",
+      targetBankDeg: 0,
+      targetLoadG: 1,
+      throttle: 0.7,
+      speedPriority: "hold",
+      trigger: false,
+    };
+  }
+
+  const targetForward = enemy.bearingForward;
+  const targetRight = enemy.bearingRight;
+  const targetUp = enemy.bearingUp;
+  const closure = enemy.closureRate; // range rate (matches the old `closure`)
+  const range = enemy.range;
+  const throttle = range > 850 ? 0.97 : range < 420 && closure < -25 ? 0.46 : 0.76;
+  const liftVectorBank = Math.atan2(targetRight, Math.max(targetUp, 0.08)) * RAD2DEG;
+  const bankDemand =
+    targetForward < -0.2
+      ? clamp((targetRight >= 0 ? 1 : -1) * (68 + aggression * 14), -88, 88)
+      : clamp(liftVectorBank * (0.82 + aggression * 0.18), -88, 88);
+  const angularError = Math.acos(clamp(targetForward, -1, 1)) / Math.PI;
+  const speedLimit =
+    observation.self.airspeed < 115 ? 1.8 : observation.self.airspeed < 145 ? 2.6 : observation.self.airspeed < 175 ? 3.3 : 4.1;
+  const loadDemand = clamp(1.02 + aggression * 0.85 + angularError * 1.65 + Math.max(targetUp, 0) * 0.4, 0.7, speedLimit);
+  const speedPriority = range > 900 || observation.self.airspeed < 118 ? "gain" : range < 420 ? "bleed" : "hold";
+
+  return {
+    kind: "flight-director",
+    targetBankDeg: bankDemand,
+    targetLoadG: loadDemand,
+    throttle,
+    speedPriority,
+    trigger:
+      targetForward > 0.975 &&
+      Math.abs(targetRight) < 0.17 &&
+      Math.abs(targetUp) < 0.17 &&
+      range < 1_140,
+  };
+}
+
+export function pursuitController(aggression = 0.82): Controller {
+  return async (observation) => ({
+    action: pursuitAction(observation, aggression),
+    rationale: "pursuit",
+  });
+}
+
+export function defensiveController(aggression = 0.64): Controller {
+  return async (observation, context) => {
+    const base = pursuitAction(observation, aggression);
+    const phase = context.turn;
+    const weave = Math.sin(phase * 0.9) * 10;
+    const unload = Math.cos(phase * 0.7) * 0.35;
+    return {
+      action: {
+        kind: "flight-director",
+        targetBankDeg: clamp(base.targetBankDeg + weave, -88, 88),
+        targetLoadG: clamp(base.targetLoadG + unload, 0.6, 5.8),
+        throttle: Math.max(0.68, base.throttle),
+        speedPriority: base.speedPriority,
+        trigger: base.trigger,
+      },
+      rationale: "defensive",
+    };
+  };
+}
+
+// Default fallback for a failed/timed-out external pilot: keep maneuvering with scripted pursuit.
+export function pursuitFallback(observation: Observation): Action {
+  return pursuitAction(observation, 0.82);
+}
+
+================================================================================
+# FILE: src/agent/controllers/pi.ts
+================================================================================
+
+import { complete, getModels, type TextContent, type ToolCall } from "@earendil-works/pi-ai";
+import type { ActionSpec } from "../actionSpec";
+import type { Controller } from "../controller";
+
+// Shared briefing describing the observation and the objective; the ActionSpec appends the
+// action-vocabulary specifics.
+export const FLIGHT_RULES = `You are an autonomous fighter pilot flying one aircraft in a turn-based dogfight. Each turn you receive a JSON observation and choose ONE action, which is held for ~2.4 seconds of flight.
+
+Observation fields:
+- self: airspeed (m/s), altitude (m), aoaDeg (angle of attack; the wing stalls past ~24 deg), gLoad, health (0-100), weaponCooldown (seconds; 0 means you can fire), stalled (bool).
+- contacts[0] is the enemy, ego-relative: range (m); bearingForward (1 = dead ahead, 0 = abeam, negative = behind); bearingRight (+ = to your right); bearingUp (+ = above you); closureRate (+ = opening, - = closing); health.
+
+Fly competently and defeat the enemy. Keep your energy up — don't get slow, stalled, or mush into the ground (the floor is 55 m). Point your nose at the enemy; fire only with a clean shot (bearingForward near 1, small bearingRight/bearingUp, range < ~1050 m, weaponCooldown 0).`;
+
+export interface PiControllerOptions {
+  slug: string; // OpenRouter model id, e.g. "anthropic/claude-haiku-4.5"
+  spec: ActionSpec;
+  rules?: string;
+  maxTokens?: number;
+}
+
+export function resolveOpenRouterModel(slug: string) {
+  const model = getModels("openrouter").find((m) => m.id === slug);
+  if (!model) throw new Error(`OpenRouter model not in pi-ai registry: ${slug}`);
+  return model;
+}
+
+// Pull the first balanced JSON object out of free text (for models without tool calling).
+function extractJsonObject(text: string): Record<string, unknown> {
+  const cleaned = text.replace(/```(?:json)?/gi, "");
+  const start = cleaned.indexOf("{");
+  if (start === -1) throw new Error("no JSON object in model output");
+  let depth = 0;
+  for (let i = start; i < cleaned.length; i += 1) {
+    if (cleaned[i] === "{") depth += 1;
+    else if (cleaned[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return JSON.parse(cleaned.slice(start, i + 1)) as Record<string, unknown>;
+    }
+  }
+  throw new Error("unbalanced JSON object in model output");
+}
+
+export function piController(options: PiControllerOptions): Controller {
+  const model = resolveOpenRouterModel(options.slug);
+  const maxTokens = options.maxTokens ?? 512;
+  const systemPrompt = `${options.rules ?? FLIGHT_RULES}\n\n${options.spec.rules}`;
+
+  return async (observation, context) => {
+    const response = await complete(
+      model,
+      {
+        systemPrompt,
+        messages: [
+          { role: "user", content: JSON.stringify(observation), timestamp: Date.now() },
+        ],
+        tools: [
+          {
+            name: options.spec.name,
+            description: options.spec.description,
+            parameters: options.spec.toolSchema,
+          },
+        ],
+      },
+      { maxTokens, signal: context.signal, maxRetries: 4 },
+    );
+
+    if (response.stopReason === "error" || response.content.length === 0) {
+      throw new Error(
+        response.errorMessage ?? `model returned stopReason=${response.stopReason} with no content`,
+      );
+    }
+
+    const usage = {
+      inputTokens: response.usage.input,
+      outputTokens: response.usage.output,
+      costUsd: response.usage.cost.total,
+    };
+
+    const toolCall = response.content.find((b): b is ToolCall => b.type === "toolCall");
+    const args = toolCall
+      ? toolCall.arguments
+      : extractJsonObject(
+          response.content
+            .filter((b): b is TextContent => b.type === "text")
+            .map((b) => b.text)
+            .join("\n"),
+        );
+
+    const action = options.spec.toAction(args); // throws on invalid -> runMatch fallback
+    const rationale = typeof args.reason === "string" ? args.reason : undefined;
+    return { action, rationale, usage, raw: { model: response.model, stopReason: response.stopReason } };
+  };
+}
+
+================================================================================
+# FILE: src/agent/perception.ts
+================================================================================
+
+import type { Percept, Vec3 } from "../protocol/schema";
+import {
+  add,
+  basisFromQuat,
+  clamp,
+  cross,
+  dot,
+  length,
+  normalize,
+  quatMultiply,
+  rotateVec,
+  scale,
+  sub,
+  WORLD_UP,
+} from "../sim/math";
+import type { Modality, SensorDevice } from "../sim/parts";
+import type { AircraftState, Team } from "../sim/types";
+import { cameraAsciiEncoder } from "./encoders/cameraAscii";
+
+// v0.4.0 perception seam — the structural mirror of the action seam:
+//   action:     intent  -> adapterFor(kind).controlFor -> ControlInput   (sim-facing)
+//   perception: world   -> sensorFor(modality).sense    -> SenseFrame     (geometric truth)
+//                          encoderFor(id).encode         -> Percept        (model-readable artifact)
+// A Sensor is the PHYSICS of sensing (what reaches the device, deterministic, pixel-free). An
+// Encoder is the REPRESENTATION (how that becomes something a model could read). Today only the
+// camera is implemented, and its Percept is RECORDED for the viewer — not yet fed to the pilot.
+
+// One contact as a sensor resolves it. ndc are projected image-plane coords in [-1,1] (x right, y
+// up), meaningful only when inView. All angles in radians.
+export interface ProjectedContact {
+  id: string;
+  team: Team;
+  health: number;
+  range: number;
+  ndcX: number;
+  ndcY: number;
+  angularRadiusRad: number; // subtended radius — the rendering-free range cue
+  aspectRad: number; // target heading vs the line from it to us: 0 = nose-on, PI = tail-on
+  inView: boolean; // passes the device cone + range gate
+}
+
+// The deterministic, pixel-free sense-datum (geometric truth). Internal — not serialized; the
+// recorded artifact is the Percept. eye/boresight are world-space (the v0.5.0 viewer builds the
+// true frustum from them).
+export interface SenseFrame {
+  modality: Modality;
+  deviceId: string;
+  eye: Vec3;
+  boresight: Vec3;
+  bankRad: number;
+  pitchRad: number;
+  hHalfFovRad: number;
+  vHalfFovRad: number;
+  selfSpeed: number;
+  selfAltitude: number;
+  contacts: ProjectedContact[];
+}
+
+export interface Sensor {
+  readonly modality: Modality;
+  // PURE: no RNG, no clock, no GPU. Two calls on the same (device, world, self) are byte-identical.
+  sense(device: SensorDevice, world: AircraftState[], self: AircraftState): SenseFrame;
+}
+
+export interface Encoder {
+  readonly id: string;
+  readonly modality: Modality;
+  encode(frame: SenseFrame): Percept; // SYNC in v0.4.0 (a future async VLM encoder changes this then)
+}
+
+const AIRFRAME_RADIUS_M = 8; // ~16 m span; turns range into an apparent angular size
+
+// Analytic camera: projects world contacts onto the device's image plane from its mount pose.
+// No pixels are rendered — this is the geometry a renderer (or a text encoder) would draw from.
+export const cameraSensor: Sensor = {
+  modality: "camera",
+  sense(device, world, self) {
+    const eye = add(self.position, rotateVec(self.orientation, device.pose.offset));
+    const camOrient = quatMultiply(self.orientation, device.pose.rotation);
+    const basis = basisFromQuat(camOrient);
+    const boresight = basis.forward;
+
+    // Camera attitude — same bank/pitch formula the setpoint adapter uses, on the camera basis.
+    const refUp = normalize(sub(WORLD_UP, scale(boresight, dot(WORLD_UP, boresight))), basis.up);
+    const bankRad = Math.atan2(dot(cross(refUp, basis.up), boresight), dot(refUp, basis.up));
+    const pitchRad = Math.asin(clamp(boresight.y, -1, 1));
+
+    const hHalfFovRad = (device.optics?.hFovRad ?? Math.PI / 3) / 2;
+    const aspect = device.optics?.aspect ?? 4 / 3;
+    const tanH = Math.tan(Math.max(hHalfFovRad, 1e-4)); // floor keeps a degenerate FOV from making ndc NaN
+    const tanV = tanH / aspect;
+    const vHalfFovRad = Math.atan(tanV);
+
+    const contacts: ProjectedContact[] = [];
+    for (const other of world) {
+      if (other.id === self.id || other.health <= 0) continue;
+
+      const toC = sub(other.position, eye);
+      const range = length(toC);
+      const dir = normalize(toC, boresight); // boresight fallback keeps a coincident contact finite
+      const f = dot(dir, boresight);
+      const ahead = f > 1e-6;
+      const angleFromBoresightRad = Math.acos(clamp(f, -1, 1));
+      const inView =
+        ahead && angleFromBoresightRad <= device.for.halfAngleRad && range <= device.for.maxRangeM;
+
+      // Perspective divide (only meaningful in front of the lens); normalized by the half-FOV tangents.
+      const ndcX = ahead ? dot(dir, basis.right) / f / tanH : 0;
+      const ndcY = ahead ? dot(dir, basis.up) / f / tanV : 0;
+
+      const angularRadiusRad = Math.atan2(AIRFRAME_RADIUS_M, Math.max(range, 1));
+
+      // Aspect: where the target's nose points relative to the line from it to us.
+      const toUs = normalize(sub(eye, other.position), boresight);
+      const targetForward = basisFromQuat(other.orientation).forward;
+      const aspectRad = Math.acos(clamp(dot(targetForward, toUs), -1, 1));
+
+      contacts.push({
+        id: other.id,
+        team: other.team,
+        health: other.health,
+        range,
+        ndcX,
+        ndcY,
+        angularRadiusRad,
+        aspectRad,
+        inView,
+      });
+    }
+
+    return {
+      modality: "camera",
+      deviceId: device.id,
+      eye,
+      boresight,
+      bankRad,
+      pitchRad,
+      hHalfFovRad,
+      vHalfFovRad,
+      selfSpeed: length(self.velocity),
+      selfAltitude: self.position.y,
+      contacts,
+    };
+  },
+};
+
+const SENSORS: Partial<Record<Modality, Sensor>> = {
+  camera: cameraSensor,
+  // radar / ir: deferred — the seam exists, the physics lands in a later version.
+};
+
+const ENCODERS: Record<string, Encoder> = {
+  [cameraAsciiEncoder.id]: cameraAsciiEncoder,
+};
+
+const DEFAULT_ENCODER: Partial<Record<Modality, string>> = {
+  camera: cameraAsciiEncoder.id,
+};
+
+export function sensorFor(modality: Modality): Sensor {
+  const sensor = SENSORS[modality];
+  if (!sensor) throw new Error(`no sensor implementation for modality: ${modality}`);
+  return sensor;
+}
+
+export function encoderFor(id: string): Encoder {
+  const encoder = ENCODERS[id];
+  if (!encoder) throw new Error(`no encoder registered: ${id}`);
+  return encoder;
+}
+
+export function defaultEncoderId(modality: Modality): string {
+  const id = DEFAULT_ENCODER[modality];
+  if (!id) throw new Error(`no default encoder for modality: ${modality}`);
+  return id;
+}
+
+// Convenience for the runtime: run a device's sensor through its default encoder into a Percept.
+export function senseAndEncode(
+  device: SensorDevice,
+  world: AircraftState[],
+  self: AircraftState,
+): Percept {
+  const frame = sensorFor(device.modality).sense(device, world, self);
+  return encoderFor(defaultEncoderId(device.modality)).encode(frame);
+}
+
+================================================================================
+# FILE: src/agent/encoders/cameraAscii.ts
+================================================================================
+
+import type { Percept, PerceptContact } from "../../protocol/schema";
+import type { Encoder, SenseFrame } from "../perception";
+
+// camera-ascii@1: turns a camera SenseFrame into a deterministic monospace "viewport" plus a numeric
+// legend — the cheap, batch-safe, pixel-free encoder. In v0.4.0 this is a capability proof + a human
+// viewer aid (the pilot still flies on the structured Observation); when perception becomes operative
+// it's the first encoder a model would read, so it is kept strictly pure and locale-free.
+//
+// Hardening: fixed-precision toFixed/round only (no toLocaleString/Intl), every emitted number is
+// finite-guarded and -0-normalized, so two encodes of one frame are byte-identical and a degenerate
+// projection can never write NaN/-0 into a recorded replay.
+
+const W = 33; // odd → a true centre column for the boresight crosshair
+const H = 15; // odd → a true centre row
+const RAD2DEG = 180 / Math.PI;
+
+const norm0 = (n: number): number => (n === 0 ? 0 : n); // collapse -0 → 0
+const r4 = (n: number): number => (Number.isFinite(n) ? norm0(Math.round(n * 1e4) / 1e4) : 0);
+
+function signedDeg(deg: number): string {
+  const v = norm0(Math.round(deg));
+  return `${v >= 0 ? "+" : "-"}${Math.abs(v)}`;
+}
+
+function clockOf(ndcX: number, ndcY: number): number {
+  const hours = (Math.atan2(ndcX, ndcY) / (2 * Math.PI)) * 12;
+  const h = ((Math.round(hours) % 12) + 12) % 12;
+  return h === 0 ? 12 : h;
+}
+
+function elevationOf(ndcY: number): string {
+  return ndcY > 0.15 ? "high" : ndcY < -0.15 ? "low" : "level";
+}
+
+function aspectWord(aspectDeg: number): string {
+  if (aspectDeg < 30) return "nose";
+  if (aspectDeg < 70) return "fwd-qtr";
+  if (aspectDeg < 110) return "beam";
+  if (aspectDeg < 150) return "aft-qtr";
+  return "tail";
+}
+
+function glyphFor(angularSizeDeg: number): string {
+  if (angularSizeDeg >= 6) return "@";
+  if (angularSizeDeg >= 2) return "O";
+  if (angularSizeDeg >= 0.6) return "o";
+  return ".";
+}
+
+export const cameraAsciiEncoder: Encoder = {
+  id: "camera-ascii@1",
+  modality: "camera",
+  encode(frame: SenseFrame): Percept {
+    const grid: string[][] = Array.from({ length: H }, () =>
+      Array.from({ length: W }, () => " "),
+    );
+
+    // Horizon: vertical position from pitch (linear in angle), tilted by bank. A viewer cue, not a
+    // flight-grade horizon — guarded so extreme attitudes can't blow up.
+    const centerNdcY = Math.max(-3, Math.min(3, -frame.pitchRad / Math.max(frame.vHalfFovRad, 1e-3)));
+    // ndcX and ndcY are normalized by different half-FOV tangents, so a physical roll projects to a
+    // screen slope of tan(bank) * (tanH / tanV) = tan(bank) * aspect — not tan(bank) alone.
+    const aspect = Math.tan(frame.hHalfFovRad) / Math.max(Math.tan(frame.vHalfFovRad), 1e-6);
+    const slope = Math.tan(Math.max(-1.3, Math.min(1.3, frame.bankRad))) * aspect;
+    const horizonGlyph = Math.abs(slope) < 0.25 ? "-" : slope > 0 ? "/" : "\\";
+    for (let c = 0; c < W; c += 1) {
+      const ndcX = (c / (W - 1)) * 2 - 1;
+      const hNdcY = centerNdcY + slope * ndcX;
+      const row = Math.round(((1 - hNdcY) / 2) * (H - 1));
+      if (row >= 0 && row < H && grid[row][c] === " ") grid[row][c] = horizonGlyph;
+    }
+
+    // Boresight crosshair.
+    const cx = (W - 1) / 2;
+    const cy = (H - 1) / 2;
+    grid[cy][cx] = "+";
+
+    // Contacts on top (only those inside the rectangular viewport).
+    for (const contact of frame.contacts) {
+      if (!contact.inView || Math.abs(contact.ndcX) > 1 || Math.abs(contact.ndcY) > 1) continue;
+      const col = Math.round(((contact.ndcX + 1) / 2) * (W - 1));
+      const row = Math.round(((1 - contact.ndcY) / 2) * (H - 1));
+      if (row >= 0 && row < H && col >= 0 && col < W) {
+        grid[row][col] = glyphFor(2 * contact.angularRadiusRad * RAD2DEG);
+      }
+    }
+
+    const border = `+${"-".repeat(W)}+`;
+    const lines: string[] = [];
+    lines.push(
+      ` ${frame.deviceId}  ${W}x${H}  FOV ${Math.round(frame.hHalfFovRad * 2 * RAD2DEG)}deg`,
+    );
+    lines.push(border);
+    for (let r = 0; r < H; r += 1) lines.push(`|${grid[r].join("")}|`);
+    lines.push(border);
+    lines.push(
+      ` own  spd ${Math.round(frame.selfSpeed)}  alt ${Math.round(frame.selfAltitude)}` +
+        `  bank ${signedDeg(frame.bankRad * RAD2DEG)}  pitch ${signedDeg(frame.pitchRad * RAD2DEG)}`,
+    );
+
+    const seen = frame.contacts.filter((c) => c.inView);
+    if (seen.length === 0) {
+      lines.push(" (no contacts in view)");
+    } else {
+      for (const contact of seen) {
+        const aspectDeg = contact.aspectRad * RAD2DEG;
+        const side = contact.ndcX >= 0 ? "R" : "L";
+        lines.push(
+          ` ${contact.id}  ${clockOf(contact.ndcX, contact.ndcY)} o'clock ${elevationOf(contact.ndcY)}` +
+            `  rng ${Math.round(contact.range)}  ${aspectWord(aspectDeg)}-${side}  hp ${Math.round(contact.health)}`,
+        );
+      }
+    }
+
+    const contacts: PerceptContact[] = frame.contacts.map((c) => ({
+      id: c.id,
+      team: c.team,
+      ndcX: r4(c.ndcX),
+      ndcY: r4(c.ndcY),
+      rangeM: r4(c.range),
+      aspectDeg: r4(c.aspectRad * RAD2DEG),
+      angularSizeDeg: r4(2 * c.angularRadiusRad * RAD2DEG),
+      inView: c.inView,
+      health: r4(c.health),
+    }));
+
+    return {
+      deviceId: frame.deviceId,
+      modality: "camera",
+      encoderId: "camera-ascii@1",
+      text: lines.join("\n"),
+      contacts,
+      attitude: { bankDeg: r4(frame.bankRad * RAD2DEG), pitchDeg: r4(frame.pitchRad * RAD2DEG) },
+    };
+  },
+};
+
+================================================================================
+# FILE: src/runtime/config.ts
+================================================================================
+
+import type { Controller } from "../agent/controller";
+import type { SensorModel } from "../agent/observation";
+import type { Evaluator } from "../eval/outcome";
+import type { Action, AgentMeta, Observation } from "../protocol/schema";
+import type { AircraftState } from "../sim/types";
+
+export interface AgentEntry {
+  meta: AgentMeta;
+  controller: Controller;
+}
+
+export interface MatchConfig {
+  id: string;
+  turnDuration: number;
+  frameDt: number;
+  maxTurns: number;
+  decisionTimeoutMs: number;
+  initialAircraft: AircraftState[];
+  agents: Record<string, AgentEntry>; // keyed by aircraft id
+  sensor: SensorModel;
+  evaluator: Evaluator;
+  // Used when a controller throws, times out, or is aborted. Receives the same observation the
+  // controller saw, so a maneuvering fallback (e.g. scripted pursuit) keeps the match watchable.
+  fallback: (observation: Observation) => Action;
+}
+
+================================================================================
+# FILE: src/runtime/match.ts
+================================================================================
+
+import { adapterFor } from "../agent/action";
+import { toObservation } from "../agent/observation";
+import { senseAndEncode } from "../agent/perception";
+import type { ControllerContext } from "../agent/controller";
+import {
+  MatchReplaySchema,
+  type Action,
+  type AgentMeta,
+  type Airframe,
+  type ControlInput,
+  type MatchReplay,
+  type Observation,
+  type ReplayEvent,
+  type ReplayFrame,
+  type TurnDecision,
+} from "../protocol/schema";
+import { stepSimulation } from "../sim/flight";
+import { toSnapshot, type AircraftState } from "../sim/types";
+import type { AgentEntry, MatchConfig } from "./config";
+
+function snapshot(
+  index: number,
+  time: number,
+  turn: number,
+  aircraft: AircraftState[],
+  events: ReplayEvent[],
+): ReplayFrame {
+  return {
+    index,
+    time,
+    turn,
+    aircraft: aircraft.map(toSnapshot),
+    events,
+  };
+}
+
+interface DecisionOutcome {
+  action: TurnDecision["action"];
+  rationale?: string;
+  usage?: TurnDecision["usage"];
+  source: TurnDecision["source"];
+}
+
+// Race the controller against its latency budget; abort + fall back on timeout or throw.
+// No wall-clock is read here, so a match with deterministic controllers is itself deterministic.
+async function decide(
+  entry: AgentEntry,
+  observation: Observation,
+  context: ControllerContext,
+  fallback: MatchConfig["fallback"],
+): Promise<DecisionOutcome> {
+  const aborter = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      aborter.abort();
+      reject(new Error("controller timeout"));
+    }, context.deadlineMs);
+  });
+
+  try {
+    const pending = entry.controller(observation, { ...context, signal: aborter.signal });
+    pending.catch(() => {}); // swallow a late rejection if the deadline wins the race
+    const decision = await Promise.race([pending, timeout]);
+    return {
+      action: decision.action,
+      rationale: decision.rationale,
+      usage: decision.usage,
+      source: "controller",
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { action: fallback(observation), source: "fallback", rationale: message.slice(0, 160) };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The generalized match runner: config is reusable data, so the mutable physics state is cloned before
+// the first frame. This matters for sweeps/evals that may intentionally replay the same config.
+export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
+  const aircraft = structuredClone(config.initialAircraft) as AircraftState[];
+  const stepsPerTurn = Math.round(config.turnDuration / config.frameDt);
+  const frames: ReplayFrame[] = [];
+  const decisions: TurnDecision[] = [];
+  let time = 0;
+  let frameIndex = 0;
+  let turnsRun = 0;
+
+  frames.push(snapshot(frameIndex, time, 0, aircraft, []));
+  frameIndex += 1;
+
+  for (let turn = 1; turn <= config.maxTurns; turn += 1) {
+    turnsRun = turn;
+    const actionsById: Record<string, Action> = {};
+
+    // Decide once per turn, per living agent.
+    for (const ship of aircraft) {
+      if (ship.health <= 0) continue;
+      const entry = config.agents[ship.id];
+      if (!entry) continue;
+
+      const observation = toObservation(ship, aircraft, turn, time, config.sensor);
+      const context: ControllerContext = {
+        turn,
+        agentId: ship.id,
+        deadlineMs: config.decisionTimeoutMs,
+        signal: new AbortController().signal,
+      };
+      const outcome = await decide(entry, observation, context, config.fallback);
+      actionsById[ship.id] = outcome.action;
+
+      const decision: TurnDecision = {
+        turn,
+        agentId: ship.id,
+        observation,
+        action: outcome.action,
+        controlInput: adapterFor(outcome.action.kind).controlFor(outcome.action, ship),
+        source: outcome.source,
+      };
+      if (outcome.rationale !== undefined) decision.rationale = outcome.rationale;
+      if (outcome.usage !== undefined) decision.usage = outcome.usage;
+
+      // Record each mounted sensor's percept (pre-step world, same state the observation saw). This
+      // is recorded for the viewer / as a capability proof — it does NOT feed the controller.
+      const percepts = (ship.devices ?? []).map((device) => senseAndEncode(device, aircraft, ship));
+      if (percepts.length > 0) decision.percepts = percepts;
+
+      decisions.push(decision);
+    }
+
+    // Re-derive each held action into a control EVERY frame, so a setpoint adapter can track
+    // the evolving state (raw-stick returns a constant, identical to holding the stick).
+    for (let s = 0; s < stepsPerTurn; s += 1) {
+      const controlsById: Record<string, ControlInput> = {};
+      for (const ship of aircraft) {
+        const action = actionsById[ship.id];
+        if (action) controlsById[ship.id] = adapterFor(action.kind).controlFor(action, ship);
+      }
+      const result = stepSimulation(aircraft, controlsById, config.frameDt);
+      time += config.frameDt;
+      frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events));
+      frameIndex += 1;
+    }
+
+    if (aircraft.some((ship) => ship.health <= 0)) break;
+  }
+
+  const outcome = config.evaluator.evaluate(aircraft, frames, decisions, turnsRun);
+  const agents: AgentMeta[] = Object.values(config.agents).map((entry) => entry.meta);
+
+  // Record the airframe each aircraft flew (config metadata, not per-frame state) so the viewer can
+  // render the plane that was built. Omitted entirely when no aircraft carries one (keeps legacy-shaped
+  // replays clean and the field optional).
+  const airframes: Record<string, Airframe> = {};
+  for (const ship of aircraft) {
+    if (ship.airframe) airframes[ship.id] = ship.airframe;
+  }
+
+  return MatchReplaySchema.parse({
+    id: config.id,
+    schemaVersion: 3,
+    turnDuration: config.turnDuration,
+    frameDt: config.frameDt,
+    frames,
+    agents,
+    decisions,
+    outcome,
+    ...(Object.keys(airframes).length > 0 ? { airframes } : {}),
+  });
+}
+
+================================================================================
+# FILE: src/runtime/scenario.ts
+================================================================================
+
+import {
+  defensiveController,
+  pursuitController,
+  pursuitFallback,
+} from "../agent/controllers/scripted";
+import { perfectSensor } from "../agent/observation";
+import { minimalEvaluator } from "../eval/outcome";
+import type { Airframe, MatchReplay } from "../protocol/schema";
+import { compileAirframe, defaultAirframe } from "../sim/airframe";
+import { length, quatLookRotation, vec3 } from "../sim/math";
+import type { AircraftState, FlightMetrics } from "../sim/types";
+import { runMatch } from "./match";
+import type { MatchConfig } from "./config";
+
+export const TURN_DURATION = 2.4;
+export const FRAME_DT = 0.16;
+
+const INITIAL_METRICS: FlightMetrics = {
+  airspeed: 0,
+  altitude: 0,
+  aoaDeg: 0,
+  gLoad: 1,
+  stalled: false,
+};
+
+// Build the two duelists. The compiler produces each aircraft's model + devices (the camera is a part).
+// Both default to the default airframe — byte-identical to the old DEFAULT_MODEL / noseCamera() literals
+// — but a custom blue airframe is how "Fly this" sends a built plane into a duel against the default.
+export function createInitialAircraft(
+  blueAirframe: Airframe = defaultAirframe(),
+  redAirframe: Airframe = defaultAirframe(),
+): AircraftState[] {
+  const blueVelocity = vec3(112, 2, -118);
+  const redVelocity = vec3(-112, 0, 112);
+
+  const blue = compileAirframe(blueAirframe);
+  const red = compileAirframe(redAirframe);
+
+  return [
+    {
+      id: "blue-1",
+      callsign: "Blue Kite",
+      team: "blue",
+      color: "#4da3ff",
+      position: vec3(-960, 1_080, 860),
+      velocity: blueVelocity,
+      orientation: quatLookRotation(blueVelocity),
+      controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.86, trigger: false },
+      health: 100,
+      weaponCooldown: 1.1,
+      model: blue.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: 1_080 },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: blue.model.fuelCapacityKg,
+      devices: blue.devices,
+      airframe: blueAirframe,
+    },
+    {
+      id: "red-1",
+      callsign: "Red Anvil",
+      team: "red",
+      color: "#ff6b61",
+      position: vec3(980, 1_020, -760),
+      velocity: redVelocity,
+      orientation: quatLookRotation(redVelocity),
+      controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.82, trigger: false },
+      health: 100,
+      weaponCooldown: 0.4,
+      model: red.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(redVelocity), altitude: 1_020 },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: red.model.fuelCapacityKg,
+      devices: red.devices,
+      airframe: redAirframe,
+    },
+  ];
+}
+
+// The all-scripted duel as a MatchConfig: blue pursues, red flies defensively. Reproduces the v0.1.0
+// duel, now routed through the pluggable runtime. The aircraft (and thus their airframes) are injected
+// so the same scripted match can fly a built plane against the default.
+function scriptedConfig(initialAircraft: AircraftState[], turnCount: number): MatchConfig {
+  return {
+    id: "demo-merge-001",
+    turnDuration: TURN_DURATION,
+    frameDt: FRAME_DT,
+    maxTurns: turnCount,
+    decisionTimeoutMs: 5_000,
+    initialAircraft,
+    sensor: perfectSensor,
+    evaluator: minimalEvaluator,
+    fallback: pursuitFallback,
+    agents: {
+      "blue-1": {
+        meta: { id: "blue-1", kind: "scripted", label: "pursuit" },
+        controller: pursuitController(0.82),
+      },
+      "red-1": {
+        meta: { id: "red-1", kind: "scripted", label: "defensive" },
+        controller: defensiveController(0.64),
+      },
+    },
+  };
+}
+
+export function buildScriptedMatchConfig(turnCount = 28): MatchConfig {
+  return scriptedConfig(createInitialAircraft(), turnCount);
+}
+
+export function generateDemoMatch(turnCount = 28): Promise<MatchReplay> {
+  return runMatch(buildScriptedMatchConfig(turnCount));
+}
+
+// "Fly this": a built (blue) airframe duels the default (red) under the scripted controllers — fully
+// deterministic, no credentials. The recorded replay carries both airframes, so the viewer renders the
+// plane you built flying it. Flying a build with a real LLM stays on the headless film/sweep path.
+export function buildAirframeMatchConfig(blueAirframe: Airframe, turnCount = 28): MatchConfig {
+  return scriptedConfig(createInitialAircraft(blueAirframe, defaultAirframe()), turnCount);
+}
+
+export function generateAirframeMatch(blueAirframe: Airframe, turnCount = 28): Promise<MatchReplay> {
+  return runMatch(buildAirframeMatchConfig(blueAirframe, turnCount));
+}
+
+================================================================================
+# FILE: src/runtime/batch.ts
+================================================================================
+
+import type { MatchReplay } from "../protocol/schema";
+import type { MatchConfig } from "./config";
+import { runMatch } from "./match";
+
+export interface BatchJob<K> {
+  key: K;
+  config: MatchConfig;
+}
+
+export interface BatchResult<K> {
+  key: K;
+  replay?: MatchReplay;
+  error?: string;
+}
+
+// Run many matches with a bounded concurrency pool. Each match is isolated — one failure becomes
+// a recorded error, never killing the batch. Wall-clock ≈ ceil(jobs/concurrency) × match time,
+// because each in-flight match overlaps the others' API latency.
+export async function runBatch<K>(
+  jobs: BatchJob<K>[],
+  options: {
+    concurrency: number;
+    onResult?: (result: BatchResult<K>, done: number, total: number) => void;
+  },
+): Promise<BatchResult<K>[]> {
+  const results: BatchResult<K>[] = new Array(jobs.length);
+  let next = 0;
+  let done = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next;
+      next += 1;
+      if (i >= jobs.length) return;
+      let result: BatchResult<K>;
+      try {
+        result = { key: jobs[i].key, replay: await runMatch(jobs[i].config) };
+      } catch (err) {
+        result = { key: jobs[i].key, error: err instanceof Error ? err.message : String(err) };
+      }
+      results[i] = result;
+      done += 1;
+      options.onResult?.(result, done, jobs.length);
+    }
+  }
+
+  const poolSize = Math.max(1, Math.min(options.concurrency, jobs.length));
+  await Promise.all(Array.from({ length: poolSize }, () => worker()));
+  return results;
+}
+
+================================================================================
+# FILE: src/eval/outcome.ts
+================================================================================
+
+import {
+  MatchOutcomeSchema,
+  type Competence,
+  type MatchOutcome,
+  type ReplayFrame,
+  type Score,
+  type TurnDecision,
+} from "../protocol/schema";
+import { clamp } from "../sim/math";
+import type { AircraftState, Team } from "../sim/types";
+
+const GRAVITY = 9.81;
+const DECK_ALTITUDE = 120; // "on the deck" ≈ within ~65 m of the 55 m floor
+
+export interface Evaluator {
+  // Receives the full frame + decision history so a richer evaluator can measure piloting
+  // quality, not just the final result. The minimal evaluator ignores frames/decisions.
+  evaluate(
+    finalAircraft: AircraftState[],
+    frames: ReplayFrame[],
+    decisions: TurnDecision[],
+    turnsRun: number,
+  ): MatchOutcome;
+}
+
+function damageDealtBy(team: Team, aircraft: AircraftState[]): number {
+  return aircraft
+    .filter((a) => a.team !== team)
+    .reduce((sum, enemy) => sum + (100 - enemy.health), 0);
+}
+
+// Shared result logic: "first to 0 health wins; otherwise most damage dealt at timeout."
+function baseOutcome(finalAircraft: AircraftState[], turnsRun: number) {
+  const teams = [...new Set(finalAircraft.map((a) => a.team))];
+  const scores: Record<string, Score> = {};
+  const finalHealth: Record<string, number> = {};
+  for (const a of finalAircraft) finalHealth[a.id] = a.health;
+  for (const team of teams) {
+    scores[team] = {
+      damageDealt: damageDealtBy(team, finalAircraft),
+      damageTaken: finalAircraft
+        .filter((a) => a.team === team)
+        .reduce((sum, a) => sum + (100 - a.health), 0),
+      survived: finalAircraft.some((a) => a.team === team && a.health > 0),
+    };
+  }
+
+  if (finalAircraft.some((a) => a.health <= 0)) {
+    const survivors = [...new Set(finalAircraft.filter((a) => a.health > 0).map((a) => a.team))];
+    return {
+      resolved: true,
+      reason: "destroyed" as const,
+      winnerTeam: survivors.length === 1 ? survivors[0] : null,
+      turnsRun,
+      scores,
+      finalHealth,
+    };
+  }
+
+  const ranked = teams
+    .map((team) => ({ team, dealt: scores[team].damageDealt }))
+    .sort((a, b) => b.dealt - a.dealt);
+  const tie = ranked.length < 2 || ranked[0].dealt === ranked[1].dealt;
+  const reason: "draw" | "timeout" = tie ? "draw" : "timeout";
+  return { resolved: true, reason, winnerTeam: tie ? null : ranked[0].team, turnsRun, scores, finalHealth };
+}
+
+export const minimalEvaluator: Evaluator = {
+  evaluate(finalAircraft, _frames, _decisions, turnsRun) {
+    return MatchOutcomeSchema.parse(baseOutcome(finalAircraft, turnsRun));
+  },
+};
+
+function competenceFor(
+  aircraftId: string,
+  team: Team,
+  finalAircraft: AircraftState[],
+  frames: ReplayFrame[],
+  decisions: TurnDecision[],
+): Competence {
+  const snaps = frames
+    .map((f) => f.aircraft.find((a) => a.id === aircraftId))
+    .filter((s): s is NonNullable<typeof s> => Boolean(s));
+  const events = frames.flatMap((f) => f.events);
+  const health = finalAircraft.find((a) => a.id === aircraftId)?.health ?? 0;
+  const n = Math.max(snaps.length, 1);
+
+  const specificEnergy = (s: { airspeed: number; altitude: number }) =>
+    0.5 * s.airspeed * s.airspeed + GRAVITY * s.altitude;
+  const startE = snaps.length ? specificEnergy(snaps[0]) : 1;
+  const endE = snaps.length ? specificEnergy(snaps[snaps.length - 1]) : 0;
+
+  const mine = decisions.filter((d) => d.agentId === aircraftId).sort((a, b) => a.turn - b.turn);
+  let deltaSum = 0;
+  let deltaCount = 0;
+  for (let i = 1; i < mine.length; i += 1) {
+    const prev = mine[i - 1].controlInput;
+    const cur = mine[i].controlInput;
+    deltaSum += (Math.abs(cur.pitch - prev.pitch) + Math.abs(cur.roll - prev.roll)) / 2;
+    deltaCount += 1;
+  }
+
+  return {
+    survived: health > 0,
+    damageDealt: finalAircraft
+      .filter((a) => a.team !== team)
+      .reduce((sum, e) => sum + (100 - e.health), 0),
+    damageTaken: 100 - health,
+    shots: events.filter((e) => e.type === "shot" && e.actorId === aircraftId).length,
+    hits: events.filter((e) => e.type === "hit" && e.actorId === aircraftId).length,
+    fracStalled: snaps.filter((s) => s.stalled).length / n,
+    fracOnDeck: snaps.filter((s) => s.altitude < DECK_ALTITUDE).length / n,
+    minAltitude: snaps.length ? Math.min(...snaps.map((s) => s.altitude)) : 0,
+    meanAirspeed: snaps.length ? snaps.reduce((sum, s) => sum + s.airspeed, 0) / n : 0,
+    energyRetainedRatio: startE > 0 ? endE / startE : 0,
+    controlSmoothness: deltaCount ? clamp(1 - deltaSum / deltaCount, 0, 1) : 1,
+  };
+}
+
+// Opponent-agnostic piloting-quality evaluator: the result plus a per-aircraft competence vector.
+export const competenceEvaluator: Evaluator = {
+  evaluate(finalAircraft, frames, decisions, turnsRun) {
+    const competence: Record<string, Competence> = {};
+    for (const a of finalAircraft) {
+      competence[a.id] = competenceFor(a.id, a.team, finalAircraft, frames, decisions);
+    }
+    return MatchOutcomeSchema.parse({ ...baseOutcome(finalAircraft, turnsRun), competence });
+  },
+};
+
+================================================================================
+# FILE: src/headless/turn.ts
+================================================================================
+
+// Resumable stepping CLI — exposes the turn loop as a file-backed state machine so ANY external
+// pilot (a Claude subagent, or a human) can fly one seat without an API key or the SDK. The
+// pilot sees ONLY the observation the CLI prints each turn, which honours the observation
+// contract more strictly than an in-process controller could.
+//
+//   tsx src/headless/turn.ts init                         -> prints { turn, observation }
+//   tsx src/headless/turn.ts step '{"reason":"...","pitch":0.2,"roll":-0.4,"yaw":0,"throttle":0.9,"trigger":false}'
+//                                                          -> prints next { observation } or { done, outcome }
+//   tsx src/headless/turn.ts finish                       -> writes match.json
+//
+// Blue (PILOT_ID) is the external pilot; every other aircraft flies the scripted defensive
+// controller; physics is the same stepSimulation the in-process runtime uses.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { adapterFor, rawStickAdapter } from "../agent/action";
+import { defensiveController } from "../agent/controllers/scripted";
+import { perfectSensor, toObservation } from "../agent/observation";
+import { minimalEvaluator } from "../eval/outcome";
+import {
+  MatchReplaySchema,
+  type Action,
+  type AgentMeta,
+  type ControlInput,
+  type MatchReplay,
+  type ReplayEvent,
+  type ReplayFrame,
+  type TurnDecision,
+} from "../protocol/schema";
+import { stepSimulation } from "../sim/flight";
+import { toSnapshot, type AircraftState } from "../sim/types";
+import { FRAME_DT, TURN_DURATION, createInitialAircraft } from "../runtime/scenario";
+
+const STATE_PATH = "match-state.json";
+const OUTPUT_PATH = "match.json";
+const PILOT_ID = "blue-1";
+const MAX_TURNS = 28;
+const STEPS_PER_TURN = Math.round(TURN_DURATION / FRAME_DT);
+
+interface MatchState {
+  id: string;
+  turn: number; // turns completed
+  time: number;
+  frameIndex: number;
+  aircraft: AircraftState[];
+  frames: ReplayFrame[];
+  decisions: TurnDecision[];
+  done: boolean;
+}
+
+function buildFrame(
+  index: number,
+  time: number,
+  turn: number,
+  aircraft: AircraftState[],
+  events: ReplayEvent[],
+): ReplayFrame {
+  return { index, time, turn, aircraft: aircraft.map(toSnapshot), events };
+}
+
+function loadState(): MatchState {
+  if (!existsSync(STATE_PATH)) throw new Error(`no ${STATE_PATH} found — run "init" first`);
+  return JSON.parse(readFileSync(STATE_PATH, "utf8")) as MatchState;
+}
+
+function saveState(state: MatchState): void {
+  writeFileSync(STATE_PATH, JSON.stringify(state));
+}
+
+function emit(payload: unknown): void {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+// Percept the pilot acts on for the upcoming turn.
+function pilotObservation(state: MatchState) {
+  const blue = state.aircraft.find((a) => a.id === PILOT_ID);
+  if (!blue) throw new Error(`pilot ${PILOT_ID} not found`);
+  return toObservation(blue, state.aircraft, state.turn + 1, state.time, perfectSensor);
+}
+
+function init(): void {
+  const aircraft = createInitialAircraft();
+  const state: MatchState = {
+    id: "pilot-duel-001",
+    turn: 0,
+    time: 0,
+    frameIndex: 1,
+    aircraft,
+    frames: [buildFrame(0, 0, 0, aircraft, [])],
+    decisions: [],
+    done: false,
+  };
+  saveState(state);
+  emit({ turn: 1, maxTurns: MAX_TURNS, observation: pilotObservation(state) });
+}
+
+async function step(actionJson: string): Promise<void> {
+  const state = loadState();
+  if (state.done) {
+    emit({ done: true, note: 'match already finished — run "finish"' });
+    return;
+  }
+
+  let cmd: Record<string, unknown>;
+  try {
+    cmd = JSON.parse(actionJson) as Record<string, unknown>;
+  } catch {
+    emit({ error: "action must be a JSON object" });
+    process.exitCode = 1;
+    return;
+  }
+  for (const field of ["pitch", "roll", "yaw", "throttle"]) {
+    if (typeof cmd[field] !== "number" || !Number.isFinite(cmd[field])) {
+      emit({ error: `field "${field}" must be a finite number` });
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const nextTurn = state.turn + 1;
+  const pilotAction: Action = {
+    kind: "raw-stick",
+    pitch: cmd.pitch as number,
+    roll: cmd.roll as number,
+    yaw: cmd.yaw as number,
+    throttle: cmd.throttle as number,
+    trigger: Boolean(cmd.trigger),
+  };
+
+  const controlsById: Record<string, ControlInput> = {};
+
+  const blue = state.aircraft.find((a) => a.id === PILOT_ID);
+  if (blue && blue.health > 0) {
+    const observation = toObservation(blue, state.aircraft, nextTurn, state.time, perfectSensor);
+    const controlInput = rawStickAdapter.controlFor(pilotAction, blue);
+    controlsById[blue.id] = controlInput;
+    const decision: TurnDecision = {
+      turn: nextTurn,
+      agentId: blue.id,
+      observation,
+      action: pilotAction,
+      controlInput,
+      source: "controller",
+    };
+    if (typeof cmd.reason === "string") decision.rationale = cmd.reason;
+    state.decisions.push(decision);
+  }
+
+  // Scripted opponents.
+  for (const ship of state.aircraft) {
+    if (ship.id === PILOT_ID || ship.health <= 0) continue;
+    const observation = toObservation(ship, state.aircraft, nextTurn, state.time, perfectSensor);
+    const decision = await defensiveController(0.64)(observation, {
+      turn: nextTurn,
+      agentId: ship.id,
+      deadlineMs: 5_000,
+      signal: new AbortController().signal,
+    });
+    const controlInput = adapterFor(decision.action.kind).controlFor(decision.action, ship);
+    controlsById[ship.id] = controlInput;
+    const record: TurnDecision = {
+      turn: nextTurn,
+      agentId: ship.id,
+      observation,
+      action: decision.action,
+      controlInput,
+      source: "controller",
+    };
+    if (decision.rationale !== undefined) record.rationale = decision.rationale;
+    state.decisions.push(record);
+  }
+
+  for (let s = 0; s < STEPS_PER_TURN; s += 1) {
+    const result = stepSimulation(state.aircraft, controlsById, FRAME_DT);
+    state.time += FRAME_DT;
+    state.frames.push(buildFrame(state.frameIndex, state.time, nextTurn, result.aircraft, result.events));
+    state.frameIndex += 1;
+  }
+  state.turn = nextTurn;
+
+  if (state.aircraft.some((a) => a.health <= 0) || nextTurn >= MAX_TURNS) {
+    state.done = true;
+    saveState(state);
+    const outcome = minimalEvaluator.evaluate(state.aircraft, state.frames, state.decisions, nextTurn);
+    emit({ done: true, turn: nextTurn, outcome });
+    return;
+  }
+
+  saveState(state);
+  emit({ done: false, turn: nextTurn + 1, observation: pilotObservation(state) });
+}
+
+function finish(): void {
+  const state = loadState();
+  const outcome = minimalEvaluator.evaluate(state.aircraft, state.frames, state.decisions, state.turn);
+  const agents: AgentMeta[] = [
+    { id: PILOT_ID, kind: "llm", label: "subagent-pilot" },
+    ...state.aircraft
+      .filter((a) => a.id !== PILOT_ID)
+      .map((a) => ({ id: a.id, kind: "scripted" as const, label: "defensive" })),
+  ];
+  const replay: MatchReplay = MatchReplaySchema.parse({
+    id: state.id,
+    schemaVersion: 3,
+    turnDuration: TURN_DURATION,
+    frameDt: FRAME_DT,
+    frames: state.frames,
+    agents,
+    decisions: state.decisions,
+    outcome,
+  });
+  writeFileSync(OUTPUT_PATH, JSON.stringify(replay));
+
+  const shots = state.frames.reduce(
+    (n, f) => n + f.events.filter((e) => e.type === "shot").length,
+    0,
+  );
+  const hits = state.frames.reduce((n, f) => n + f.events.filter((e) => e.type === "hit").length, 0);
+  console.error(
+    `wrote ${OUTPUT_PATH}: ${state.frames.length} frames, ${shots} shots, ${hits} hits, ` +
+      `winner=${outcome.winnerTeam ?? "draw"} (${outcome.reason})`,
+  );
+  emit({ wrote: OUTPUT_PATH, frames: state.frames.length, outcome });
+}
+
+const command = process.argv[2];
+const actionArg = process.argv[3];
+
+(async () => {
+  if (command === "init") {
+    init();
+  } else if (command === "step") {
+    if (!actionArg) {
+      emit({ error: "step requires a JSON action argument" });
+      process.exitCode = 1;
+      return;
+    }
+    await step(actionArg);
+  } else if (command === "finish") {
+    finish();
+  } else {
+    console.error("usage: turn.ts <init | step '{json}' | finish>");
+    process.exitCode = 1;
+  }
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
+================================================================================
+# FILE: src/headless/runMatch.ts
+================================================================================
+
+// Headless full-match runner (credential-free). Runs the all-scripted demo in-process and
+// writes the replay JSON to stdout (a brief summary goes to stderr so the redirect stays clean):
+//   npm run match            -> match.json
+//   tsx src/headless/runMatch.ts 12 > match.json
+import { generateDemoMatch } from "../runtime/scenario";
+
+async function main(): Promise<void> {
+  const numericArg = process.argv.slice(2).find((arg) => /^\d+$/.test(arg));
+  const turnCount = numericArg ? Number(numericArg) : 28;
+
+  const replay = await generateDemoMatch(turnCount);
+  process.stdout.write(JSON.stringify(replay));
+
+  const shots = replay.frames.reduce(
+    (n, f) => n + f.events.filter((e) => e.type === "shot").length,
+    0,
+  );
+  const hits = replay.frames.reduce(
+    (n, f) => n + f.events.filter((e) => e.type === "hit").length,
+    0,
+  );
+  const outcome = replay.outcome;
+  console.error(
+    `scripted match: ${replay.frames.length} frames, ${shots} shots, ${hits} hits, ` +
+      `outcome=${outcome ? `${outcome.reason} winner=${outcome.winnerTeam ?? "draw"}` : "none"}`,
+  );
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
+================================================================================
+# FILE: src/headless/sweep.ts
+================================================================================
+
+// Cross-model competence sweep. Runs (model × action-mode × repeats) matches against the scripted
+// bot through a concurrency pool, streams per-match results to JSONL, and prints an aggregate
+// competence-vs-cost table for the pilot seat.
+//
+//   tsx --env-file=.env src/headless/sweep.ts            # live cross-model sweep (needs OPENROUTER_API_KEY)
+//   tsx src/headless/sweep.ts --scripted                 # free dev pass: validate the pipeline, no key
+//
+// Tunables via env: SWEEP_REPEATS, SWEEP_CONCURRENCY, SWEEP_TURNS.
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { actionSpecs, type ActionMode } from "../agent/actionSpec";
+import { FLIGHT_RULES, piController, resolveOpenRouterModel } from "../agent/controllers/pi";
+import { defensiveController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
+import { perfectSensor } from "../agent/observation";
+import { competenceEvaluator } from "../eval/outcome";
+import type { Competence, MatchSummary } from "../protocol/schema";
+import type { MatchConfig } from "../runtime/config";
+import { runBatch, type BatchJob } from "../runtime/batch";
+import { FRAME_DT, TURN_DURATION, createInitialAircraft } from "../runtime/scenario";
+
+const SCRIPTED = process.argv.includes("--scripted");
+const PILOT_ID = "blue-1";
+const OUT = "sweep-results.jsonl";
+const MATCHES_DIR = "public/matches"; // served by Vite for the in-browser match browser
+
+function safeId(model: string, mode: string, repeat: number): string {
+  return `${model.replace(/[^a-z0-9.]+/gi, "-")}__${mode}__${repeat}`;
+}
+
+const MODELS = SCRIPTED
+  ? ["scripted-pursuit"]
+  : [
+      "anthropic/claude-haiku-4.5",
+      "openai/gpt-4o-mini",
+      "google/gemini-2.5-flash",
+      "deepseek/deepseek-chat-v3.1",
+    ];
+const MODES: ActionMode[] = SCRIPTED ? ["flight-director"] : ["raw-stick", "setpoint", "flight-director"];
+const REPEATS = Number(process.env.SWEEP_REPEATS ?? 3);
+const CONCURRENCY = Number(process.env.SWEEP_CONCURRENCY ?? 12);
+const MAX_TURNS = Number(process.env.SWEEP_TURNS ?? 28);
+
+interface Key {
+  model: string;
+  mode: ActionMode;
+  repeat: number;
+}
+
+function buildConfig(model: string, mode: ActionMode, repeat: number): MatchConfig {
+  const blue = SCRIPTED
+    ? pursuitController(0.82)
+    : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES });
+  return {
+    id: `${model}|${mode}|${repeat}`,
+    turnDuration: TURN_DURATION,
+    frameDt: FRAME_DT,
+    maxTurns: MAX_TURNS,
+    decisionTimeoutMs: 30_000,
+    initialAircraft: createInitialAircraft(),
+    sensor: perfectSensor,
+    evaluator: competenceEvaluator,
+    fallback: pursuitFallback,
+    agents: {
+      "blue-1": { meta: { id: "blue-1", kind: SCRIPTED ? "scripted" : "llm", label: `${model}/${mode}` }, controller: blue },
+      "red-1": { meta: { id: "red-1", kind: "scripted", label: "defensive" }, controller: defensiveController(0.64) },
+    },
+  };
+}
+
+function pilotCost(decisions: { agentId: string; usage?: { costUsd: number } }[]): number {
+  return decisions
+    .filter((d) => d.agentId === PILOT_ID)
+    .reduce((sum, d) => sum + (d.usage?.costUsd ?? 0), 0);
+}
+
+// Fraction of the pilot's turns that fell back to the safety controller (timeout, parse failure,
+// provider error). A high rate means the model wasn't really flying — guards study validity.
+function fallbackStats(decisions: { agentId: string; source: string; rationale?: string }[]) {
+  const mine = decisions.filter((d) => d.agentId === PILOT_ID);
+  const fb = mine.filter((d) => d.source === "fallback");
+  return { rate: mine.length ? fb.length / mine.length : 0, reason: fb[0]?.rationale };
+}
+
+const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+async function main(): Promise<void> {
+  const models = SCRIPTED
+    ? MODELS
+    : MODELS.filter((m) => {
+        try {
+          resolveOpenRouterModel(m);
+          return true;
+        } catch {
+          console.error(`skip (not in pi-ai registry): ${m}`);
+          return false;
+        }
+      });
+
+  const jobs: BatchJob<Key>[] = [];
+  for (const model of models) {
+    for (const mode of MODES) {
+      for (let r = 0; r < REPEATS; r += 1) {
+        jobs.push({ key: { model, mode, repeat: r }, config: buildConfig(model, mode, r) });
+      }
+    }
+  }
+
+  writeFileSync(OUT, "");
+  rmSync(MATCHES_DIR, { recursive: true, force: true });
+  mkdirSync(MATCHES_DIR, { recursive: true });
+  const manifest: MatchSummary[] = [];
+  console.error(
+    `${SCRIPTED ? "[scripted dev] " : ""}sweep: ${models.length} models × ${MODES.length} modes × ${REPEATS} repeats = ${jobs.length} matches @ concurrency ${CONCURRENCY}`,
+  );
+
+  const t0 = Date.now();
+  const results = await runBatch(jobs, {
+    concurrency: CONCURRENCY,
+    onResult: (res, done, total) => {
+      const rec: Record<string, unknown> = { ...res.key };
+      let tag: string;
+      if (res.error || !res.replay) {
+        rec.error = res.error;
+        tag = `ERR ${res.error}`;
+      } else {
+        const comp = res.replay.outcome?.competence?.[PILOT_ID];
+        const fb = fallbackStats(res.replay.decisions ?? []);
+        const cost = pilotCost(res.replay.decisions ?? []);
+        rec.competence = comp;
+        rec.costUsd = cost;
+        rec.winner = res.replay.outcome?.winnerTeam ?? null;
+        rec.fallbackRate = fb.rate;
+        if (fb.reason) rec.fallbackReason = fb.reason;
+
+        const file = `${safeId(res.key.model, res.key.mode, res.key.repeat)}.json`;
+        writeFileSync(`${MATCHES_DIR}/${file}`, JSON.stringify(res.replay));
+        manifest.push({
+          id: res.replay.id,
+          file,
+          model: res.key.model,
+          mode: res.key.mode,
+          repeat: res.key.repeat,
+          winnerTeam: res.replay.outcome?.winnerTeam ?? null,
+          costUsd: cost,
+          fallbackRate: fb.rate,
+          competence: comp,
+        });
+
+        tag =
+          `win=${res.replay.outcome?.winnerTeam ?? "draw"} hits=${comp?.hits ?? "?"} ` +
+          `stall=${comp ? comp.fracStalled.toFixed(2) : "?"} fb=${fb.rate.toFixed(2)}` +
+          (fb.rate > 0 ? ` (${fb.reason ?? "?"})` : "");
+      }
+      appendFileSync(OUT, `${JSON.stringify(rec)}\n`);
+      console.error(`[${done}/${total}] ${res.key.model} ${res.key.mode} #${res.key.repeat}: ${tag}`);
+    },
+  });
+
+  writeFileSync(`${MATCHES_DIR}/index.json`, JSON.stringify(manifest));
+
+  // Aggregate per (model, mode).
+  const groups = new Map<
+    string,
+    { n: number; errors: number; comps: Competence[]; cost: number; wins: number; fbRates: number[] }
+  >();
+  for (const res of results) {
+    const gk = `${res.key.model} · ${res.key.mode}`;
+    const g = groups.get(gk) ?? { n: 0, errors: 0, comps: [], cost: 0, wins: 0, fbRates: [] };
+    g.n += 1;
+    if (res.error || !res.replay) {
+      g.errors += 1;
+    } else {
+      const c = res.replay.outcome?.competence?.[PILOT_ID];
+      if (c) g.comps.push(c);
+      g.cost += pilotCost(res.replay.decisions ?? []);
+      g.fbRates.push(fallbackStats(res.replay.decisions ?? []).rate);
+      if (res.replay.outcome?.winnerTeam === "blue") g.wins += 1;
+    }
+    groups.set(gk, g);
+  }
+
+  const rows = [...groups.entries()].map(([config, g]) => ({
+    config,
+    n: g.n,
+    err: g.errors,
+    fbRate: mean(g.fbRates).toFixed(2),
+    winRate: (g.wins / g.n).toFixed(2),
+    hits: mean(g.comps.map((c) => c.hits)).toFixed(2),
+    stalled: mean(g.comps.map((c) => c.fracStalled)).toFixed(2),
+    onDeck: mean(g.comps.map((c) => c.fracOnDeck)).toFixed(2),
+    energyKept: mean(g.comps.map((c) => c.energyRetainedRatio)).toFixed(2),
+    smooth: mean(g.comps.map((c) => c.controlSmoothness)).toFixed(2),
+    costUsd: g.cost.toFixed(4),
+  }));
+
+  console.error(`\n=== competence sweep (pilot ${PILOT_ID}) — ${((Date.now() - t0) / 1000).toFixed(1)}s ===`);
+  console.table(rows);
+  console.error(`per-match results: ${OUT}`);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+
+================================================================================
+# FILE: tests/sim.test.ts
+================================================================================
+
+import { describe, expect, it } from "vitest";
+import {
+  ControlInputSchema,
+  clampControlInput,
+  type ControlInput,
+  type ReplayEvent,
+} from "../src/protocol/schema";
+import {
+  basisFromQuat,
+  dot,
+  length,
+  normalize,
+  quatIdentity,
+  quatLookRotation,
+  vec3,
+} from "../src/sim/math";
+import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
+import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
+import type { AircraftState, FlightMetrics } from "../src/sim/types";
+import { buildScriptedMatchConfig, generateDemoMatch } from "../src/runtime/scenario";
+import { runMatch } from "../src/runtime/match";
+
+describe("flight sim replay generation", () => {
+  it("produces deterministic replay data", async () => {
+    const first = await generateDemoMatch(8);
+    const second = await generateDemoMatch(8);
+
+    expect(first).toEqual(second);
+    expect(first.schemaVersion).toBe(3);
+    expect(first.frames.length).toBeGreaterThan(20);
+  });
+
+  it("does not mutate MatchConfig.initialAircraft while running", async () => {
+    const config = buildScriptedMatchConfig(2);
+    const before = structuredClone(config.initialAircraft);
+
+    const first = await runMatch(config);
+    const second = await runMatch(config);
+
+    expect(config.initialAircraft).toEqual(before);
+    expect(first).toEqual(second);
+  });
+
+  it("keeps every generated control input inside the public protocol", async () => {
+    const replay = await generateDemoMatch(10);
+    expect(replay.decisions?.some((d) => d.action.kind === "flight-director")).toBe(true);
+
+    for (const frame of replay.frames) {
+      for (const aircraft of frame.aircraft) {
+        expect(() => ControlInputSchema.parse(aircraft.controls)).not.toThrow();
+        expect(Number.isFinite(aircraft.position.x)).toBe(true);
+        expect(Number.isFinite(aircraft.velocity.y)).toBe(true);
+        expect(aircraft.health).toBeGreaterThanOrEqual(0);
+        expect(aircraft.health).toBeLessThanOrEqual(100);
+      }
+    }
+  });
+
+  it("creates an orientation that points the aircraft forward vector at the desired heading", () => {
+    const desired = normalize(vec3(10, 1, -8));
+    const orientation = quatLookRotation(desired);
+    const basis = basisFromQuat(orientation);
+
+    expect(dot(basis.forward, desired)).toBeGreaterThan(0.999);
+  });
+});
+
+const STEP_DT = 0.16;
+const ZERO_METRICS: FlightMetrics = {
+  airspeed: 0,
+  altitude: 0,
+  aoaDeg: 0,
+  gLoad: 1,
+  stalled: false,
+};
+
+function makeAircraft(o: Partial<AircraftState> = {}): AircraftState {
+  const velocity = o.velocity ?? vec3(0, 0, -180);
+  const position = o.position ?? vec3(0, 1000, 0);
+  return {
+    id: o.id ?? "blue-1",
+    callsign: o.callsign ?? "Blue",
+    team: o.team ?? "blue",
+    color: o.color ?? "#4da3ff",
+    position,
+    velocity,
+    orientation: o.orientation ?? quatLookRotation(velocity),
+    controls: o.controls ?? { pitch: 0, roll: 0, yaw: 0, throttle: 0.8, trigger: false },
+    health: o.health ?? 100,
+    weaponCooldown: o.weaponCooldown ?? 0,
+    model: o.model ?? DEFAULT_MODEL,
+    metrics: o.metrics ?? { ...ZERO_METRICS, airspeed: length(velocity), altitude: position.y },
+    angularVelocity: o.angularVelocity ?? vec3(0, 0, 0),
+    fuelKg: o.fuelKg ?? 0,
+  };
+}
+
+function controls(p: Partial<ControlInput> = {}): ControlInput {
+  return { pitch: 0, roll: 0, yaw: 0, throttle: 0.8, trigger: false, ...p };
+}
+
+function step(
+  aircraft: AircraftState[],
+  controlsById: Record<string, ControlInput>,
+  steps: number,
+): ReplayEvent[] {
+  const events: ReplayEvent[] = [];
+  for (let i = 0; i < steps; i += 1) {
+    events.push(...stepSimulation(aircraft, controlsById, STEP_DT).events);
+  }
+  return events;
+}
+
+describe("flight physics characterization", () => {
+  it("throttle accelerates and idle does not", () => {
+    const full = makeAircraft();
+    const idle = makeAircraft();
+    const start = length(full.velocity);
+
+    step([full], { "blue-1": controls({ throttle: 1 }) }, 15);
+    step([idle], { "blue-1": controls({ throttle: 0 }) }, 15);
+
+    expect(full.metrics.airspeed).toBeGreaterThan(idle.metrics.airspeed);
+    expect(full.metrics.airspeed).toBeGreaterThan(start);
+  });
+
+  it("lift opposes gravity in level cruise (loses far less than free-fall)", () => {
+    const ship = makeAircraft({ velocity: vec3(0, 0, -180), position: vec3(0, 1000, 0) });
+
+    step([ship], { "blue-1": controls({ throttle: 0.8 }) }, 15);
+
+    // ~2.4 s of free-fall would lose ~28 m; lift must keep the loss well under that.
+    expect(ship.position.y).toBeGreaterThan(1000 - 28);
+  });
+
+  it("flags stall below the speed floor", () => {
+    const ship = makeAircraft({ velocity: vec3(0, 0, -40) });
+
+    step([ship], { "blue-1": controls({ throttle: 0.5 }) }, 1);
+
+    expect(ship.metrics.stalled).toBe(true);
+  });
+
+  it("flags stall and cuts lift at high angle of attack", () => {
+    const speed = 130;
+    const clean = makeAircraft({
+      orientation: quatIdentity(),
+      velocity: vec3(0, -speed * Math.sin(0.3), -speed * Math.cos(0.3)),
+    });
+    const stalled = makeAircraft({
+      orientation: quatIdentity(),
+      velocity: vec3(0, -speed * Math.sin(0.7), -speed * Math.cos(0.7)),
+    });
+
+    step([clean], { "blue-1": controls({ throttle: 0.5 }) }, 1);
+    step([stalled], { "blue-1": controls({ throttle: 0.5 }) }, 1);
+
+    expect(clean.metrics.stalled).toBe(false);
+    expect(stalled.metrics.stalled).toBe(true);
+    // Same speed/altitude, so qbar matches; only AoA differs — stall must reduce lift.
+    expect(stalled.metrics.gLoad).toBeLessThan(clean.metrics.gLoad);
+  });
+
+  it("a fast aircraft on the deck takes terrain damage and stays at the floor", () => {
+    const ship = makeAircraft({ position: vec3(0, 55, 0), velocity: vec3(0, 0, -180) });
+
+    step([ship], { "blue-1": controls({ throttle: 0.8 }) }, 1);
+
+    expect(ship.health).toBeLessThan(100);
+    expect(ship.position.y).toBeGreaterThanOrEqual(55);
+  });
+
+  it("resolves a hit when the target is in range and inside the gun cone", () => {
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      position: vec3(0, 1000, 0),
+      weaponCooldown: 0,
+    });
+    const target = makeAircraft({ id: "red-1", team: "red", position: vec3(0, 1000, -500) });
+
+    const events = step(
+      [shooter, target],
+      {
+        "blue-1": controls({ throttle: 0.5, trigger: true }),
+        "red-1": controls({ throttle: 0.5, trigger: false }),
+      },
+      1,
+    );
+
+    expect(events.some((e) => e.type === "shot")).toBe(true);
+    expect(events.some((e) => e.type === "hit")).toBe(true);
+    expect(target.health).toBeLessThan(100);
+    expect(target.health).toBeGreaterThanOrEqual(72); // damage is clamped to <= 28
+  });
+
+  it("misses when the target is out of range", () => {
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, 0),
+      position: vec3(0, 1000, 0),
+    });
+    const target = makeAircraft({
+      id: "red-1",
+      team: "red",
+      velocity: vec3(0, 0, 0),
+      position: vec3(0, 1000, -2000),
+    });
+
+    const events = step(
+      [shooter, target],
+      {
+        "blue-1": controls({ throttle: 0, trigger: true }),
+        "red-1": controls({ throttle: 0, trigger: false }),
+      },
+      1,
+    );
+
+    expect(events.some((e) => e.type === "shot")).toBe(true);
+    expect(events.some((e) => e.type === "hit")).toBe(false);
+    expect(target.health).toBe(100);
+  });
+
+  it("misses when the target is outside the gun cone", () => {
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, 0),
+      position: vec3(0, 1000, 0),
+    });
+    const target = makeAircraft({
+      id: "red-1",
+      team: "red",
+      velocity: vec3(0, 0, 0),
+      position: vec3(500, 1000, 0),
+    });
+
+    const events = step(
+      [shooter, target],
+      {
+        "blue-1": controls({ throttle: 0, trigger: true }),
+        "red-1": controls({ throttle: 0, trigger: false }),
+      },
+      1,
+    );
+
+    expect(events.some((e) => e.type === "hit")).toBe(false);
+    expect(target.health).toBe(100);
+  });
+
+  it("clamps out-of-range control inputs to the protocol bounds", () => {
+    const c = clampControlInput({ pitch: 5, roll: -9, yaw: 0.2, throttle: 3, trigger: true });
+    expect(c).toEqual({ pitch: 1, roll: -1, yaw: 0.2, throttle: 1, trigger: true });
+  });
+
+  it("the demo match produces an actual engagement", async () => {
+    const replay = await generateDemoMatch(28);
+    const types = replay.frames.flatMap((frame) => frame.events.map((event) => event.type));
+
+    expect(types.filter((t) => t === "shot").length).toBeGreaterThanOrEqual(1);
+    expect(types.filter((t) => t === "hit").length).toBeGreaterThanOrEqual(1);
+
+    const finalFrame = replay.frames[replay.frames.length - 1];
+    const minHealth = Math.min(...finalFrame.aircraft.map((a) => a.health));
+    expect(minHealth).toBeLessThan(100);
+  });
+
+  it("keeps every aircraft at or above the terrain floor", async () => {
+    const replay = await generateDemoMatch(28);
+    for (const frame of replay.frames) {
+      for (const aircraft of frame.aircraft) {
+        expect(aircraft.position.y).toBeGreaterThanOrEqual(55);
+      }
+    }
+  });
+});
+
+describe("surface-force rigid-body rotation (v0.7 physics)", () => {
+  it("full stick rolls and pitches through surface moments — not instant, not a scalar rate cap", () => {
+    const roller = makeAircraft();
+    step([roller], { "blue-1": controls({ roll: 1 }) }, 6); // ~1 s
+    expect(roller.angularVelocity.x).toBeGreaterThan(0.9);
+    expect(roller.angularVelocity.x).toBeLessThan(1.8);
+    expect(Math.abs(roller.angularVelocity.z)).toBeGreaterThan(0.005); // adverse-yaw coupling from drag asymmetry
+
+    const pitcher = makeAircraft();
+    step([pitcher], { "blue-1": controls({ pitch: 1 }) }, 6);
+    expect(pitcher.angularVelocity.y).toBeGreaterThan(0.35);
+    expect(pitcher.metrics.gLoad).toBeGreaterThan(3.5);
+  });
+
+  it("stays bounded at high speed under full deflection", () => {
+    const diver = makeAircraft({ velocity: vec3(0, 0, -280) });
+    let maxOmega = 0;
+    for (let i = 0; i < 25; i += 1) {
+      step([diver], { "blue-1": controls({ pitch: 1, roll: 1, yaw: 1, throttle: 1 }) }, 1);
+      const w = diver.angularVelocity;
+      maxOmega = Math.max(maxOmega, Math.abs(w.x), Math.abs(w.y), Math.abs(w.z));
+    }
+    expect(Number.isFinite(maxOmega)).toBe(true);
+    expect(maxOmega).toBeLessThan(3.5);
+  });
+
+  it("released control surfaces damp roll rate instead of integrating forever", () => {
+    const ship = makeAircraft({ velocity: vec3(0, 0, -180), position: vec3(0, 1500, 0) });
+    step([ship], { "blue-1": controls({ roll: 1 }) }, 8); // roll into a bank
+    const bankedUpY = basisFromQuat(ship.orientation).up.y; // body-up.y = 1 level, < 1 banked
+    const bankedRate = Math.abs(ship.angularVelocity.x);
+    expect(bankedUpY).toBeLessThan(0.85); // genuinely banked
+    step([ship], { "blue-1": controls({ roll: 0 }) }, 30); // release ~5 s
+    expect(Math.abs(ship.angularVelocity.x)).toBeLessThan(bankedRate * 0.2);
+    expect(Number.isFinite(basisFromQuat(ship.orientation).up.y)).toBe(true);
+  });
+
+  it("a build with no moving surfaces cannot roll on command", () => {
+    const noControl = defaultAirframe();
+    for (const p of noControl.parts) if (p.kind === "wing") p.control = undefined;
+    const dead = makeAircraft({ model: compileAirframe(noControl).model });
+    const live = makeAircraft();
+
+    step([dead], { "blue-1": controls({ roll: 1 }) }, 8);
+    step([live], { "blue-1": controls({ roll: 1 }) }, 8);
+
+    expect(Math.abs(dead.angularVelocity.x)).toBeLessThan(0.05);
+    expect(Math.abs(live.angularVelocity.x)).toBeGreaterThan(0.9);
+  });
+
+  it("offset engines create thrust moments around the centre of mass", () => {
+    const offsetEngine = defaultAirframe();
+    const engine = offsetEngine.parts.find((p) => p.id === "engine");
+    if (engine && engine.kind === "engine") {
+      engine.pose = { ...engine.pose, offset: vec3(3, 0, 4) };
+    }
+    const centered = makeAircraft();
+    const offset = makeAircraft({ model: compileAirframe(offsetEngine).model });
+
+    step([centered], { "blue-1": controls({ throttle: 1 }) }, 3);
+    step([offset], { "blue-1": controls({ throttle: 1 }) }, 3);
+
+    expect(Math.abs(offset.angularVelocity.z)).toBeGreaterThan(Math.abs(centered.angularVelocity.z) + 0.05);
+  });
+
+  it("statically stable: trims hands-off near level and a pitch disturbance decays", () => {
+    const cruise = makeAircraft({ velocity: vec3(0, 0, -180) });
+    step([cruise], { "blue-1": controls({ pitch: 0, throttle: 0.8 }) }, 15); // 2.4 s, stick neutral
+    expect(Math.abs(cruise.metrics.altitude - 1000)).toBeLessThan(28); // holds level (restoring + damping)
+
+    // Pull the nose up, release, and let the restoring moment weathervane it back: the pitch rate decays.
+    const disturbed = makeAircraft({ velocity: vec3(0, 0, -180) });
+    step([disturbed], { "blue-1": controls({ pitch: 1, throttle: 0.8 }) }, 3);
+    const pulledRate = Math.abs(disturbed.angularVelocity.y);
+    step([disturbed], { "blue-1": controls({ pitch: 0, throttle: 0.8 }) }, 12);
+    expect(Math.abs(disturbed.angularVelocity.y)).toBeLessThan(pulledRate * 0.3); // settled toward trim
+  });
+
+  it("CoM placement sets stability: aft mass flips the static margin negative", () => {
+    const stable = compileAirframe(defaultAirframe()).model;
+    expect(stable.staticMarginM).toBeGreaterThan(0); // default: CoM ahead of AC
+
+    const aft = defaultAirframe();
+    const fuselage = aft.parts.find((p) => p.id === "fuselage");
+    if (fuselage) fuselage.pose = { offset: vec3(0, 0, 3), rotation: fuselage.pose.rotation };
+    expect(compileAirframe(aft).model.staticMarginM).toBeLessThan(0); // mass moved aft ⇒ unstable
+  });
+
+  it("induced drag scales with aspect ratio: a stubby wing pays more", () => {
+    const def = compileAirframe(defaultAirframe()).model;
+    const stubby = defaultAirframe();
+    const wing = stubby.parts.find((p) => p.id === "main-wing");
+    if (wing && wing.kind === "wing") {
+      wing.planform = { span: wing.planform.span / 2, chord: wing.planform.chord * 2 }; // same area, ¼ AR
+    }
+    const sm = compileAirframe(stubby).model;
+    expect(sm.wingAreaM2).toBeCloseTo(def.wingAreaM2, 6); // area unchanged
+    expect(sm.aspectRatio).toBeLessThan(def.aspectRatio); // but AR dropped
+    // induced-drag factor 1/(π·AR·e) is therefore higher for the stubby wing
+    expect(1 / sm.aspectRatio).toBeGreaterThan(1 / def.aspectRatio);
+  });
+});
+
+describe("fuel as consumable mass", () => {
+  function tankedAirframe(fuelKg = 1_500) {
+    const a = defaultAirframe();
+    a.parts.push({
+      id: "tank",
+      kind: "tank",
+      pose: { offset: vec3(0, 0, 0), rotation: { x: 0, y: 0, z: 0, w: 1 } },
+      fuelKg,
+      dryMassKg: 200,
+      dims: { radius: 0.5, length: 2.5 },
+    });
+    return a;
+  }
+
+  it("a tank adds mass + fuel capacity; dryMass excludes the fuel", () => {
+    const base = compileAirframe(defaultAirframe()).model;
+    const m = compileAirframe(tankedAirframe(1_500)).model;
+    expect(m.fuelCapacityKg).toBe(1_500);
+    expect(m.massKg).toBe(base.massKg + 200 + 1_500); // tank structure + fuel
+    expect(m.dryMassKg).toBe(m.massKg - 1_500); // everything except the fuel
+  });
+
+  it("the default (no tank) never burns and stays at full mass — a true no-op", () => {
+    const def = makeAircraft();
+    expect(def.fuelKg).toBe(0);
+    step([def], { "blue-1": controls({ throttle: 1 }) }, 15);
+    expect(def.fuelKg).toBe(0); // no tank ⇒ no burn ⇒ effectiveMass stays massKg
+  });
+
+  it("a tanked aircraft burns fuel and runs dry → thrust cuts → it decelerates", () => {
+    const compiled = compileAirframe(tankedAirframe(6)); // tiny tank (~0.7 kg/frame at full thrust)
+    const tanked = makeAircraft({ model: compiled.model, fuelKg: compiled.model.fuelCapacityKg });
+    expect(tanked.fuelKg).toBe(6);
+
+    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 4);
+    expect(tanked.fuelKg).toBeGreaterThan(0); // still burning
+    expect(tanked.fuelKg).toBeLessThan(6);
+
+    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 20);
+    expect(tanked.fuelKg).toBe(0); // emptied
+
+    const speedDry = tanked.metrics.airspeed;
+    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 15); // dry: thrust cut → glide
+    expect(tanked.metrics.airspeed).toBeLessThan(speedDry); // decelerating
+  });
+
+  it("does not NaN for a fully-empty all-fuel build (0/0 guard)", () => {
+    // A degenerate build that is nothing but an empty tank: effectiveMass floor keeps it finite.
+    const empty = makeAircraft({ fuelKg: 0, model: { ...DEFAULT_MODEL, dryMassKg: 0, fuelCapacityKg: 500 } });
+    step([empty], { "blue-1": controls({ throttle: 1 }) }, 5);
+    expect(Number.isFinite(empty.position.x)).toBe(true);
+    expect(Number.isFinite(empty.metrics.airspeed)).toBe(true);
+  });
+});
+
+================================================================================
+# FILE: tests/airframe.test.ts
+================================================================================
+
+import { describe, expect, it } from "vitest";
+import { AirframeSchema, SensorDeviceSchema, type WingPart } from "../src/protocol/schema";
+import {
+  airframeReport,
+  compileAirframe,
+  defaultAirframe,
+  noseCamera,
+} from "../src/sim/airframe";
+import { DEFAULT_MODEL } from "../src/sim/flight";
+import { quatFromAxisAngle, vec3 } from "../src/sim/math";
+
+describe("airframe compiler", () => {
+  it("compiles the default airframe to the calibration baseline + frozen derived rigid-body fields", () => {
+    const m = compileAirframe(defaultAirframe()).model;
+    // Base scalars — the intended calibration values (the rate ratio anchors the default to these).
+    expect(m.massKg).toBe(9_200);
+    expect(m.wingAreaM2).toBeCloseTo(22.5, 9);
+    expect(m.maxThrustN).toBe(74_000);
+    expect(m.maxRollRate).toBeCloseTo(1.75, 9);
+    expect(m.maxPitchRate).toBeCloseTo(0.92, 9);
+    expect(m.maxYawRate).toBeCloseTo(0.34, 9);
+    expect(m.stallAoARad).toBeCloseTo(0.42, 9);
+    // Derived rigid-body fields — frozen so a change to the geometry fold is caught (determinism anchor).
+    expect(Math.round(m.inertia.roll)).toBe(23_605);
+    expect(Math.round(m.inertia.pitch)).toBe(100_714);
+    expect(Math.round(m.inertia.yaw)).toBe(122_032);
+    expect(Number(m.staticMarginM.toFixed(4))).toBe(0.0625); // > 0 ⇒ CoM ahead of AC ⇒ statically stable
+    expect(m.aspectRatio).toBeCloseTo(7.511, 3);
+    expect(m.dryMassKg).toBe(9_200);
+    expect(m.fuelCapacityKg).toBe(0);
+    expect(m.aeroSurfaces.map((s) => s.id)).toEqual([
+      "main-wing-left",
+      "main-wing-right",
+      "tailplane",
+      "fin",
+    ]);
+    expect(m.thrustPoints.map((p) => p.id)).toEqual(["engine"]);
+    expect(m.aeroSurfaces.find((s) => s.id === "main-wing-left")!.localOffset.x).toBeLessThan(0);
+    expect(m.aeroSurfaces.find((s) => s.id === "main-wing-right")!.localOffset.x).toBeGreaterThan(0);
+    // DEFAULT_MODEL is the compiled default, so it carries these too.
+    expect(DEFAULT_MODEL.staticMarginM).toBe(m.staticMarginM);
+  });
+
+  it("mounts the default airframe's sensor part as a device", () => {
+    expect(compileAirframe(defaultAirframe()).devices).toEqual([noseCamera()]);
+  });
+
+  it("is a pure fold — two compiles of the same airframe are identical", () => {
+    expect(compileAirframe(defaultAirframe())).toEqual(compileAirframe(defaultAirframe()));
+  });
+
+  it("round-trips through the Zod schemas (a part serializes now)", () => {
+    expect(() => AirframeSchema.parse(defaultAirframe())).not.toThrow();
+    expect(() => SensorDeviceSchema.parse(noseCamera())).not.toThrow();
+  });
+
+  // The levers must move the way the surface-force sim rewards: handling comes from placed control
+  // surfaces, thrust comes from mounted thrust points, and lift area remains real wing geometry.
+  it("bigger ailerons → more roll authority; more thrust adds up; smaller wing → less lift area", () => {
+    const base = compileAirframe(defaultAirframe()).model;
+
+    const biggerAilerons = defaultAirframe();
+    const wing = biggerAilerons.parts.find((p) => p.id === "main-wing") as WingPart;
+    wing.control = { axis: "roll", area: wing.control!.area * 2 };
+    expect(compileAirframe(biggerAilerons).model.maxRollRate).toBeGreaterThan(base.maxRollRate);
+
+    const twinEngine = defaultAirframe();
+    const engine = twinEngine.parts.find((p) => p.id === "engine");
+    if (engine && engine.kind === "engine") twinEngine.parts.push({ ...engine, id: "engine-2" });
+    expect(compileAirframe(twinEngine).model.maxThrustN).toBe(base.maxThrustN + 74_000);
+
+    const stubby = defaultAirframe();
+    const w = stubby.parts.find((p) => p.id === "main-wing") as WingPart;
+    w.planform = { ...w.planform, span: w.planform.span / 2 };
+    expect(compileAirframe(stubby).model.wingAreaM2).toBeLessThan(base.wingAreaM2);
+  });
+
+  it("does not invent control authority for a control-surface-free build", () => {
+    const noControl = defaultAirframe();
+    for (const p of noControl.parts) if (p.kind === "wing") p.control = undefined;
+    const model = compileAirframe(noControl).model;
+    expect(model.maxRollRate).toBe(0);
+    expect(model.maxPitchRate).toBe(0);
+    expect(model.maxYawRate).toBe(0);
+    expect(model.controlAuthority).toEqual({ roll: 0, pitch: 0, yaw: 0 });
+    expect(model.aeroSurfaces.every((surface) => surface.control === undefined)).toBe(true);
+  });
+
+  it("honors part pose rotation when compiling aerodynamic surfaces", () => {
+    const angled = defaultAirframe();
+    const wing = angled.parts.find((p) => p.id === "main-wing") as WingPart;
+    wing.pose = { ...wing.pose, rotation: quatFromAxisAngle(vec3(1, 0, 0), (6 * Math.PI) / 180) };
+
+    const surface = compileAirframe(angled).model.aeroSurfaces.find((s) => s.id === "main-wing-left");
+    expect(surface).toBeDefined();
+    expect(Math.abs(surface!.localForward.y)).toBeGreaterThan(0.05);
+    expect(surface!.localUp.z).toBeGreaterThan(0.05);
+  });
+
+  it("reports flyability against the real sim constants and flags broken builds", () => {
+    const ok = airframeReport(compileAirframe(defaultAirframe()).model);
+    expect(ok.warnings).toEqual([]);
+    expect(ok.thrustToWeight).toBeGreaterThan(0.3);
+
+    const noWing = defaultAirframe();
+    noWing.parts = noWing.parts.filter((p) => p.kind !== "wing");
+    const broken = airframeReport(compileAirframe(noWing).model);
+    expect(broken.warnings.some((w) => w.includes("no wing area"))).toBe(true);
+  });
+});
+
+================================================================================
+# FILE: tests/perception.test.ts
+================================================================================
+
+import { describe, expect, it } from "vitest";
+import { senseAndEncode } from "../src/agent/perception";
+import { PerceptSchema } from "../src/protocol/schema";
+import { DEFAULT_MODEL } from "../src/sim/flight";
+import { quatLookRotation, vec3 } from "../src/sim/math";
+import type { SensorDevice } from "../src/sim/parts";
+import type { AircraftState } from "../src/sim/types";
+
+const NOSE_CAM: SensorDevice = {
+  id: "nose-cam",
+  kind: "sensor",
+  modality: "camera",
+  pose: { offset: vec3(0, 0, -18), rotation: { x: 0, y: 0, z: 0, w: 1 } },
+  for: { halfAngleRad: 0.7, maxRangeM: 8_000 },
+  optics: { hFovRad: Math.PI / 3, aspect: 1.6 },
+};
+
+// Minimal AircraftState builder for hand-placed geometry.
+function ac(o: {
+  id: string;
+  position: AircraftState["position"];
+  orientation: AircraftState["orientation"];
+  team?: AircraftState["team"];
+  velocity?: AircraftState["velocity"];
+  health?: number;
+}): AircraftState {
+  return {
+    id: o.id,
+    callsign: o.id,
+    team: o.team ?? "blue",
+    color: "#ffffff",
+    position: o.position,
+    velocity: o.velocity ?? vec3(0, 0, -180),
+    orientation: o.orientation,
+    controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.8, trigger: false },
+    health: o.health ?? 100,
+    weaponCooldown: 0,
+    model: DEFAULT_MODEL,
+    metrics: { airspeed: 180, altitude: o.position.y, aoaDeg: 0, gLoad: 1, stalled: false },
+    angularVelocity: vec3(0, 0, 0),
+    fuelKg: 0,
+  };
+}
+
+// Self flying level down -Z (bank 0, pitch 0); three hostiles in different relations.
+function standardScene() {
+  const self = ac({
+    id: "blue-1",
+    team: "blue",
+    position: vec3(0, 1000, 0),
+    orientation: quatLookRotation(vec3(0, 0, -1)),
+    velocity: vec3(0, 4, -180),
+  });
+  const deadAhead = ac({
+    id: "red-1",
+    team: "red",
+    position: vec3(0, 1000, -1018), // 1000 m ahead of the nose-cam eye
+    orientation: quatLookRotation(vec3(0, 0, 1)), // nose-on toward us
+    health: 80,
+  });
+  const upperRight = ac({
+    id: "red-2",
+    team: "red",
+    position: vec3(335, 1279, -1136), // up and to the right
+    orientation: quatLookRotation(vec3(-1, 0, 0)),
+    health: 64,
+  });
+  const behind = ac({
+    id: "red-3",
+    team: "red",
+    position: vec3(0, 1000, 600), // behind the camera → out of field of regard
+    orientation: quatLookRotation(vec3(0, 0, -1)),
+  });
+  return { self, world: [self, deadAhead, upperRight, behind] };
+}
+
+describe("camera sensor + camera-ascii encoder", () => {
+  it("renders a stable, deterministic camera viewport", () => {
+    const { self, world } = standardScene();
+    const first = senseAndEncode(NOSE_CAM, world, self);
+    const second = senseAndEncode(NOSE_CAM, world, self);
+
+    // Byte-stability is the real determinism guard: two encodes serialize identically.
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+    // The viewport itself is pinned by snapshot (regenerate intentionally with `vitest -u`).
+    expect(first.text).toMatchSnapshot();
+  });
+
+  it("frames each in-view contact with a legend line", () => {
+    const { self, world } = standardScene();
+    const text = senseAndEncode(NOSE_CAM, world, self).text ?? "";
+
+    expect(text).toContain(" own  spd 180  alt 1000  bank +0  pitch +0");
+    expect(text).toContain(" red-1  12 o'clock level  rng 1000  nose-R  hp 80");
+    expect(text).toContain(" red-2  1 o'clock high");
+    // Every viewport row is exactly the bordered grid width.
+    const rows = text.split("\n").filter((l) => l.startsWith("|"));
+    expect(rows).toHaveLength(15);
+    for (const row of rows) expect(row).toHaveLength(35); // "|" + 33 + "|"
+  });
+
+  it("gates contacts by field of regard (front cone + range)", () => {
+    const { self, world } = standardScene();
+    const percept = senseAndEncode(NOSE_CAM, world, self);
+    const byId = Object.fromEntries((percept.contacts ?? []).map((c) => [c.id, c]));
+
+    expect(byId["red-1"]?.inView).toBe(true);
+    expect(byId["red-2"]?.inView).toBe(true);
+    expect(byId["red-3"]?.inView).toBe(false); // behind the camera
+    // A gated-out contact never reaches the legend.
+    expect(percept.text).not.toContain("red-3");
+  });
+
+  it("projects bearing signs correctly (right = +x, up = +y)", () => {
+    const { self, world } = standardScene();
+    const upperRight = (senseAndEncode(NOSE_CAM, world, self).contacts ?? []).find(
+      (c) => c.id === "red-2",
+    );
+    expect(upperRight).toBeDefined();
+    expect(upperRight!.ndcX).toBeGreaterThan(0); // to the right
+    expect(upperRight!.ndcY).toBeGreaterThan(0); // above
+  });
+
+  it("stays finite and -0-free for degenerate geometry, and validates against the schema", () => {
+    const self = ac({
+      id: "blue-1",
+      position: vec3(0, 1000, 0),
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+    });
+    const lvl = quatLookRotation(vec3(0, 0, -1));
+    const coincident = ac({ id: "red-1", team: "red", position: vec3(0, 1000, -18), orientation: lvl }); // at the eye
+    const directlyBehind = ac({ id: "red-2", team: "red", position: vec3(0, 1000, 5000), orientation: lvl });
+    const onBoresight = ac({ id: "red-3", team: "red", position: vec3(0, 1000, -500), orientation: lvl });
+
+    const percept = senseAndEncode(NOSE_CAM, [self, coincident, directlyBehind, onBoresight], self);
+
+    expect(percept.text).not.toContain("NaN");
+    // Every emitted number must be finite and not negative-zero (value-level, since JSON.stringify
+    // would hide a -0 as "0"). A -0 would survive in-memory and bite a future toStrictEqual.
+    const nums: number[] = [];
+    for (const c of percept.contacts ?? []) {
+      nums.push(c.ndcX, c.ndcY, c.rangeM, c.aspectDeg, c.angularSizeDeg, c.health);
+    }
+    if (percept.attitude) nums.push(percept.attitude.bankDeg, percept.attitude.pitchDeg);
+    for (const n of nums) {
+      expect(Number.isFinite(n)).toBe(true);
+      expect(Object.is(n, -0)).toBe(false);
+    }
+    // The finite-guarded schema accepts it (a NaN would throw here).
+    expect(() => PerceptSchema.parse(percept)).not.toThrow();
+  });
+});

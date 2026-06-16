@@ -1,0 +1,25 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`camera sensor + camera-ascii encoder > renders a stable, deterministic camera viewport 1`] = `
+" nose-cam  33x15  FOV 60deg
++---------------------------------+
+|                                 |
+|                                 |
+|                        o        |
+|                                 |
+|                                 |
+|                                 |
+|                                 |
+|----------------o----------------|
+|                                 |
+|                                 |
+|                                 |
+|                                 |
+|                                 |
+|                                 |
+|                                 |
++---------------------------------+
+ own  spd 180  alt 1000  bank +0  pitch +0
+ red-1  12 o'clock level  rng 1000  nose-R  hp 80
+ red-2  1 o'clock high  rng 1200  beam-R  hp 64"
+`;
