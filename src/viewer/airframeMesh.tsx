@@ -155,6 +155,7 @@ function TaperedBox({
         metalness={metalness}
         flatShading
         transparent={opacity !== undefined}
+        depthWrite={opacity === undefined}
         opacity={opacity ?? 1}
       />
     </mesh>
@@ -199,7 +200,7 @@ function PartMesh({
   propSpin: number;
   surfaceControls: Map<string, SurfaceControlSnapshot>;
 }) {
-  if (part.kind === "sensor") return null; // a sensor has no structural body in the flight view
+  if (part.kind === "sensor" || part.kind === "crew-station") return null; // sockets have no structural body
 
   const s = PART_VISUAL_SCALE;
   const o = part.pose.offset;
@@ -408,7 +409,7 @@ function PartMesh({
             }}
             roughness={0.08}
             metalness={0.18}
-            opacity={0.68}
+            opacity={0.34}
           />
         </group>
         <mesh position={[0, h * 0.47, 0]}>
@@ -420,7 +421,8 @@ function PartMesh({
             roughness={0.08}
             metalness={0.14}
             transparent
-            opacity={0.72}
+            depthWrite={false}
+            opacity={0.42}
           />
         </mesh>
         {Array.from({ length: frameCount }, (_, i) => {

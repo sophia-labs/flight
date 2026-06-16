@@ -17,6 +17,7 @@
     "render:native": "tsx src/headless/renderNative.ts",
     "demo:physics": "tsx src/headless/surfaceDemo.ts",
     "clip:controls": "tsx src/headless/cockpitClip.ts",
+    "probe:pilot-capture": "tsx src/headless/probePilotCapture.ts",
     "stills:pairs": "tsx src/headless/cockpitStills.ts",
     "clip:ensemble": "tsx --env-file=.env src/headless/ensembleClip.ts",
     "verify:replay": "tsx src/headless/verifyReplay.ts",
@@ -25,6 +26,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.79.3",
+    "@pixiv/three-vrm": "^3.5.4",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.4.2",
     "lucide-react": "^0.468.0",

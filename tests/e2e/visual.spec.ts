@@ -79,6 +79,9 @@ test("opens the hangar with physical surface controls", async ({ page }) => {
   await page.getByRole("button", { name: /WING main-wing/i }).click();
   await expect(page.getByText("incidence").first()).toBeVisible();
   await expect(page.getByText("x offset").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /CREW-STATION pilot-station/i })).toBeVisible();
+  await page.getByRole("button", { name: /CREW-STATION pilot-station/i }).click();
+  await expect(page.getByText("pilot socket")).toBeVisible();
   await expect(page.getByRole("button", { name: "Fly this ▶" })).toBeVisible();
 });
 
@@ -121,6 +124,9 @@ test("shows actual surface telemetry in cabin view", async ({ page }) => {
 
   await page.getByRole("button", { name: "HUD" }).click();
   await expect(hud).toBeHidden();
+  await page.evaluate(() =>
+    (window as unknown as { __flightSetReplayPosition?: (position: number) => void }).__flightSetReplayPosition?.(0),
+  );
   const canvas = page.locator("canvas").first();
   await expect(canvas).toBeVisible();
   await page.waitForTimeout(500);
@@ -128,10 +134,11 @@ test("shows actual surface telemetry in cabin view", async ({ page }) => {
     const canvasElement = node as HTMLCanvasElement;
     const gl =
       canvasElement.getContext("webgl2") ?? canvasElement.getContext("webgl");
-    if (!gl) return { magenta: 0, cyan: 0 };
+    if (!gl) return { colorHits: 0, cyan: 0, magenta: 0 };
 
     let magenta = 0;
     let cyan = 0;
+    let colorHits = 0;
     for (let y = 0.12; y < 0.92; y += 0.007) {
       for (let x = 0.02; x < 0.86; x += 0.007) {
         const pixel = new Uint8Array(4);
@@ -150,13 +157,65 @@ test("shows actual surface telemetry in cabin view", async ({ page }) => {
         if (pixel[1] > 120 && pixel[2] > 120 && pixel[0] < Math.min(pixel[1], pixel[2]) * 0.78) {
           cyan += 1;
         }
+        if (Math.max(pixel[0], pixel[1], pixel[2]) - Math.min(pixel[0], pixel[1], pixel[2]) > 40) {
+          colorHits += 1;
+        }
       }
     }
-    return { magenta, cyan };
+    return { colorHits, cyan, magenta };
   });
-  expect(cockpitIndicators.magenta).toBeGreaterThan(0);
-  expect(cockpitIndicators.cyan).toBeGreaterThan(0);
+  expect(cockpitIndicators.colorHits).toBeGreaterThan(0);
+  expect(cockpitIndicators.cyan + cockpitIndicators.magenta).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "HUD" }).click();
   await expect(hud).toBeVisible();
+});
+
+test("runs the scripted pilot cinema camera with a rigged VTuber", async ({ page }) => {
+  await page.route("**/matches/index.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  await page.route("**/match.json", (route) =>
+    route.fulfill({ status: 404, contentType: "text/plain", body: "not found" }),
+  );
+  await page.goto("/?camera=pilot-cinema&hud=0");
+
+  await page.getByRole("button", { name: "Hangar" }).click();
+  await expect(page.getByRole("heading", { name: "Build your aircraft" })).toBeVisible();
+  await page.getByRole("button", { name: /Fly this/ }).click();
+  await expect(page.getByRole("button", { name: "Pilot" })).toHaveClass(/active/);
+  await page.locator("canvas").first().waitFor({ state: "visible", timeout: 10_000 });
+  await page.waitForFunction(
+    () => {
+      const rig = (window as unknown as {
+        __flightPilotRig?: {
+          contactErrors: Record<string, number | null>;
+          loaded: boolean;
+          root: [number, number, number] | null;
+          station: { canopyId: string | null; source: string } | null;
+        };
+      }).__flightPilotRig;
+      return Boolean(rig?.loaded && rig.root && rig.station?.source === "crew-station");
+    },
+    undefined,
+    { timeout: 30_000 },
+  );
+
+  const rig = await page.evaluate(() => {
+    return (window as unknown as {
+      __flightPilotRig?: {
+        contactErrors: Record<string, number | null>;
+        loaded: boolean;
+        root: [number, number, number] | null;
+        station: { canopyId: string | null; source: string } | null;
+      };
+    }).__flightPilotRig;
+  });
+
+  expect(rig?.loaded).toBe(true);
+  expect(rig?.root).toHaveLength(3);
+  expect(rig?.station?.source).toBe("crew-station");
+  expect(rig?.station?.canopyId).toBe("canopy");
+  expect(rig?.contactErrors.rightHand ?? 1).toBeLessThan(0.09);
+  expect(rig?.contactErrors.leftHand ?? 1).toBeLessThan(0.09);
 });

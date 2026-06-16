@@ -482,6 +482,7 @@ function singleEngineArchetype(opts: SingleEngineOptions): Airframe {
   const engineRadius = opts.engineType === "radial" ? opts.bodyWidthM * 0.53 : opts.bodyWidthM * 0.34;
   const engineLength = opts.engineType === "radial" ? opts.bodyWidthM * 1.15 : opts.lengthM * 0.22;
   const cockpitZ = -opts.lengthM * 0.1;
+  const cockpitEye = vec3(0, opts.bodyHeightM * 0.62, cockpitZ + 0.15);
   const parts: Part[] = [
     {
       id: "fuselage",
@@ -579,7 +580,8 @@ function singleEngineArchetype(opts: SingleEngineOptions): Airframe {
       dryMassKg: Math.round(opts.loadedMassKg * 0.012),
       dims: { radius: opts.bodyWidthM * 0.28, length: opts.lengthM * 0.24 },
     },
-    cockpitAt(vec3(0, opts.bodyHeightM * 0.62, cockpitZ - 0.08), Math.PI / 2.75),
+    pilotStationAt(cockpitEye),
+    cockpitAt(cockpitEye, Math.PI / 2.75),
     noseAt(vec3(0, 0.05, -opts.lengthM * 0.58)),
   ];
   return { id: opts.id, parts };
@@ -593,6 +595,7 @@ function twinBoomArchetype(): Airframe {
   const wingAreaM2 = 30.5;
   const chordM = wingAreaM2 / spanM;
   const engineX = 2.25;
+  const cockpitEye = vec3(0, 0.86, -0.85);
   const parts: Part[] = [
     {
       id: "center-pod",
@@ -684,7 +687,8 @@ function twinBoomArchetype(): Airframe {
       dryMassKg: 110,
       dims: { radius: 0.45, length: 2.2 },
     },
-    cockpitAt(vec3(0, 0.86, -1.05), Math.PI / 2.65),
+    pilotStationAt(cockpitEye),
+    cockpitAt(cockpitEye, Math.PI / 2.65),
     noseAt(vec3(0, 0.02, -3.8)),
   ];
   return { id: "twin-boom-pursuit", parts };
@@ -697,6 +701,7 @@ function twinNacelleArchetype(): Airframe {
   const wingAreaM2 = 42.2;
   const chordM = wingAreaM2 / spanM;
   const engineX = 2.65;
+  const cockpitEye = vec3(0, 0.93, -1.65);
   const parts: Part[] = [
     {
       id: "fuselage",
@@ -780,7 +785,8 @@ function twinNacelleArchetype(): Airframe {
       dryMassKg: 180,
       dims: { radius: 0.52, length: 2.6 },
     },
-    cockpitAt(vec3(0, 0.93, -1.9), Math.PI / 2.7),
+    pilotStationAt(cockpitEye),
+    cockpitAt(cockpitEye, Math.PI / 2.7),
     noseAt(vec3(0, 0.05, -5.5)),
   ];
   return { id: "fast-wooden-twin", parts };
@@ -848,6 +854,29 @@ function cockpitAt(offset: ReturnType<typeof vec3>, hFovRad: number): Part {
     ...cockpitCamera(),
     pose: { offset, rotation: quatIdentity() },
     optics: { hFovRad, aspect: 1.6 },
+  };
+}
+
+function pilotStationAt(eye: ReturnType<typeof vec3>, canopyId = "canopy"): Part {
+  const hip = vec3(eye.x, eye.y - 0.456, eye.z - 0.15);
+  return {
+    id: "pilot-station",
+    kind: "crew-station",
+    role: "pilot",
+    pose: { offset: vec3(0, 0, 0), rotation: quatIdentity() },
+    canopyId,
+    seat: {
+      hip,
+      back: vec3(hip.x, hip.y + 0.426, hip.z + 0.23),
+      eye,
+    },
+    controls: {
+      stick: vec3(hip.x + 0.12, hip.y - 0.224, hip.z - 0.6),
+      throttle: vec3(hip.x - 0.24, hip.y - 0.224, hip.z - 0.45),
+      leftPedal: vec3(hip.x - 0.22, hip.y - 0.104, hip.z - 0.99),
+      rightPedal: vec3(hip.x + 0.22, hip.y - 0.104, hip.z - 0.99),
+      panel: vec3(hip.x, hip.y + 0.106, hip.z - 0.7),
+    },
   };
 }
 

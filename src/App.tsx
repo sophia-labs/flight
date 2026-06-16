@@ -1,5 +1,6 @@
 import { Canvas } from "@react-three/fiber";
 import {
+  Camera,
   Captions,
   Gauge,
   Mic,
@@ -48,7 +49,10 @@ function queryFlag(name: string, fallback: boolean): boolean {
 }
 
 function queryCameraMode(): CameraMode {
-  return queryValue("camera") === "cabin" ? "cabin" : "orbit";
+  const value = queryValue("camera");
+  if (value === "cabin") return "cabin";
+  if (value === "pilot-cinema" || value === "pilot" || value === "girl") return "pilot-cinema";
+  return "orbit";
 }
 
 declare global {
@@ -204,7 +208,7 @@ export function App() {
 
       <section className="simulation">
         <Canvas
-          camera={{ position: [0, 5.5, 13], fov: 54, near: 0.1, far: 1200 }}
+          camera={{ position: [0, 5.5, 13], fov: 54, near: 0.01, far: 1200 }}
           shadows
           gl={{ antialias: true, preserveDrawingBuffer: true }}
           data-testid="flight-canvas"
@@ -291,6 +295,15 @@ export function App() {
             title="Claude's cabin — pilot's-seat view of the blue aircraft"
           >
             <Plane size={16} /> Cabin
+          </button>
+          <button
+            type="button"
+            className={cameraMode === "pilot-cinema" ? "active" : ""}
+            aria-pressed={cameraMode === "pilot-cinema"}
+            onClick={() => setCameraMode("pilot-cinema")}
+            title="Scripted cockpit camera sequence"
+          >
+            <Camera size={16} /> Pilot
           </button>
         </div>
 

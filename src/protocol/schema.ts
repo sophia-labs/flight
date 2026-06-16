@@ -465,6 +465,26 @@ export const CanopyPartSchema = z.object({
   style: z.enum(["razorback", "bubble", "framed", "greenhouse"]),
 });
 
+export const CrewStationPartSchema = z.object({
+  id: z.string(),
+  kind: z.literal("crew-station"),
+  role: z.enum(["pilot"]),
+  pose: PartPoseSchema,
+  canopyId: z.string().optional(),
+  seat: z.object({
+    hip: Vec3Schema,
+    back: Vec3Schema,
+    eye: Vec3Schema,
+  }),
+  controls: z.object({
+    stick: Vec3Schema,
+    throttle: Vec3Schema,
+    leftPedal: Vec3Schema,
+    rightPedal: Vec3Schema,
+    panel: Vec3Schema,
+  }),
+});
+
 export const GearPartSchema = z.object({
   id: z.string(),
   kind: z.literal("gear"),
@@ -502,6 +522,7 @@ export const PartSchema = z.discriminatedUnion("kind", [
   EnginePartSchema,
   PropPartSchema,
   CanopyPartSchema,
+  CrewStationPartSchema,
   GearPartSchema,
   WeaponPartSchema,
   TankPartSchema,
@@ -586,6 +607,7 @@ export type EnginePart = z.infer<typeof EnginePartSchema>;
 export type PropCurvePoint = z.infer<typeof PropCurvePointSchema>;
 export type PropPart = z.infer<typeof PropPartSchema>;
 export type CanopyPart = z.infer<typeof CanopyPartSchema>;
+export type CrewStationPart = z.infer<typeof CrewStationPartSchema>;
 export type GearPart = z.infer<typeof GearPartSchema>;
 export type WeaponPart = z.infer<typeof WeaponPartSchema>;
 export type TankPart = z.infer<typeof TankPartSchema>;

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import type {
   Airframe,
   CanopyPart,
+  CrewStationPart,
   EnginePart,
   FuselagePart,
   GearPart,
@@ -21,6 +22,7 @@ import { quatFromAxisAngle, quatIdentity, vec3 } from "../sim/math";
 import { samplePropulsion } from "../sim/propulsion";
 import type { PropulsionPoint } from "../sim/types";
 import { PartMeshes } from "./airframeMesh";
+import { PilotStationDebug } from "./PilotStationDebug";
 
 const BLUE = "#4da3ff";
 
@@ -172,7 +174,7 @@ export function HangarScreen({
             <span>PART KIT</span>
           </div>
           <div style={S.addTray}>
-            {(["wing", "engine", "prop", "canopy", "gear", "weapon", "fuselage", "tank", "sensor"] as const).map((k) => (
+            {(["wing", "engine", "prop", "canopy", "crew-station", "gear", "weapon", "fuselage", "tank", "sensor"] as const).map((k) => (
               <button key={k} type="button" style={S.addBtn} onClick={() => addPart(k)}>
                 + {k}
               </button>
@@ -246,6 +248,9 @@ export function HangarScreen({
                   stalled={false}
                   propSpin={0.18}
                 />
+                {selectedPart?.kind === "crew-station" ? (
+                  <PilotStationDebug parts={airframe.parts} pointScale={1.8} />
+                ) : null}
               </group>
               <OrbitControls enableDamping dampingFactor={0.1} />
             </Canvas>
@@ -663,6 +668,37 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
     );
   }
 
+  if (part.kind === "crew-station") {
+    const setSeat = (key: keyof CrewStationPart["seat"], axis: "x" | "y" | "z", value: number) =>
+      onChange((p) => {
+        const station = p as CrewStationPart;
+        return { ...station, seat: { ...station.seat, [key]: { ...station.seat[key], [axis]: value } } };
+      });
+    const setControl = (key: keyof CrewStationPart["controls"], axis: "x" | "y" | "z", value: number) =>
+      onChange((p) => {
+        const station = p as CrewStationPart;
+        return {
+          ...station,
+          controls: { ...station.controls, [key]: { ...station.controls[key], [axis]: value } },
+        };
+      });
+    return (
+      <>
+        <div style={S.sensorNote}>pilot socket · canopy {part.canopyId ?? "auto"}</div>
+        <PoseSliders part={part} onChange={onChange} />
+        <VectorSliders label="hip" value={part.seat.hip} onChange={(axis, value) => setSeat("hip", axis, value)} />
+        <VectorSliders label="eye" value={part.seat.eye} onChange={(axis, value) => setSeat("eye", axis, value)} />
+        <VectorSliders label="stick" value={part.controls.stick} onChange={(axis, value) => setControl("stick", axis, value)} />
+        <VectorSliders
+          label="throttle"
+          value={part.controls.throttle}
+          onChange={(axis, value) => setControl("throttle", axis, value)}
+        />
+        <VectorSliders label="panel" value={part.controls.panel} onChange={(axis, value) => setControl("panel", axis, value)} />
+      </>
+    );
+  }
+
   // sensor — pose/optics editing is advanced; show its identity for now.
   return <div style={S.sensorNote}>{part.modality} sensor · range {Math.round(part.for.maxRangeM)} m</div>;
 }
@@ -689,6 +725,24 @@ function PoseSliders({
   );
 }
 
+function VectorSliders({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: { x: number; y: number; z: number };
+  onChange: (axis: "x" | "y" | "z", value: number) => void;
+}) {
+  return (
+    <>
+      <Slider label={`${label} x`} value={value.x} min={-4} max={4} step={0.05} onChange={(v) => onChange("x", v)} />
+      <Slider label={`${label} y`} value={value.y} min={-2} max={3} step={0.05} onChange={(v) => onChange("y", v)} />
+      <Slider label={`${label} z`} value={value.z} min={-6} max={3} step={0.05} onChange={(v) => onChange("z", v)} />
+    </>
+  );
+}
+
 function MassSlider({
   part,
   onChange,
@@ -698,7 +752,7 @@ function MassSlider({
   onChange: (fn: (p: Part) => Part) => void;
   max: number;
 }) {
-  if (part.kind === "sensor" || part.kind === "tank") return null; // tank carries fuel/dry mass instead
+  if (part.kind === "sensor" || part.kind === "tank" || part.kind === "crew-station") return null; // sockets/tanks carry no mass slider
   return (
     <Slider
       label="mass"
@@ -779,6 +833,29 @@ function makePart(kind: Part["kind"], parts: Part[]): Part {
       return { id, kind, pose: { offset: vec3(0, 0, -4.7), rotation: quatIdentity() }, radius: 1.6, pitchM: 2.25, bladeCount: 3, mode: "constant-speed", massKg: 85 };
     case "canopy":
       return { id, kind, pose: { offset: vec3(0, 0.75, -1.4), rotation: quatIdentity() }, dims: { length: 1.8, width: 0.75, height: 0.5 }, massKg: 90, style: "bubble" };
+    case "crew-station": {
+      const eye = vec3(0, 0.78, -1.25);
+      const hip = vec3(0, eye.y - 0.456, eye.z - 0.15);
+      return {
+        id,
+        kind,
+        role: "pilot",
+        pose: { offset: vec3(0, 0, 0), rotation: quatIdentity() },
+        canopyId: "canopy",
+        seat: {
+          hip,
+          back: vec3(hip.x, hip.y + 0.426, hip.z + 0.23),
+          eye,
+        },
+        controls: {
+          stick: vec3(hip.x + 0.12, hip.y - 0.224, hip.z - 0.6),
+          throttle: vec3(hip.x - 0.24, hip.y - 0.224, hip.z - 0.45),
+          leftPedal: vec3(hip.x - 0.22, hip.y - 0.104, hip.z - 0.99),
+          rightPedal: vec3(hip.x + 0.22, hip.y - 0.104, hip.z - 0.99),
+          panel: vec3(hip.x, hip.y + 0.106, hip.z - 0.7),
+        },
+      };
+    }
     case "gear":
       return { id, kind, pose: { offset: vec3(0, -0.75, 0.2), rotation: quatIdentity() }, trackM: 2.6, heightM: 0.8, wheelRadiusM: 0.22, massKg: 220, style: "taildragger" };
     case "weapon":
