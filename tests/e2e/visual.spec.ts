@@ -10,6 +10,9 @@ test("renders the VTuber Flight Studio first screen", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Crew" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Launch/ })).toBeVisible();
   await expect(page.getByLabel("VTuber Flight Studio").getByText("Echo").first()).toBeVisible();
+  await expect(page.getByLabel("Flight envelope")).toBeVisible();
+  await expect(page.getByText("High-speed energy fighter")).toBeVisible();
+  await expect(page.getByText("service ceiling")).toBeVisible();
   await expect(page.getByText("Head clearance")).toBeVisible();
   await expect(page.getByText("Right hand")).toBeVisible();
 

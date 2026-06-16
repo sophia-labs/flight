@@ -19,6 +19,13 @@ import type { MatchConfig } from "./config";
 export const TURN_DURATION = 2.4;
 export const FRAME_DT = 0.16;
 
+export type ScenarioRunKind = "duel" | "stern-gun" | "balloon";
+
+export interface ScenarioRunConfig {
+  kind: ScenarioRunKind;
+  turnCount: number;
+}
+
 const INITIAL_METRICS: FlightMetrics = {
   airspeed: 0,
   altitude: 0,
@@ -230,7 +237,7 @@ export const staticController: Controller = async () => ({
 // The balloon scenario: a single Blue Body, starting ~4-6 km out at a similar/slightly-lower altitude,
 // must navigate to + pop a hovering red balloon. "Longer distance + more flight time" — the Body manages
 // energy by cruising/diving but climbs poorly, so the balloon is placed level-to-slightly-above.
-export function createBalloonScenarioAircraft(): AircraftState[] {
+export function createBalloonScenarioAircraft(blueAirframe: Airframe = defaultAirframe()): AircraftState[] {
   // Blue Body up and to one side; balloon ~2.8 km ahead and ~100 m BELOW (a shallow dive — the Body
   // manages energy by diving and cruises well, but climbs poorly, so the target sits a touch lower than
   // its start, never above it). With REAL projectiles (v0.9.x) the gun is no longer a forgiving cone, so
@@ -242,7 +249,7 @@ export function createBalloonScenarioAircraft(): AircraftState[] {
   const heading = sub(balloonAt, blueStart); // point the Body roughly at the balloon at spawn
   const blueVelocity = scale(normalize(heading), 150);
 
-  const blue = compileAirframe(defaultAirframe());
+  const blue = compileAirframe(blueAirframe);
   return [
     {
       id: "blue-1",
@@ -261,7 +268,7 @@ export function createBalloonScenarioAircraft(): AircraftState[] {
       fuelKg: blue.model.fuelCapacityKg,
       fuelByTankKg: fullFuelByTank(blue.model),
       devices: blue.devices,
-      airframe: defaultAirframe(),
+      airframe: blueAirframe,
     },
     createBalloonTarget(balloonAt),
   ];
@@ -310,8 +317,8 @@ export function buildScriptedMatchConfig(turnCount = 28): MatchConfig {
 // The scripted balloon match: the embodied Body (blue-1) vs a static balloon. Same controllers/seam as
 // the duel, but red is the hovering no-op balloon. Used by the balloon verification test and as the
 // scripted reference for the deepseek film. Longer fuse (more turns) to navigate + acquire + pop it.
-export function buildBalloonMatchConfig(turnCount = 16): MatchConfig {
-  const config = scriptedConfig(createBalloonScenarioAircraft(), turnCount);
+export function buildBalloonMatchConfig(turnCount = 16, blueAirframe: Airframe = defaultAirframe()): MatchConfig {
+  const config = scriptedConfig(createBalloonScenarioAircraft(blueAirframe), turnCount);
   return {
     ...config,
     id: "balloon-hunt-001",
@@ -342,4 +349,26 @@ export function buildAirframeMatchConfig(blueAirframe: Airframe, turnCount = 28)
 
 export function generateAirframeMatch(blueAirframe: Airframe, turnCount = 28): Promise<MatchReplay> {
   return runMatch(buildAirframeMatchConfig(blueAirframe, turnCount));
+}
+
+export function buildScenarioMatchConfig(blueAirframe: Airframe, scenario: ScenarioRunConfig): MatchConfig {
+  const turnCount = normalizedTurnCount(scenario.turnCount);
+  if (scenario.kind === "stern-gun") {
+    return {
+      ...scriptedConfig(createDuelGunStartAircraft(blueAirframe, defaultAirframe()), turnCount),
+      id: "stern-gun-start-001",
+    };
+  }
+  if (scenario.kind === "balloon") {
+    return buildBalloonMatchConfig(turnCount, blueAirframe);
+  }
+  return buildAirframeMatchConfig(blueAirframe, turnCount);
+}
+
+export function generateScenarioMatch(blueAirframe: Airframe, scenario: ScenarioRunConfig): Promise<MatchReplay> {
+  return runMatch(buildScenarioMatchConfig(blueAirframe, scenario));
+}
+
+function normalizedTurnCount(turnCount: number): number {
+  return Math.max(1, Math.min(80, Math.round(Number.isFinite(turnCount) ? turnCount : 2)));
 }

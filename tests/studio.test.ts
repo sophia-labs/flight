@@ -9,11 +9,13 @@ import {
   getActiveSession,
   selectAircraftBuild,
   selectStudioMode,
+  updateScenarioConfig,
   updatePilotProfile,
 } from "../src/studio/project";
 import { StudioProjectSchema } from "../src/studio/schema";
 import {
   loadStoredStudioProject,
+  loadStudioProject,
   saveStudioProject,
   STUDIO_PROJECT_STORAGE_KEY,
   type StudioStorage,
@@ -42,6 +44,14 @@ describe("studio project persistence", () => {
       role: "duelist",
     });
     expect(session.ui.mode).toBe("hangar");
+    expect(session.scenario).toMatchObject({
+      schemaVersion: 1,
+      kind: "duel",
+      pilotModel: "scripted-body-pilot",
+      bodyModel: "scripted-fixed-wing-body",
+      turnCount: 2,
+      cameraMode: "pilot-cinema",
+    });
     expect(session.crewAssignments[0]).toMatchObject({
       aircraftBuildId: aircraft.id,
       enabled: true,
@@ -85,6 +95,27 @@ describe("studio project persistence", () => {
     expect(StudioProjectSchema.parse(next)).toEqual(next);
   });
 
+  it("updates the scenario as persistent session data", () => {
+    const project = createDefaultStudioProject(new Date("2026-06-16T00:00:00.000Z"));
+    const next = updateScenarioConfig(
+      project,
+      (scenario) => ({
+        ...scenario,
+        kind: "balloon",
+        turnCount: 16,
+        cameraMode: "cabin",
+      }),
+      new Date("2026-06-16T00:04:00.000Z"),
+    );
+
+    expect(getActiveSession(next).scenario).toMatchObject({
+      kind: "balloon",
+      turnCount: 16,
+      cameraMode: "cabin",
+    });
+    expect(StudioProjectSchema.parse(next)).toEqual(next);
+  });
+
   it("changes aircraft through the session while keeping the crew assignment attached to the new station", () => {
     const project = createDefaultStudioProject(new Date("2026-06-16T00:00:00.000Z"));
     const target = project.library.aircraft[1]!;
@@ -98,6 +129,19 @@ describe("studio project persistence", () => {
       aircraftBuildId: target.id,
       stationId: "pilot-station",
     });
+  });
+
+  it("keeps aircraft selection inside scenario mode when the scenario panel changes planes", () => {
+    const project = selectStudioMode(
+      createDefaultStudioProject(new Date("2026-06-16T00:00:00.000Z")),
+      "scenario",
+      new Date("2026-06-16T00:01:00.000Z"),
+    );
+    const target = project.library.aircraft[1]!;
+    const next = selectAircraftBuild(project, target.id, new Date("2026-06-16T00:05:00.000Z"));
+
+    expect(getActiveSession(next).aircraftBuildId).toBe(target.id);
+    expect(getActiveSession(next).ui.mode).toBe("scenario");
   });
 
   it("adds immutable replay assets and moves the session to replay mode", () => {
@@ -133,6 +177,42 @@ describe("studio project persistence", () => {
     storage.setItem(STUDIO_PROJECT_STORAGE_KEY, "{bad json");
     expect(loadStoredStudioProject(storage)).toBeNull();
     expect(storage.getItem(STUDIO_PROJECT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("syncs newly shipped catalog aircraft into an existing saved project", () => {
+    const storage = memoryStorage();
+    const saved = selectAircraftBuild(
+      createDefaultStudioProject(new Date("2026-06-16T00:00:00.000Z")),
+      "catalog-inline-escort",
+      new Date("2026-06-16T00:01:00.000Z"),
+    );
+    const olderProject = {
+      ...saved,
+      library: {
+        ...saved.library,
+        aircraft: saved.library.aircraft.filter(
+          (aircraft) => aircraft.sourceArchetypeId !== "variable-sweep-tomcat",
+        ),
+      },
+      sessions: saved.sessions.map(({ scenario: _scenario, ...session }) => session),
+    };
+
+    storage.setItem(STUDIO_PROJECT_STORAGE_KEY, JSON.stringify(olderProject));
+
+    const loaded = loadStudioProject(storage, new Date("2026-06-16T00:12:00.000Z"));
+    expect(loaded.library.aircraft[0]).toMatchObject({
+      id: "catalog-variable-sweep-tomcat",
+      name: "Super Tomcat",
+      source: "catalog",
+      sourceArchetypeId: "variable-sweep-tomcat",
+    });
+    expect(getActiveSession(loaded).aircraftBuildId).toBe("catalog-inline-escort");
+    expect(getActiveSession(loaded).scenario).toMatchObject({
+      kind: "duel",
+      pilotModel: "scripted-body-pilot",
+      bodyModel: "scripted-fixed-wing-body",
+    });
+    expect(StudioProjectSchema.parse(loaded)).toEqual(loaded);
   });
 });
 

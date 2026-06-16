@@ -132,6 +132,16 @@ export interface PropulsionPoint {
   localForward: Vec3;
 }
 
+export interface WeaponStation {
+  id: string;
+  kind: "gun" | "rocket" | "missile" | "bomb";
+  guidance: "none" | "heat-seeking";
+  count: number;
+  caliberMm: number;
+  localOffset: Vec3;
+  localForward: Vec3;
+}
+
 export interface AircraftModel {
   // --- builder summary scalars and compatibility ratings ---
   massKg: number;
@@ -158,6 +168,7 @@ export interface AircraftModel {
   thrustPoints: ThrustPoint[];
   jetPropulsions: JetPropulsionPoint[];
   propulsions: PropulsionPoint[];
+  weaponStations: WeaponStation[];
   variableSweep?: VariableSweep;
   machAero?: MachAeroProfile;
   controlAuthority: Record<ControlAxis, number>;
@@ -207,6 +218,9 @@ export interface AircraftState {
   // (false→true) gated by cooldown, so a held trigger fires one round per cooldown rather than auto-
   // repeating every frame. Runtime-only; not copied into AircraftSnapshot. Absent ⇒ treated as false.
   prevTrigger?: boolean;
+  // Runtime ammo buckets keyed by WeaponStation.id. Absent means "not initialized yet"; the first
+  // missile shot seeds from the station's configured count. Guns remain unlimited for now.
+  weaponAmmo?: Record<string, number>;
 }
 
 export interface FlightMetrics {
@@ -228,12 +242,20 @@ export interface FlightMetrics {
 // serialized AircraftState); a per-frame ProjectileSnapshot is what lands on the replay.
 export interface Projectile {
   id: string;
+  kind: "bullet" | "missile";
+  guidance?: "none" | "heat-seeking";
+  missileModel?: "aim-9m";
+  lockState?: "none" | "acquired" | "lost";
   position: Vec3;
   velocity: Vec3;
   ownerId: string;
   team: Team;
   spawnTime: number;
   distanceTravelledM: number;
+  targetId?: string;
+  seekerAngleRad?: number;
+  targetHeat?: number;
+  lockSignal?: number;
 }
 
 export interface StepResult {

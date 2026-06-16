@@ -686,6 +686,244 @@ h2 {
   white-space: nowrap;
 }
 
+.performance-envelope {
+  gap: 11px;
+}
+
+.performance-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.performance-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.performance-card span,
+.performance-trait span {
+  display: block;
+  overflow: hidden;
+  color: #8fa0a6;
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.performance-card strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #f4f8fa;
+  font-size: 1rem;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-card small {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #a9bcc5;
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-traits {
+  display: grid;
+  gap: 7px;
+}
+
+.performance-trait {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.performance-trait strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: #eef3f5;
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.performance-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.performance-meter i {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: inherit;
+  background: #4da3ff;
+}
+
+.performance-trait.hot .performance-meter i {
+  background: #f4a340;
+}
+
+.performance-trait.steady .performance-meter i {
+  background: #58d38c;
+}
+
+.performance-trait.warn .performance-meter i {
+  background: #f2c94c;
+}
+
+.performance-note {
+  margin: 0;
+  color: #d7e5ea;
+  font-size: 0.77rem;
+  line-height: 1.45;
+}
+
+.performance-note.muted {
+  color: #8fa0a6;
+}
+
+.scenario-sheet {
+  gap: 11px;
+}
+
+.scenario-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scenario-summary-grid div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.scenario-summary-grid span {
+  display: block;
+  overflow: hidden;
+  color: #8fa0a6;
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.scenario-summary-grid strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 4px;
+  color: #f4f8fa;
+  font-size: 0.88rem;
+  line-height: 1.12;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scenario-run-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 42px;
+  border-color: rgba(88, 211, 140, 0.4);
+  color: #06120b;
+  font-weight: 900;
+  background: #58d38c;
+}
+
+.scenario-run-button:hover {
+  background: #79e6a7;
+}
+
+.scenario-run-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.scenario-progress {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(77, 163, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(77, 163, 255, 0.08);
+}
+
+.scenario-progress div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  color: #cfe7f4;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.scenario-progress span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scenario-progress strong {
+  flex: 0 0 auto;
+  color: #f4f8fa;
+  font-variant-numeric: tabular-nums;
+}
+
+.scenario-progress i {
+  display: block;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.scenario-progress i span {
+  display: block;
+  min-width: 2px;
+  height: 100%;
+  border-radius: inherit;
+  background: #4da3ff;
+}
+
+.scenario-error {
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 107, 97, 0.28);
+  border-radius: 8px;
+  color: #ffd6d2;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  background: rgba(255, 107, 97, 0.1);
+}
+
 .studio-pilot-card {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr);
@@ -1085,6 +1323,10 @@ h2 {
 
   .studio-aircraft-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .performance-card-grid {
+    grid-template-columns: 1fr;
   }
 }
 

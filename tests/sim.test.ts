@@ -395,6 +395,116 @@ describe("flight physics characterization", () => {
     expect(target.health).toBeLessThan(100);
   });
 
+  it("a Super Tomcat trigger launches an AIM-9M heat seeker and spends station ammo", () => {
+    const model = archetypeModel("variable-sweep-tomcat");
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      model,
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, 0),
+      position: vec3(0, 1000, 0),
+      fuelKg: model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(model),
+      weaponCooldown: 0,
+    });
+    const target = makeAircraft({ id: "red-1", team: "red", velocity: vec3(0, 0, 0), position: vec3(0, 1000, -700) });
+
+    let result = stepSimulation(
+      [shooter, target],
+      {
+        "blue-1": controls({ throttle: 0, trigger: true }),
+        "red-1": controls({ throttle: 0, trigger: false }),
+      },
+      STEP_DT,
+      [],
+      0,
+    );
+
+    expect(result.events.filter((e) => e.type === "shot")).toHaveLength(1);
+    expect(result.events[0].message).toContain("launches AIM-9M");
+    expect(result.projectiles).toHaveLength(1);
+    expect(result.projectiles[0]).toMatchObject({
+      kind: "missile",
+      guidance: "heat-seeking",
+      missileModel: "aim-9m",
+      lockState: "acquired",
+      ownerId: "blue-1",
+      targetId: "red-1",
+    });
+    expect(shooter.weaponAmmo?.["m61-and-missiles"]).toBe(7);
+
+    let projectiles = result.projectiles;
+    let time = STEP_DT;
+    const events = [...result.events];
+    for (let i = 0; i < 10 && target.health === 100; i += 1) {
+      result = stepSimulation(
+        [shooter, target],
+        {
+          "blue-1": controls({ throttle: 0, trigger: true }),
+          "red-1": controls({ throttle: 0, trigger: false }),
+        },
+        STEP_DT,
+        projectiles,
+        time,
+      );
+      projectiles = result.projectiles;
+      events.push(...result.events);
+      time += STEP_DT;
+    }
+
+    expect(events.some((e) => e.type === "hit" && e.message.includes("missile"))).toBe(true);
+    expect(target.health).toBeLessThanOrEqual(28);
+  });
+
+  it("AIM-9M guidance can lead a moving off-boresight target", () => {
+    const model = archetypeModel("variable-sweep-tomcat");
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      model,
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, -220),
+      position: vec3(0, 1500, 0),
+      fuelKg: model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(model),
+      weaponCooldown: 0,
+    });
+    const target = makeAircraft({
+      id: "red-1",
+      team: "red",
+      model,
+      orientation: quatLookRotation(vec3(80, 0, -160)),
+      velocity: vec3(80, 0, -160),
+      position: vec3(80, 1500, -1000),
+      fuelKg: model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(model),
+    });
+
+    let projectiles: Projectile[] = [];
+    let time = 0;
+    const events: ReplayEvent[] = [];
+    for (let i = 0; i < 160 && target.health === 100; i += 1) {
+      const result = stepSimulation(
+        [shooter, target],
+        {
+          "blue-1": controls({ throttle: 1, trigger: i === 0 }),
+          "red-1": controls({ throttle: 1, trigger: false }),
+        },
+        0.05,
+        projectiles,
+        time,
+      );
+      projectiles = result.projectiles;
+      events.push(...result.events);
+      time += 0.05;
+    }
+
+    expect(events.some((e) => e.type === "shot" && e.message.includes("AIM-9M"))).toBe(true);
+    expect(events.some((e) => e.type === "hit" && e.targetId === "red-1")).toBe(true);
+    expect(target.health).toBeLessThanOrEqual(28);
+  });
+
   it("misses when the target is out of range (the round despawns short)", () => {
     const shooter = makeAircraft({
       id: "blue-1",

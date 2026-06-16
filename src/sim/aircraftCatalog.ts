@@ -1042,6 +1042,8 @@ function variableSweepTomcatArchetype(): Airframe {
       massKg: 1_250,
       dims: { length: 3.95, width: 0.22, height: 0.22 },
       role: "rocket-rail",
+      weaponType: "missile",
+      guidance: "heat-seeking",
     },
     {
       id: "internal-fuel",

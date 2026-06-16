@@ -37,16 +37,22 @@ function numberFlag(name: string, fallback: number): number {
 
 function cameraMode(value: string): NativeCameraMode {
   if (value === "topgun" || value === "vtuber" || value === "pilot") return "pilot-hero";
+  if (value === "split" || value === "split-screen" || value === "balloon-split") return "split-balloon";
+  if (value === "split-1v1" || value === "split-duel" || value === "dogfight-split" || value === "1v1") {
+    return "split-dogfight";
+  }
   if (
     value === "cinematic" ||
     value === "chase" ||
     value === "cockpit" ||
     value === "orbit" ||
-    value === "pilot-hero"
+    value === "pilot-hero" ||
+    value === "split-balloon" ||
+    value === "split-dogfight"
   ) {
     return value;
   }
-  throw new Error("--camera must be cinematic, chase, cockpit, orbit, or pilot-hero");
+  throw new Error("--camera must be cinematic, chase, cockpit, orbit, pilot-hero, split-balloon, or split-dogfight");
 }
 
 const replayPath = flag("--replay");
@@ -59,7 +65,10 @@ const pilotId = flag("--pilot-id") ?? "blue-1";
 const mode = cameraMode(flag("--camera") ?? "cinematic");
 const defaultAvatarPath = resolve("public/models/VRM1_Constraint_Twist_Sample.vrm");
 const avatarPath =
-  flag("--avatar") ?? (mode === "pilot-hero" && existsSync(defaultAvatarPath) ? defaultAvatarPath : undefined);
+  flag("--avatar") ??
+  ((mode === "pilot-hero" || mode === "split-balloon" || mode === "split-dogfight") && existsSync(defaultAvatarPath)
+    ? defaultAvatarPath
+    : undefined);
 const timelineOnly = argv.includes("--timeline-only");
 const keepFrames = argv.includes("--keep-frames");
 const samples = Math.max(1, Math.round(numberFlag("--samples", Number(process.env.NATIVE_RENDER_SAMPLES ?? 48))));

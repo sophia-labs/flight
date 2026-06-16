@@ -1,8 +1,10 @@
 import type { MatchReplay } from "../protocol/schema";
+import { DEFAULT_STUDIO_SCENARIO_CONFIG } from "./schema";
 import type {
   AircraftBuild,
   PilotProfile,
   ReplayAsset,
+  StudioScenarioConfig,
   StudioMode,
   StudioProject,
   StudioSession,
@@ -52,6 +54,7 @@ export function selectAircraftBuild(project: StudioProject, aircraftBuildId: str
 
   const session = getActiveSession(project);
   const stationId = firstCrewStationId(aircraft);
+  const mode: StudioMode = session.ui.mode === "scenario" ? "scenario" : "hangar";
 
   return updateActiveSession(
     project,
@@ -73,9 +76,27 @@ export function selectAircraftBuild(project: StudioProject, aircraftBuildId: str
         : [],
       ui: {
         ...session.ui,
-        mode: "hangar",
+        mode,
         selectedStationId: stationId,
       },
+    }),
+    now,
+  );
+}
+
+export function updateScenarioConfig(
+  project: StudioProject,
+  update: (scenario: StudioScenarioConfig) => StudioScenarioConfig,
+  now = new Date(),
+): StudioProject {
+  return updateActiveSession(
+    project,
+    (session) => ({
+      ...session,
+      scenario: update({
+        ...DEFAULT_STUDIO_SCENARIO_CONFIG,
+        ...session.scenario,
+      }),
     }),
     now,
   );

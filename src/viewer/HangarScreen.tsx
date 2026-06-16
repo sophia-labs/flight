@@ -554,6 +554,14 @@ function PartFields({ part, onChange }: { part: Part; onChange: (fn: (p: Part) =
           step={50}
           onChange={(v) => onChange((p) => ({ ...(p as EnginePart), maxRpm: v }))}
         />
+        <Slider
+          label="critical altitude"
+          value={part.criticalAltitudeM ?? 0}
+          min={0}
+          max={9000}
+          step={250}
+          onChange={(v) => onChange((p) => ({ ...(p as EnginePart), criticalAltitudeM: v }))}
+        />
         <MassSlider part={part} onChange={onChange} max={4000} />
         <PoseSliders part={part} onChange={onChange} />
       </>
@@ -824,6 +832,7 @@ function makePart(kind: Part["kind"], parts: Part[]): Part {
         pose: { offset: vec3(0, 0, -4), rotation: quatIdentity() },
         thrustN: 55_000,
         maxPowerW: Math.round(1200 * 745.7),
+        criticalAltitudeM: 0,
         idleRpm: 650,
         maxRpm: 2850,
         massKg: 600,

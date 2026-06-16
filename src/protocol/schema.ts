@@ -79,9 +79,17 @@ export const ReplayEventSchema = z.object({
 // validate and a frame with no rounds in flight simply omits it.
 export const ProjectileSnapshotSchema = z.object({
   id: z.string(),
+  kind: z.enum(["bullet", "missile"]).optional(),
+  guidance: z.enum(["none", "heat-seeking"]).optional(),
+  missileModel: z.enum(["aim-9m"]).optional(),
+  lockState: z.enum(["none", "acquired", "lost"]).optional(),
   position: Vec3Schema,
   velocity: Vec3Schema,
   team: z.enum(["blue", "red"]),
+  targetId: z.string().optional(),
+  seekerAngleDeg: finiteNumber.optional(),
+  targetHeat: finiteNumber.optional(),
+  lockSignal: finiteNumber.optional(),
 });
 
 export const ReplayFrameSchema = z.object({
@@ -522,6 +530,8 @@ export const WeaponPartSchema = z.object({
   massKg: finiteNumber,
   dims: z.object({ length: finiteNumber, width: finiteNumber, height: finiteNumber }),
   role: z.enum(["machine-gun", "cannon", "rocket-rail", "bomb-rack"]),
+  weaponType: z.enum(["gun", "rocket", "missile", "bomb"]).optional(),
+  guidance: z.enum(["none", "heat-seeking"]).optional(),
 });
 
 export const TankPartSchema = z.object({

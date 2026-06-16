@@ -29,7 +29,20 @@ import { toSnapshot, type AircraftState, type Projectile } from "../sim/types";
 import type { AgentEntry, MatchConfig } from "./config";
 
 function projectileSnapshot(round: Projectile) {
-  return { id: round.id, position: round.position, velocity: round.velocity, team: round.team };
+  return {
+    id: round.id,
+    kind: round.kind,
+    ...(round.guidance ? { guidance: round.guidance } : {}),
+    ...(round.missileModel ? { missileModel: round.missileModel } : {}),
+    ...(round.lockState ? { lockState: round.lockState } : {}),
+    position: round.position,
+    velocity: round.velocity,
+    team: round.team,
+    ...(round.targetId ? { targetId: round.targetId } : {}),
+    ...(round.seekerAngleRad !== undefined ? { seekerAngleDeg: (round.seekerAngleRad * 180) / Math.PI } : {}),
+    ...(round.targetHeat !== undefined ? { targetHeat: round.targetHeat } : {}),
+    ...(round.lockSignal !== undefined ? { lockSignal: round.lockSignal } : {}),
+  };
 }
 
 function snapshot(

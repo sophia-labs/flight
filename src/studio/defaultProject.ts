@@ -1,17 +1,17 @@
 import { aircraftArchetypes } from "../sim/aircraftCatalog";
 import { PILOT_AVATAR_SCALE, PILOT_AVATAR_YAW_RAD, PILOT_MODEL_URL } from "./pilotDefaults";
-import { StudioProjectSchema, type AircraftBuild, type CrewAssignment, type StudioProject } from "./schema";
+import {
+  DEFAULT_STUDIO_SCENARIO_CONFIG,
+  StudioProjectSchema,
+  type AircraftBuild,
+  type CrewAssignment,
+  type StudioProject,
+} from "./schema";
 import { DEFAULT_VRM_WEARABLE_IDS } from "./vrmWearables";
 
 export function createDefaultStudioProject(now = new Date()): StudioProject {
   const updatedAt = now.toISOString();
-  const aircraft = aircraftArchetypes.map<AircraftBuild>((archetype) => ({
-    id: `catalog-${archetype.id}`,
-    name: archetype.shortName,
-    source: "catalog",
-    sourceArchetypeId: archetype.id,
-    airframe: clone(archetype.airframe),
-  }));
+  const aircraft = createCatalogAircraftBuilds();
   const activeAircraft = aircraft[0];
   const pilotProfileId = "pilot-vrm-sample";
   const stationId = firstCrewStationId(activeAircraft);
@@ -77,6 +77,7 @@ export function createDefaultStudioProject(now = new Date()): StudioProject {
         aircraftBuildId: activeAircraft.id,
         pilotProfileId,
         crewAssignments,
+        scenario: clone(DEFAULT_STUDIO_SCENARIO_CONFIG),
         replayIds: [],
         captureIds: [],
         ui: {
@@ -93,6 +94,16 @@ export function createDefaultStudioProject(now = new Date()): StudioProject {
       },
     ],
   });
+}
+
+export function createCatalogAircraftBuilds(): AircraftBuild[] {
+  return aircraftArchetypes.map<AircraftBuild>((archetype) => ({
+    id: `catalog-${archetype.id}`,
+    name: archetype.shortName,
+    source: "catalog",
+    sourceArchetypeId: archetype.id,
+    airframe: clone(archetype.airframe),
+  }));
 }
 
 function firstCrewStationId(aircraft: AircraftBuild): string | undefined {
