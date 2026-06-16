@@ -189,6 +189,7 @@ function WingPanel({
 
 function PartMesh({
   part,
+  afterburnerActive,
   color,
   accentColor,
   propSpin,
@@ -196,6 +197,7 @@ function PartMesh({
   sweepDeg,
 }: {
   part: Part;
+  afterburnerActive?: boolean;
   color: string;
   accentColor: string;
   propSpin: number;
@@ -287,6 +289,7 @@ function PartMesh({
               <boxGeometry args={[span * 0.18, WING_THICKNESS * 1.18, chord * 1.16]} />
               <meshStandardMaterial color={color} roughness={0.5} metalness={0.16} flatShading />
             </mesh>
+            <SweptWingGloves span={span} chord={chord} color={color} accentColor={accentColor} />
             <group rotation={[0, wingSweepRad, 0]}>
               <WingPanel side={-1} span={span / 2} chord={chord} thickness={WING_THICKNESS} color={color} />
             </group>
@@ -321,6 +324,8 @@ function PartMesh({
     const radius = part.dims.radius * s;
     const len = part.dims.length * s;
     const radial = part.dims.radius / Math.max(part.dims.length, 0.01) > 0.24;
+    const jet = part.afterburnerThrustN !== undefined;
+    const hot = jet && (afterburnerActive || propSpin >= (part.afterburnerThrottle ?? 0.82));
     return (
       <group position={pos} quaternion={quat}>
         {radial ? (
@@ -333,6 +338,45 @@ function PartMesh({
               <cylinderGeometry args={[radius * 1.04, radius * 1.04, len * 0.08, 18]} />
               <meshStandardMaterial color={PANEL_COLOR} roughness={0.38} metalness={0.42} flatShading />
             </mesh>
+          </>
+        ) : jet ? (
+          <>
+            <TaperedBox
+              color={ENGINE_COLOR}
+              args={{
+                length: len,
+                frontWidth: radius * 1.45,
+                frontHeight: radius * 1.18,
+                backWidth: radius * 2.15,
+                backHeight: radius * 1.72,
+              }}
+              roughness={0.44}
+              metalness={0.52}
+            />
+            <mesh castShadow position={[0, -radius * 0.3, -len * 0.3]}>
+              <boxGeometry args={[radius * 1.7, radius * 0.28, len * 0.46]} />
+              <meshStandardMaterial color="#182127" roughness={0.5} metalness={0.32} />
+            </mesh>
+            <mesh castShadow position={[0, 0, len * 0.52]} rotation={[Math.PI / 2, 0, 0]}>
+              <cylinderGeometry args={[radius * 0.78, radius * 1.08, len * 0.17, 28]} />
+              <meshStandardMaterial color="#22282d" roughness={0.38} metalness={0.68} flatShading />
+            </mesh>
+            <mesh castShadow position={[0, 0, len * 0.61]} rotation={[Math.PI / 2, 0, 0]}>
+              <cylinderGeometry args={[radius * 0.56, radius * 0.64, len * 0.045, 28]} />
+              <meshStandardMaterial
+                color={hot ? "#ffcf73" : "#11161a"}
+                emissive={hot ? "#ff7b1c" : "#000000"}
+                emissiveIntensity={hot ? 1.5 : 0}
+                roughness={0.3}
+                metalness={0.46}
+              />
+            </mesh>
+            {hot ? (
+              <mesh position={[0, 0, len * 0.88]} rotation={[Math.PI / 2, 0, 0]}>
+                <coneGeometry args={[radius * 0.62, len * 0.62, 28, 1, true]} />
+                <meshBasicMaterial color="#ff8a24" transparent opacity={0.42} depthWrite={false} />
+              </mesh>
+            ) : null}
           </>
         ) : (
           <>
@@ -413,7 +457,8 @@ function PartMesh({
     const w = part.dims.width * s * 1.42;
     const h = part.dims.height * s * 1.75;
     const l = part.dims.length * s * 1.28;
-    const frameCount = part.style === "greenhouse" ? 5 : part.style === "framed" ? 3 : 1;
+    const tandemLength = part.dims.length / Math.max(part.dims.width, 0.1) > 3.1;
+    const frameCount = part.style === "greenhouse" ? 5 : part.style === "framed" || tandemLength ? 3 : 1;
     return (
       <group position={[pos[0], pos[1] + h * 0.16, pos[2]]} quaternion={quat}>
         <group position={[0, 0, 0]}>
@@ -499,20 +544,33 @@ function PartMesh({
     const len = part.dims.length * s;
     const w = part.dims.width * s;
     const h = part.dims.height * s;
-    const spacing = Math.max(w * 2.2, 0.035);
-    const start = -((part.count - 1) * spacing) / 2;
+    const rocket = part.role === "rocket-rail";
+    const columns = rocket && part.count > 4 ? Math.ceil(part.count / 2) : part.count;
+    const spacing = Math.max(w * (rocket ? 2.8 : 2.2), rocket ? 0.052 : 0.035);
+    const start = -((columns - 1) * spacing) / 2;
     return (
       <group position={pos} quaternion={quat}>
-        {Array.from({ length: part.count }, (_, i) => (
-          <mesh key={`${part.id}-${i}`} castShadow position={[start + i * spacing, 0, 0]}>
-            <boxGeometry args={[w, h, len]} />
-            <meshStandardMaterial
-              color={part.role === "bomb-rack" || part.role === "rocket-rail" ? TANK_COLOR : WEAPON_COLOR}
-              roughness={0.48}
-              metalness={0.42}
-            />
-          </mesh>
-        ))}
+        {Array.from({ length: part.count }, (_, i) => {
+          const column = i % columns;
+          const row = rocket && part.count > columns ? Math.floor(i / columns) : 0;
+          const rowCount = rocket && part.count > columns ? Math.ceil(part.count / columns) : 1;
+          const x = start + column * spacing;
+          const y = rowCount > 1 ? (row - (rowCount - 1) / 2) * h * 1.35 : 0;
+          const z = rowCount > 1 ? (row - (rowCount - 1) / 2) * len * 0.18 : 0;
+          if (rocket) {
+            return <MissileStore key={`${part.id}-${i}`} position={[x, y, z]} length={len} radius={Math.max(w, h) * 0.42} />;
+          }
+          return (
+            <mesh key={`${part.id}-${i}`} castShadow position={[x, y, z]}>
+              <boxGeometry args={[w, h, len]} />
+              <meshStandardMaterial
+                color={part.role === "bomb-rack" ? TANK_COLOR : WEAPON_COLOR}
+                roughness={0.48}
+                metalness={0.42}
+              />
+            </mesh>
+          );
+        })}
       </group>
     );
   }
@@ -559,6 +617,82 @@ function WingMarkings({
         </group>
       ))}
     </>
+  );
+}
+
+function SweptWingGloves({
+  accentColor,
+  chord,
+  color,
+  span,
+}: {
+  accentColor: string;
+  chord: number;
+  color: string;
+  span: number;
+}) {
+  const gloveSpan = Math.max(span * 0.18, 0.08);
+  const gloveChord = Math.max(chord * 1.34, 0.08);
+  return (
+    <>
+      {([-1, 1] as const).map((side) => (
+        <group key={`sweep-glove-${side}`} position={[side * span * 0.12, WING_THICKNESS * 0.82, -chord * 0.08]} rotation={[0, -side * 0.28, 0]}>
+          <mesh castShadow receiveShadow>
+            <boxGeometry args={[gloveSpan, WING_THICKNESS * 1.12, gloveChord]} />
+            <meshStandardMaterial color={color} roughness={0.48} metalness={0.18} flatShading />
+          </mesh>
+          <mesh castShadow position={[side * gloveSpan * 0.22, WING_THICKNESS * 0.64, -gloveChord * 0.08]}>
+            <boxGeometry args={[gloveSpan * 0.18, WING_THICKNESS * 0.2, gloveChord * 0.8]} />
+            <meshStandardMaterial color={accentColor} roughness={0.42} metalness={0.14} />
+          </mesh>
+        </group>
+      ))}
+    </>
+  );
+}
+
+function MissileStore({
+  length,
+  position,
+  radius,
+}: {
+  length: number;
+  position: [number, number, number];
+  radius: number;
+}) {
+  const bodyLength = length * 0.72;
+  const noseLength = length * 0.18;
+  const finLength = Math.max(length * 0.1, 0.012);
+  return (
+    <group position={position}>
+      <mesh castShadow rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[radius, radius * 0.92, bodyLength, 18]} />
+        <meshStandardMaterial color="#d8dee2" roughness={0.36} metalness={0.44} />
+      </mesh>
+      <mesh castShadow position={[0, 0, -bodyLength / 2 - noseLength / 2]} rotation={[-Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[radius * 0.98, noseLength, 18]} />
+        <meshStandardMaterial color="#f0f3f4" roughness={0.32} metalness={0.36} />
+      </mesh>
+      <mesh castShadow position={[0, 0, bodyLength / 2 + finLength * 0.22]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[radius * 0.78, radius * 0.88, finLength, 14]} />
+        <meshStandardMaterial color={WEAPON_COLOR} roughness={0.46} metalness={0.36} />
+      </mesh>
+      {([0, Math.PI / 2, Math.PI, Math.PI * 1.5] as const).map((angle) => (
+        <mesh
+          key={`fin-${angle}`}
+          castShadow
+          position={[
+            Math.cos(angle) * radius * 0.72,
+            Math.sin(angle) * radius * 0.72,
+            bodyLength / 2 + finLength * 0.05,
+          ]}
+          rotation={[0, 0, angle]}
+        >
+          <boxGeometry args={[radius * 0.12, radius * 0.82, finLength * 0.82]} />
+          <meshStandardMaterial color={WEAPON_COLOR} roughness={0.44} metalness={0.3} />
+        </mesh>
+      ))}
+    </group>
   );
 }
 
@@ -676,6 +810,7 @@ function ControlPanel({
 }
 
 export function PartMeshes({
+  afterburnerActive,
   parts,
   color,
   accentColor = PANEL_COLOR,
@@ -685,6 +820,7 @@ export function PartMeshes({
   propSpin,
   sweepDeg,
 }: {
+  afterburnerActive?: boolean;
   parts: Part[];
   color: string;
   accentColor?: string;
@@ -702,6 +838,7 @@ export function PartMeshes({
         <PartMesh
           key={part.id}
           part={part}
+          afterburnerActive={afterburnerActive}
           color={color}
           accentColor={accentColor}
           propSpin={spin}

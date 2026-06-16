@@ -389,6 +389,7 @@ function AircraftMesh({
   return (
     <group ref={register} scale={ship.health <= 0 ? DEAD_AIRCRAFT_SCALE : ACTIVE_AIRCRAFT_SCALE}>
       <PartMeshes
+        afterburnerActive={ship.afterburner}
         parts={parts}
         color={ship.color}
         accentColor={ship.team === "blue" ? "#f4d35e" : "#f0f2f2"}

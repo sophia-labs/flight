@@ -7,6 +7,7 @@ import {
   defaultAirframe,
   noseCamera,
 } from "../src/sim/airframe";
+import { aircraftArchetypes } from "../src/sim/aircraftCatalog";
 import { DEFAULT_MODEL } from "../src/sim/flight";
 import { quatFromAxisAngle, vec3 } from "../src/sim/math";
 import { samplePropulsion } from "../src/sim/propulsion";
@@ -54,6 +55,25 @@ describe("airframe compiler", () => {
   it("round-trips through the Zod schemas (a part serializes now)", () => {
     expect(() => AirframeSchema.parse(defaultAirframe())).not.toThrow();
     expect(() => SensorDeviceSchema.parse(noseCamera())).not.toThrow();
+  });
+
+  it("models the Super Tomcat with the same standard airframe parts as the rest of the catalog", () => {
+    const tomcat = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat");
+    if (!tomcat) throw new Error("missing Super Tomcat archetype");
+
+    expect(() => AirframeSchema.parse(tomcat.airframe)).not.toThrow();
+    expect(tomcat.airframe.parts.some((part) => part.kind === "wing" && part.sweep)).toBe(true);
+    expect(
+      tomcat.airframe.parts.filter((part) => part.kind === "engine" && part.afterburnerThrustN !== undefined),
+    ).toHaveLength(2);
+    expect(tomcat.airframe.parts.find((part) => part.id === "canopy")).toMatchObject({
+      kind: "canopy",
+      style: "framed",
+    });
+    expect(tomcat.airframe.parts.find((part) => part.id === "m61-and-missiles")).toMatchObject({
+      kind: "weapon",
+      role: "rocket-rail",
+    });
   });
 
   // The levers must move the way the surface-force sim rewards: handling comes from placed control
