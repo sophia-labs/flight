@@ -124,6 +124,7 @@ function lerpAircraft(a: AircraftSnapshot, b: AircraftSnapshot | undefined, t: n
     health: lerp(a.health, b.health, t),
     weaponCooldown: lerp(a.weaponCooldown, b.weaponCooldown, t),
     stalled: t < 0.5 ? a.stalled : b.stalled,
+    ...(a.static || b.static ? { static: true } : {}),
     ...(a.surfaceControls
       ? { surfaceControls: a.surfaceControls.map((surface) => lerpSurface(surface, bSurfaces.get(surface.id), t)) }
       : {}),

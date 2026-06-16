@@ -31,6 +31,8 @@ FILM_MODE=pilot-intent BODY_MODEL=deepseek/deepseek-v4-flash npm run film -- dee
 FILM_SENSOR_ID=nose-cam npm run film -- --scripted --cinema --out clips/nose-sensor.mp4
 FILM_MODE=pilot-intent npm run film -- --scripted --replay-out /tmp/body-replay.json
 npm run clip:controls -- --replay /tmp/body-replay.json --out clips/body-cockpit.mp4 --seconds 12
+npm run render:native -- --replay /tmp/body-replay.json --camera cinematic --out clips/native-body.mp4
+npm run render:native -- --camera pilot-hero --seconds 4 --out clips/native-review-vtuber-topgun.mp4
 npm run clip:ensemble -- --out clips/deepseek-v4-flash-ensemble-cockpit.mp4
 npm run verify:replay -- clips/deepseek-v4-flash-ensemble-replay.json --require-ensemble
 npm run critique:replay -- clips/deepseek-v4-flash-ensemble-replay.json
@@ -45,6 +47,8 @@ Body `MUSCLE` output is treated as a desired motor posture. The runtime applies 
 For live Body runs, `BODY_TIMEOUT_MS`, `BODY_MAX_RETRIES`, `BODY_EMPTY_RETRIES`, and `BODY_MAX_TOKENS` tune provider reliability and output budget. `BODY_EMPTY_RETRIES` retries successful-but-empty Body responses with a corrective command-format prompt.
 
 `clip:controls` records the live React viewer, so use it when the clip needs the same cockpit controls, pedals, and HUD overlay the app shows. Pass `--replay` to capture a specific generated match; omit it for the built-in deterministic demo.
+
+`render:native` bypasses Chromium. It exports a deterministic timeline from replay data, asks Blender to build an engine-native scene, renders PNG frames, then encodes the MP4 with ffmpeg. See `docs/native-render-pipeline.md`.
 
 `clip:ensemble` is the repeatable live path. By default it uses `deepseek/deepseek-v4-flash` for both Pilot and Body, writes a sensor film plus replay under `clips/`, verifies that the pilot did not fall back and that the live Body ticks parsed, writes the matching transcript Markdown, then records the cockpit-mounted viewer clip. Use `--transcript-out` to choose the transcript path or `--no-transcript` to skip it.
 
