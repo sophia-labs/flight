@@ -12,7 +12,6 @@ const WING_THICKNESS = 0.04;
 const ENGINE_COLOR = "#9aa6ad";
 const PANEL_COLOR = "#d8e6ec";
 const TANK_COLOR = "#c9a14a";
-const CONTROL_SURFACE_COLOR = "#f4a340";
 const PROP_COLOR = "#1b2328";
 const CANOPY_COLOR = "#8ad8ff";
 const CANOPY_FRAME_COLOR = "#a9c4ce";
@@ -310,6 +309,7 @@ function PartMesh({
         )}
         <WingControlSurfaces
           part={part}
+          accentColor={accentColor}
           span={span}
           chord={chord}
           vertical={vertical}
@@ -576,6 +576,7 @@ function PartMesh({
   }
 
   if (part.kind === "tank") {
+    if (/internal|fuel-cells?/i.test(part.id)) return null;
     const radius = part.dims.radius * s;
     const len = part.dims.length * s;
     return (
@@ -697,6 +698,7 @@ function MissileStore({
 }
 
 function WingControlSurfaces({
+  accentColor,
   part,
   span,
   chord,
@@ -704,6 +706,7 @@ function WingControlSurfaces({
   sweepRad = 0,
   surfaceControls,
 }: {
+  accentColor: string;
   part: Extract<Part, { kind: "wing" }>;
   span: number;
   chord: number;
@@ -724,6 +727,7 @@ function WingControlSurfaces({
             side={-1}
             span={span}
             chord={chord}
+            color={accentColor}
             vertical={false}
             surfaceControls={surfaceControls}
           />
@@ -735,6 +739,7 @@ function WingControlSurfaces({
             side={1}
             span={span}
             chord={chord}
+            color={accentColor}
             vertical={false}
             surfaceControls={surfaceControls}
           />
@@ -749,6 +754,7 @@ function WingControlSurfaces({
       axis={axis}
       span={span}
       chord={chord}
+      color={accentColor}
       vertical={vertical}
       surfaceControls={surfaceControls}
     />
@@ -758,6 +764,7 @@ function WingControlSurfaces({
 function ControlPanel({
   surfaceId,
   axis,
+  color,
   side = 0,
   span,
   chord,
@@ -766,6 +773,7 @@ function ControlPanel({
 }: {
   surfaceId: string;
   axis: "pitch" | "roll" | "yaw";
+  color: string;
   side?: -1 | 0 | 1;
   span: number;
   chord: number;
@@ -780,8 +788,8 @@ function ControlPanel({
   const centerX = axis === "roll" ? side * span * 0.31 : 0;
   const material = (
     <meshStandardMaterial
-      color={CONTROL_SURFACE_COLOR}
-      emissive={CONTROL_SURFACE_COLOR}
+      color={color}
+      emissive={color}
       emissiveIntensity={Math.min(0.22, Math.abs(deflectionRad) * 0.9 + 0.04)}
       roughness={0.42}
       metalness={0.18}
