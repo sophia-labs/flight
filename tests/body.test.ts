@@ -11,10 +11,12 @@ import {
 } from "../src/body/runtime";
 import { buildBodyPrompt, compareExpectation, encodeProprioception, snapshotKinematics } from "../src/body/telemetry";
 import type { PilotIntentAction } from "../src/protocol/schema";
-import { createInitialAircraft, FRAME_DT } from "../src/runtime/scenario";
+import { createBalloonScenarioAircraft, createInitialAircraft, FRAME_DT } from "../src/runtime/scenario";
 import { cameraSensor } from "../src/agent/perception";
 import { cameraAsciiEncoderV2 } from "../src/agent/encoders/cameraAscii";
 import { selectCameraDevice } from "../src/sim/mountedSensor";
+import { targetInReticle } from "../src/sim/flight";
+import { quatLookRotation, sub, vec3 } from "../src/sim/math";
 
 // The camera-ascii@2 glyph-field the Body now senses, computed exactly as runBodyTick does.
 function fieldFor(self: ReturnType<typeof createInitialAircraft>[number], world: ReturnType<typeof createInitialAircraft>) {
@@ -50,8 +52,9 @@ describe("Body motor grammar", () => {
       },
     );
 
-    expect(prompt).toContain("Return exactly these five lines and nothing else");
+    expect(prompt).toContain("Return exactly these six lines and nothing else");
     expect(prompt).toContain("MUSCLE ROLL=<int -5..5> PITCH=<int -5..5> YAW=<int -5..5> PUSH=<int 0..5>");
+    expect(prompt).toContain("SOLUTION <cold|warming|hot|now>");
     expect(prompt).toContain("Never use word-values like gentle_right or throttle_up");
     expect(prompt).toContain("controls are rate-limited");
     expect(prompt).toContain("Only use TONE reverse");
@@ -74,9 +77,9 @@ describe("Body motor grammar", () => {
     const prompt = buildBodyPrompt(fixedWingBodyManifest, TEST_INTENT, proprioception, state.memory);
 
     // The whole @2 field — its grid AND its legend — is present in the prompt.
-    expect(field).toContain("33x15"); // the @2 grid header (legend line 1)
+    expect(field).toContain("65x31"); // the @2 grid header (legend line 1) — v0.9.x aiming-loop acuity
     expect(field).toContain("FOV"); // legend carries FOV
-    expect(field.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(15); // 15 grid rows
+    expect(field.split("\n").filter((l) => l.startsWith("|"))).toHaveLength(31); // 31 grid rows
     expect(prompt).toContain(field);
     expect(prompt).toContain("FIELD (what you see");
 
@@ -345,7 +348,9 @@ describe("Body motor grammar", () => {
       dt: FRAME_DT,
       self,
       aircraft,
-      pilotIntent: { ...TEST_INTENT, trigger: true },
+      // Even with the Pilot weapons-free, a FAILED Body must not fire: the assisted sear needs a
+      // SOLUTION=now from a live Body, and an errored Body emits none. The trigger stays safe.
+      pilotIntent: { ...TEST_INTENT, trigger: true, armedFire: true },
     });
     const tick = finishBodyTick(pending, state, self);
 
@@ -357,6 +362,141 @@ describe("Body motor grammar", () => {
     expect(tick.controlInput.pitch).toBeCloseTo(0.21);
     expect(tick.controlInput.yaw).toBeCloseTo(0.105);
     expect(tick.controlInput.throttle).toBeCloseTo(0.648);
-    expect(tick.controlInput.trigger).toBe(true);
+    expect(tick.controlInput.trigger).toBe(false); // sear blocks firing without a live SOLUTION=now
+  });
+});
+
+// v0.9.x held-action firing: the Body owns the shot via a SOLUTION line; the assisted sear fires only on
+// two keys (Pilot armed + Body SOLUTION=now) AND a real target in the reticle. Credential-free: a
+// scripted Body model drives every case, so this is a deterministic smoke of the whole firing loop.
+describe("held-action firing — SOLUTION grammar + assisted sear (two-key)", () => {
+  // A scripted Body model that returns a fixed output line block (so we can drive the SOLUTION value).
+  function fixedBody(solution: string) {
+    return async () =>
+      [
+        "MUSCLE ROLL=0 PITCH=0 YAW=0 PUSH=3",
+        "TONE hold 1",
+        "EXPECT ROLL=stable PITCH=stable SPEED=stable MARGIN=safe",
+        `SOLUTION ${solution}`,
+        "FEEL lined up",
+        "MEM gun run",
+      ].join("\n");
+  }
+
+  // Body aimed dead at the balloon, placed ~1 km away (inside the round's reach) so a SOLUTION=now is a
+  // REAL solution that the geometric reticle key accepts.
+  function aimedScenario() {
+    const [self, balloon] = createBalloonScenarioAircraft();
+    // Put the body 1 km from the balloon, nose dead-on (well inside the 2900 m round reach).
+    self.position = { x: balloon.position.x, y: balloon.position.y, z: balloon.position.z + 1000 };
+    self.orientation = quatLookRotation(sub(balloon.position, self.position));
+    return { self, balloon, world: [self, balloon] };
+  }
+
+  it("parses the SOLUTION line and never errors when it is omitted", () => {
+    const withSolution = parseBodyOutput(
+      [
+        "MUSCLE ROLL=0 PITCH=0 YAW=0 PUSH=3",
+        "TONE hold 1",
+        "EXPECT ROLL=stable PITCH=stable SPEED=stable MARGIN=safe",
+        "SOLUTION now",
+        "FEEL on the boresight",
+        "MEM fire",
+      ].join("\n"),
+      fixedWingBodyManifest,
+    );
+    expect(withSolution.solution).toBe("now");
+    expect(withSolution.status).toBe("ok");
+
+    // Omitting SOLUTION is not an error (it is an aiming verb, not a law) — status still ok.
+    const noSolution = parseBodyOutput(
+      [
+        "MUSCLE ROLL=0 PITCH=0 YAW=0 PUSH=3",
+        "TONE hold 1",
+        "EXPECT ROLL=stable PITCH=stable SPEED=stable MARGIN=safe",
+        "FEEL searching",
+        "MEM none",
+      ].join("\n"),
+      fixedWingBodyManifest,
+    );
+    expect(noSolution.solution).toBeUndefined();
+    expect(noSolution.status).toBe("ok");
+    expect(noSolution.errors).not.toContain("body_chatter");
+  });
+
+  it("the OUTPUT_CONTRACT prompts the Body to call its own shot with SOLUTION", () => {
+    const { self, world } = aimedScenario();
+    const intent: PilotIntentAction = { ...TEST_INTENT, armedFire: true };
+    const proprioception = encodeProprioception(self, createBodyRuntimeState(self.controls), fieldFor(self, world));
+    const prompt = buildBodyPrompt(fixedWingBodyManifest, intent, proprioception);
+    expect(prompt).toContain("SOLUTION <cold|warming|hot|now>");
+    expect(prompt).toContain("call your own shot"); // weapons-free coaching
+    expect(prompt).toContain("weapons: FREE"); // the armed/weapons-free line in PILOT_WANT
+  });
+
+  it("fires only with BOTH keys: Pilot armed AND Body SOLUTION=now (and a real target in the reticle)", async () => {
+    async function fire(opts: { armed: boolean; solution: string }): Promise<boolean> {
+      const { self, world } = aimedScenario();
+      const state = createBodyRuntimeState(self.controls);
+      const pending = await runBodyTick({
+        config: { manifest: fixedWingBodyManifest, model: fixedBody(opts.solution) },
+        state,
+        turn: 1,
+        agentId: self.id,
+        time: 0,
+        dt: FRAME_DT,
+        self,
+        aircraft: world,
+        pilotIntent: { ...TEST_INTENT, armedFire: opts.armed, trigger: opts.armed },
+      });
+      return pending.controlInput.trigger;
+    }
+
+    // The real target is in the reticle (dead-on). The two keys gate the shot:
+    expect(await fire({ armed: true, solution: "now" })).toBe(true); // both keys → FIRES
+    expect(await fire({ armed: false, solution: "now" })).toBe(false); // Pilot not armed → safe
+    expect(await fire({ armed: true, solution: "hot" })).toBe(false); // Body hasn't called now → safe
+    expect(await fire({ armed: true, solution: "cold" })).toBe(false); // cold → safe
+  });
+
+  it("the sear blocks a SOLUTION=now at EMPTY SKY (no target in the reticle)", async () => {
+    // Same Body + same armed Pilot + SOLUTION=now, but the nose points 90deg AWAY from the balloon, so
+    // no target sits in the reticle. The geometric key fails → the sear stays safe.
+    const [self, balloon] = createBalloonScenarioAircraft();
+    self.orientation = quatLookRotation(vec3(0, 0, -1)); // arbitrary heading, not at the balloon
+    const world = [self, balloon];
+    expect(targetInReticle(self, world)).toBe(false); // nothing in the reticle
+
+    const state = createBodyRuntimeState(self.controls);
+    const pending = await runBodyTick({
+      config: { manifest: fixedWingBodyManifest, model: fixedBody("now") },
+      state,
+      turn: 1,
+      agentId: self.id,
+      time: 0,
+      dt: FRAME_DT,
+      self,
+      aircraft: world,
+      pilotIntent: { ...TEST_INTENT, armedFire: true, trigger: true },
+    });
+    expect(pending.controlInput.trigger).toBe(false); // armed + now, but empty sky → no shot
+  });
+
+  it("the reticle is WIDER than the hit radius — being in it does not guarantee a hit (skill stays)", () => {
+    // A target just inside the reticle but off-centre: targetInReticle is true (the Body may call now),
+    // yet a round fired along the nose would pass OUTSIDE the hit radius. The sear permits the shot; the
+    // physics still misses. The sear gates empty sky, it does not aim.
+    const self = {
+      ...createBalloonScenarioAircraft()[0],
+      position: vec3(0, 1000, 0),
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+    };
+    // Balloon 800 m ahead but offset ~55 m to the side: 55 m is OUTSIDE the 42 m hit radius, but at
+    // 800 m it is within the ~3.4deg reticle (tan(3.4deg)*800 ≈ 48 m + the balloon's own size).
+    const balloon = { ...createBalloonScenarioAircraft()[1], position: vec3(55, 1000, -800) };
+    const world = [self, balloon];
+    expect(targetInReticle(self, world)).toBe(true); // in the reticle — the Body may call now...
+    // ...but the gun axis misses: perp distance (55 m) exceeds the 42 m hit radius. (Proven by the
+    // sim weapon tests: a round fired here would not connect.) Skill — centring — still decides the hit.
   });
 });

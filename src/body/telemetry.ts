@@ -251,20 +251,28 @@ function muscleLine(muscle: BodyMuscleCommand | undefined) {
 
 const OUTPUT_CONTRACT = [
   "OUTPUT_CONTRACT",
-  "Return exactly these five lines and nothing else:",
+  "Return exactly these six lines and nothing else:",
   "MUSCLE ROLL=<int -5..5> PITCH=<int -5..5> YAW=<int -5..5> PUSH=<int 0..5>",
   "TONE <hold|pulse|brace|relax|reverse> <int 0..3>",
   "EXPECT ROLL=<left++|left+|stable|right+|right++> PITCH=<down|stable|up> SPEED=<recover|stable|rising|falling> MARGIN=<better|stable|safe|narrowing|thin>",
+  "SOLUTION <cold|warming|hot|now>",
   "FEEL <1 to 12 words>",
   "MEM <0 to 7 words>",
   "Example:",
   "MUSCLE ROLL=4 PITCH=-1 YAW=2 PUSH=5",
   "TONE brace 1",
   "EXPECT ROLL=right+ PITCH=down SPEED=stable MARGIN=safe",
-  "FEEL rolling right before I pull",
+  "SOLUTION warming",
+  "FEEL pipper creeping onto the target",
   "MEM right_turn stage",
   "Use integers only for MUSCLE and TONE. Never use word-values like gentle_right or throttle_up.",
   "Only use TONE reverse when you intentionally need an axis to cross through neutral immediately.",
+  // The aiming loop lives in YOUR seat now: fly the reticle (the boresight + at field centre) onto the
+  // target glyph and CALL YOUR OWN SHOT with SOLUTION. cold=no shot / target not near the reticle;
+  // warming=closing on it; hot=almost there, steady; now=the target is ON the reticle — FIRE. Only say
+  // SOLUTION now when the target glyph sits in the centre cell(s) over the + boresight. The gun has an",
+  "assisted sear: it fires only when the Pilot has armed you (weapons free) AND you call SOLUTION now AND",
+  "a round fired this instant would actually strike — so calling now at empty sky simply wastes nothing.",
 ];
 
 function calibrationLines(proprioception: BodyProprioception): string[] {
@@ -319,7 +327,10 @@ export function buildBodyPrompt(
     `BODY ${manifest.bodyId} DT=${manifest.bodyTickDt.toFixed(2)}`,
     "",
     "PILOT_WANT",
-    `${pilotIntent.goal}; urgency=${pilotIntent.urgency.toFixed(2)}; risk=${pilotIntent.riskTolerance.toFixed(2)}; style=${pilotIntent.style}; trigger=${pilotIntent.trigger}`,
+    `${pilotIntent.goal}; urgency=${pilotIntent.urgency.toFixed(2)}; risk=${pilotIntent.riskTolerance.toFixed(2)}; style=${pilotIntent.style}`,
+    // Weapons-free is the Pilot ARMING you (a held action): when armed, YOU own the firing decision —
+    // fly the reticle on and call SOLUTION now. When safe, the sear is dead no matter what you call.
+    `weapons: ${pilotIntent.armedFire ? "FREE — weapons free, call your own shot (SOLUTION now) when lined up" : "SAFE — hold fire"}`,
     `constraints: ${pilotIntent.constraints.join("; ") || "none"}`,
     `attention: ${pilotIntent.attention.join("; ") || "none"}`,
     "",

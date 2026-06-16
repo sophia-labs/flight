@@ -117,13 +117,15 @@ export const staticController: Controller = async () => ({
 // must navigate to + pop a hovering red balloon. "Longer distance + more flight time" — the Body manages
 // energy by cruising/diving but climbs poorly, so the balloon is placed level-to-slightly-above.
 export function createBalloonScenarioAircraft(): AircraftState[] {
-  // Blue Body up and to one side; balloon ~4 km ahead and ~150 m BELOW (a shallow dive — the Body
+  // Blue Body up and to one side; balloon ~3.2 km ahead and ~110 m BELOW (a shallow dive — the Body
   // manages energy by diving and cruises well, but climbs poorly, so the target sits a touch lower than
-  // its start, never above it). 4 km is the near end of the brief's 4-6 km band: the Body flies a clean
-  // on-nose run for the first few turns, so it enters the balloon's ~2.8 km gun envelope while still
-  // lined up — before its strong dive tendency scatters the geometry. Its nose points at the balloon.
+  // its start, never above it). With REAL projectiles (v0.9.x) the gun is no longer a forgiving cone, so
+  // the Body must enter the ~2.9 km round-reach while STILL lined up — before its dive reflex scatters
+  // the geometry. 3.2 km (was 4.3 km under the old hitscan cone) keeps the clean early on-nose run
+  // overlapping the in-range window. The Phase-2 assisted sear (the Body calling its own SOLUTION=now
+  // only when the round would truly intercept) is what then converts that alignment into a reliable pop.
   const blueStart = vec3(-2_750, 1_320, 2_550);
-  const balloonAt = vec3(400, 1_170, -350);
+  const balloonAt = vec3(-397, 1_208, 384);
   const heading = sub(balloonAt, blueStart); // point the Body roughly at the balloon at spawn
   const blueVelocity = scale(normalize(heading), 150);
 

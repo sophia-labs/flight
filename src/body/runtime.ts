@@ -9,6 +9,7 @@ import type {
 import { clampControlInput } from "../protocol/schema";
 import { cameraSensor } from "../agent/perception";
 import { cameraAsciiEncoderV2 } from "../agent/encoders/cameraAscii";
+import { targetInReticle } from "../sim/flight";
 import { selectCameraDevice } from "../sim/mountedSensor";
 import type { SensorDevice } from "../sim/parts";
 import type { AircraftState } from "../sim/types";
@@ -274,10 +275,22 @@ export async function runBodyTick(input: {
   const parsed: BodyParsedOutput = bodyCall.modelError
     ? { status: "failed", errors: [`model_error: ${bodyCall.modelError}`], clipped: false }
     : parseBodyOutput(rawOutput, config.manifest);
-  const desiredControl = muscleControl(parsed, pilotIntent.trigger);
+  // ASSISTED SEAR (two-key + reticle): the trigger fires only when ALL hold —
+  //   (a) the Pilot ARMED a held action (weapons free),
+  //   (b) the Body calls its own shot (SOLUTION=now), and
+  //   (c) a target is inside the RETICLE (the generous aim circle) — NOT a guaranteed-hit test.
+  // The reticle is wider than the round's hit radius, so the sear blocks a SOLUTION=now called at empty
+  // sky but does NOT aim for the Body: a sloppy "now" inside the reticle can still miss; only a centred
+  // call connects. The Body owns the firing DECISION + the aim; the Pilot grants permission; the sear
+  // is just the "don't fire at nothing" interlock. A Body that omits/garbles SOLUTION never fires.
+  const fire =
+    pilotIntent.armedFire === true &&
+    parsed.solution === "now" &&
+    targetInReticle(self, aircraft);
+  const desiredControl = muscleControl(parsed, fire);
   const controlInput = desiredControl
     ? slewBodyControl(state.lastControl, desiredControl, parsed, config.controlSlew)
-    : invalidOutputControl(state, pilotIntent.trigger);
+    : invalidOutputControl(state, fire);
   const reason = parsed.status === "failed" ? "invalid_recovery" : reasonForPain(proprioception);
   const before = snapshotKinematics(self);
 

@@ -25,6 +25,7 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
       constraints: ["do_not_crash", "avoid_stall", "keep_energy"],
       attention: [`airspeed_${Math.round(self.airspeed)}`, `altitude_${Math.round(self.altitude)}`],
       trigger: false,
+      armedFire: false, // nothing to shoot → the held action is not armed → the sear stays dead
     };
   }
 
@@ -43,21 +44,18 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
     0.18,
     0.88,
   );
-  // A fat balloon is a big, slow, fragile target the gun reaches from far (resolveWeapons gives it a
-  // wide cone + ~2.4 km range), so the Pilot opens its trigger gate to that envelope: it fires the
-  // moment it is roughly nose-on at range, not only inside the tight dogfight box. The scripted Pilot
-  // fires, as today — this just lets it take the shot the balloon weapon actually supports.
-  const trigger = enemy.balloon
-    ? enemy.bearingForward > 0.9 &&
-      Math.abs(enemy.bearingRight) < 0.36 &&
-      Math.abs(enemy.bearingUp) < 0.36 &&
-      enemy.range < 2_800 &&
-      self.weaponCooldown <= 0.05
-    : enemy.bearingForward > 0.976 &&
-      Math.abs(enemy.bearingRight) < 0.16 &&
-      Math.abs(enemy.bearingUp) < 0.16 &&
-      enemy.range < 1_080 &&
-      self.weaponCooldown <= 0.05;
+  // HELD ACTION (v0.9.x assisted sear): the Pilot no longer computes the firing INSTANT itself — that
+  // is the Body's job now (the seat that sees the geometry). The Pilot ARMS a held action ("weapons
+  // free — squeeze when you have the solution") whenever a target is roughly in front and within the
+  // gun's reach; the fast Body then flies the reticle on and calls its own shot (SOLUTION=now), and the
+  // sear blocks a shot at empty sky. So this is a COARSE permission gate, not a precise aim test: arm
+  // generously when there is something worth shooting ahead, and let the Body own the precise call.
+  const armedFire =
+    enemy.bearingForward > 0 && // target somewhere ahead of the nose
+    enemy.range < (enemy.balloon ? 2_900 : 1_400); // within the round's reach for the target type
+  // `trigger` is retained as the same coarse permission level (kept for back-compat + the non-Body
+  // adapters that still read it). The Body path reads `armedFire`; the sear, not this flag, fires.
+  const trigger = armedFire;
 
   // Balloon hunt: the Body's energy instinct (dive for speed) makes it sink under a hovering target and
   // scatter the gun geometry. The Pilot has no stick — only words — so it coaches the aim every turn:
@@ -71,11 +69,17 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
         ? "the balloon is slightly low — ease the nose down a touch, do not dive"
         : "the balloon is dead on your nose";
   const sideCue = Math.abs(enemy.bearingRight) < 0.1 ? "wings level" : `ease ${side}`;
+  // Weapons-free coaching: with the held action armed, the Body owns the shot — so the Pilot coaches it
+  // to fly the reticle on and call it ("squeeze when the balloon sits on your + boresight"), instead of
+  // the old "I will pull the trigger for you."
+  const fireCue = armedFire
+    ? " WEAPONS FREE: you call the shot — keep flying the balloon onto your boresight + and squeeze (SOLUTION now) the instant it sits centred on the crosshair."
+    : "";
 
   return {
     kind: "pilot-intent",
     goal: isBalloon
-      ? `Steady gun run on the balloon. ${vCue}; ${sideCue}. HOLD your altitude — you are already fast enough, do NOT trade altitude or dive. Keep the balloon glued to your boresight crosshair and fly straight onto it until it fills your sight.`
+      ? `Steady gun run on the balloon. ${vCue}; ${sideCue}. HOLD your altitude — you are already fast enough, do NOT trade altitude or dive. Keep the balloon glued to your boresight crosshair and fly straight onto it until it fills your sight.${fireCue}`
       : lowEnergy || self.stalled
         ? `recover energy, then turn ${side} toward the target`
         : `turn ${side} toward the ${rangeBand} target and line up without losing the wing`,
@@ -105,6 +109,7 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
           `closure_${enemy.closureRate < -20 ? "closing" : enemy.closureRate > 20 ? "opening" : "steady"}`,
         ],
     trigger,
+    armedFire,
   };
 }
 

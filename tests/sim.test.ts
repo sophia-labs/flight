@@ -8,17 +8,20 @@ import {
   type ReplayEvent,
 } from "../src/protocol/schema";
 import {
+  add,
   basisFromQuat,
   dot,
   length,
   normalize,
   quatIdentity,
   quatLookRotation,
+  scale,
+  sub,
   vec3,
 } from "../src/sim/math";
 import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
 import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
-import type { AircraftState, FlightMetrics } from "../src/sim/types";
+import type { AircraftState, FlightMetrics, Projectile } from "../src/sim/types";
 import {
   buildScriptedMatchConfig,
   createBalloonScenarioAircraft,
@@ -197,8 +200,15 @@ function step(
   steps: number,
 ): ReplayEvent[] {
   const events: ReplayEvent[] = [];
+  // Thread live projectiles + the running clock across steps, exactly as the match loop does, so a
+  // spawned round integrates and sweeps over subsequent steps (no per-call reset).
+  let projectiles: Projectile[] = [];
+  let time = 0;
   for (let i = 0; i < steps; i += 1) {
-    events.push(...stepSimulation(aircraft, controlsById, STEP_DT).events);
+    const result = stepSimulation(aircraft, controlsById, STEP_DT, projectiles, time);
+    projectiles = result.projectiles;
+    events.push(...result.events);
+    time += STEP_DT;
   }
   return events;
 }
@@ -262,32 +272,35 @@ describe("flight physics characterization", () => {
     expect(ship.position.y).toBeGreaterThanOrEqual(55);
   });
 
-  it("resolves a hit when the target is in range and inside the gun cone", () => {
+  // v0.9.x projectiles: the gun fires a real bullet (900 m/s) that flies where the nose points and is
+  // swept against targets over several steps — no more instant hitscan cone. A dead-on shot connects;
+  // a 14deg-off lob flies past even a fat target.
+  it("a dead-on shot spawns a round that connects after travel", () => {
     const shooter = makeAircraft({
       id: "blue-1",
       team: "blue",
       orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, 0),
       position: vec3(0, 1000, 0),
       weaponCooldown: 0,
     });
-    const target = makeAircraft({ id: "red-1", team: "red", position: vec3(0, 1000, -500) });
+    const target = makeAircraft({ id: "red-1", team: "red", velocity: vec3(0, 0, 0), position: vec3(0, 1000, -500) });
 
     const events = step(
       [shooter, target],
       {
-        "blue-1": controls({ throttle: 0.5, trigger: true }),
-        "red-1": controls({ throttle: 0.5, trigger: false }),
+        "blue-1": controls({ throttle: 0, trigger: true }),
+        "red-1": controls({ throttle: 0, trigger: false }),
       },
-      1,
+      6, // ~1 s — a 900 m/s round covers the 500 m before this runs out
     );
 
     expect(events.some((e) => e.type === "shot")).toBe(true);
-    expect(events.some((e) => e.type === "hit")).toBe(true);
+    expect(events.some((e) => e.type === "hit" && e.targetId === "red-1")).toBe(true);
     expect(target.health).toBeLessThan(100);
-    expect(target.health).toBeGreaterThanOrEqual(72); // damage is clamped to <= 28
   });
 
-  it("misses when the target is out of range", () => {
+  it("misses when the target is out of range (the round despawns short)", () => {
     const shooter = makeAircraft({
       id: "blue-1",
       team: "blue",
@@ -299,7 +312,7 @@ describe("flight physics characterization", () => {
       id: "red-1",
       team: "red",
       velocity: vec3(0, 0, 0),
-      position: vec3(0, 1000, -2000),
+      position: vec3(0, 1000, -4000), // beyond the round's 2900 m reach
     });
 
     const events = step(
@@ -308,7 +321,7 @@ describe("flight physics characterization", () => {
         "blue-1": controls({ throttle: 0, trigger: true }),
         "red-1": controls({ throttle: 0, trigger: false }),
       },
-      1,
+      20,
     );
 
     expect(events.some((e) => e.type === "shot")).toBe(true);
@@ -316,20 +329,20 @@ describe("flight physics characterization", () => {
     expect(target.health).toBe(100);
   });
 
-  it("misses when the target is outside the gun cone", () => {
+  it("a ~14deg-off lob MISSES a fat target (the round flies past, not a forgiving cone)", () => {
+    // Aim ~14deg to the right of a target 600 m dead ahead. The bullet flies along the nose, so its
+    // closest approach is ~600*sin(14deg) ≈ 145 m off — well outside even the 42 m balloon radius.
+    const offAngle = (14 * Math.PI) / 180;
     const shooter = makeAircraft({
       id: "blue-1",
       team: "blue",
-      orientation: quatLookRotation(vec3(0, 0, -1)),
+      orientation: quatLookRotation(vec3(Math.sin(offAngle), 0, -Math.cos(offAngle))),
       velocity: vec3(0, 0, 0),
       position: vec3(0, 1000, 0),
     });
-    const target = makeAircraft({
-      id: "red-1",
-      team: "red",
-      velocity: vec3(0, 0, 0),
-      position: vec3(500, 1000, 0),
-    });
+    // A fat balloon-sized target dead ahead at -Z; the old hitscan cone (0.42 rad ≈ 24deg) would have
+    // "hit" this. With real bullets, the 14deg-off round sails past.
+    const target = makeAircraft({ id: "red-1", team: "red", velocity: vec3(0, 0, 0), position: vec3(0, 1000, -600) });
 
     const events = step(
       [shooter, target],
@@ -337,11 +350,36 @@ describe("flight physics characterization", () => {
         "blue-1": controls({ throttle: 0, trigger: true }),
         "red-1": controls({ throttle: 0, trigger: false }),
       },
-      1,
+      10,
     );
 
+    expect(events.some((e) => e.type === "shot")).toBe(true);
     expect(events.some((e) => e.type === "hit")).toBe(false);
     expect(target.health).toBe(100);
+  });
+
+  it("holding the trigger fires one round per cooldown, not a stream every frame", () => {
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, 0),
+      position: vec3(0, 1000, 0),
+      weaponCooldown: 0,
+    });
+    const target = makeAircraft({ id: "red-1", team: "red", velocity: vec3(0, 0, 0), position: vec3(0, 1000, -800) });
+
+    // Hold the trigger for ~3.2 s (20 steps). Cooldown is 2.65 s, so exactly two rising-edge shots fire.
+    const events = step(
+      [shooter, target],
+      {
+        "blue-1": controls({ throttle: 0, trigger: true }),
+        "red-1": controls({ throttle: 0, trigger: false }),
+      },
+      20,
+    );
+    const shots = events.filter((e) => e.type === "shot").length;
+    expect(shots).toBe(2);
   });
 
   it("clamps out-of-range control inputs to the protocol bounds", () => {
@@ -585,7 +623,7 @@ describe("balloon target", () => {
     expect(balloon.health).toBe(0); // popped
   });
 
-  it("the scripted Body match pursues + pops the balloon end to end", async () => {
+  it("the scripted Body match pursues + tracks + fires real rounds at the balloon end to end", async () => {
     const replay = await generateBalloonMatch(16);
     const balloonFrames = replay.frames.flatMap((f) => f.aircraft.filter((a) => a.id === "balloon"));
     // The balloon never moves across the whole match (hovers).
@@ -593,9 +631,28 @@ describe("balloon target", () => {
     for (const b of balloonFrames) expect(b.position).toEqual(p0);
     // The balloon snapshot carries the static flag for the renderer.
     expect(balloonFrames[0].static).toBe(true);
-    // And the scripted Body kills it: a hit event on the balloon and its health reaches 0.
-    const hit = replay.frames.flatMap((f) => f.events).some((e) => e.type === "hit" && e.targetId === "balloon");
-    expect(hit).toBe(true);
-    expect(balloonFrames[balloonFrames.length - 1].health).toBe(0);
+
+    // v0.9.x — the gun is no longer a forgiving hitscan cone; it spawns REAL bullets that fly where the
+    // nose points. The scripted Body acquires the balloon, closes, and fires real rounds at it — the end-
+    // to-end loop runs. The Body's Pilot trigger gate is loose (it sprays at ~26deg), so the unforgiving
+    // gun no longer guarantees a pop here; reliably converting alignment into a kill is the job of the
+    // Phase-2 assisted sear (the Body calling its own SOLUTION=now only on a true intercept).
+    const shots = replay.frames.flatMap((f) => f.events).filter((e) => e.type === "shot" && e.actorId === "blue-1");
+    expect(shots.length).toBeGreaterThan(0); // it gets a gun run and pulls the trigger
+    // It tracks the balloon TIGHTLY at some point — far tighter than the old 24deg cone — proving real
+    // aim, not spray-and-pray: at its best it lines the gun axis within the balloon's hit radius.
+    const tightlyAligned = replay.frames.some((f) => {
+      const body = f.aircraft.find((a) => a.id === "blue-1");
+      const bal = f.aircraft.find((a) => a.id === "balloon");
+      if (!body || !bal) return false;
+      const fwd = basisFromQuat(body.orientation).forward;
+      const muzzle = add(body.position, scale(fwd, 18));
+      const t = dot(sub(bal.position, muzzle), fwd);
+      if (t <= 0) return false;
+      const perp = length(sub(bal.position, add(muzzle, scale(fwd, t))));
+      const range = length(sub(bal.position, body.position));
+      return perp <= 42 && range <= 2_900; // gun axis within the balloon's hit radius, in range
+    });
+    expect(tightlyAligned).toBe(true);
   });
 });

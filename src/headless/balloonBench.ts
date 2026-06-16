@@ -25,7 +25,13 @@ import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import { pursuitFallback } from "../agent/controllers/scripted";
 import { perfectSensor } from "../agent/observation";
 import { competenceEvaluator } from "../eval/outcome";
-import { balloonMetrics, type BalloonMetrics } from "../eval/balloonMetrics";
+import {
+  BALLOON_CONE_HALF_ANGLE_RAD,
+  BALLOON_HIT_RADIUS_M,
+  BALLOON_MAX_GUN_RANGE_M,
+  balloonMetrics,
+  type BalloonMetrics,
+} from "../eval/balloonMetrics";
 import type { MatchReplay } from "../protocol/schema";
 import type { MatchConfig } from "../runtime/config";
 import { runMatch } from "../runtime/match";
@@ -227,8 +233,10 @@ function leaderboardMarkdown(board: ModelAggregate[], meta: BenchMeta): string {
   );
   lines.push(
     `K=${meta.k} matches/model, ${meta.turns} turns max, BODY_TIMEOUT=${meta.timeoutMs}ms. ` +
-      `On-solution = onNose ≥ cos(${meta.coneHalfAngleRad}) AND range ≤ ${meta.maxGunRangeM} m ` +
-      `(the exact balloon gun cone + range from resolveWeapons).`,
+      `On-solution = a REAL bullet fired that frame would intercept the balloon — the gun axis passes ` +
+      `within the balloon's ${meta.hitRadiusM} m hit radius (≈ within atan(${meta.hitRadiusM}/range) of ` +
+      `dead-on) AND range ≤ ${meta.maxGunRangeM} m. This mirrors the v0.9.x projectile hit test in ` +
+      `resolveWeapons/stepProjectiles — far tighter than the old 0.42 rad (~24°) hitscan cone.`,
   );
   lines.push("");
   lines.push(`| # | model | kills/K | mean t-on-balloon (s) | mean latency (s) | parse-rate | $/run |`);
@@ -265,6 +273,7 @@ interface BenchMeta {
   turns: number;
   timeoutMs: number;
   coneHalfAngleRad: number;
+  hitRadiusM: number;
   maxGunRangeM: number;
   totalCostUsd: number;
   wallSec: number;
@@ -317,8 +326,9 @@ async function main(): Promise<void> {
     k: K,
     turns: TURNS,
     timeoutMs: BODY_TIMEOUT_MS,
-    coneHalfAngleRad: 0.42,
-    maxGunRangeM: 2_900,
+    coneHalfAngleRad: BALLOON_CONE_HALF_ANGLE_RAD,
+    hitRadiusM: BALLOON_HIT_RADIUS_M,
+    maxGunRangeM: BALLOON_MAX_GUN_RANGE_M,
     totalCostUsd,
     wallSec,
   };

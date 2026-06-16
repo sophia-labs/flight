@@ -68,12 +68,26 @@ export const ReplayEventSchema = z.object({
   impact: Vec3Schema.optional(),
 });
 
+// v0.9.x simulated projectile: a live bullet in flight, recorded per frame so it persists across the
+// replay and can be drawn as a tracer streak. id is stable across frames (so a renderer can track a
+// single round); team lets the renderer colour it. Optional/additive so legacy-shaped replays still
+// validate and a frame with no rounds in flight simply omits it.
+export const ProjectileSnapshotSchema = z.object({
+  id: z.string(),
+  position: Vec3Schema,
+  velocity: Vec3Schema,
+  team: z.enum(["blue", "red"]),
+});
+
 export const ReplayFrameSchema = z.object({
   index: z.number().int().nonnegative(),
   time: z.number(),
   turn: z.number().int().nonnegative(),
   aircraft: z.array(AircraftSnapshotSchema),
   events: z.array(ReplayEventSchema),
+  // Live projectiles in flight at this frame. Optional + only emitted when non-empty, so frames with
+  // no rounds and legacy replays stay byte-identical.
+  projectiles: z.array(ProjectileSnapshotSchema).optional(),
 });
 
 // --- v0.2.0 agent contract: actions, observations, decisions, outcome ---
@@ -123,7 +137,14 @@ export const PilotIntentActionSchema = z.object({
   style: z.string(),
   constraints: z.array(z.string()),
   attention: z.array(z.string()),
+  // v0.9.x held-action / assisted-sear: the slow Pilot no longer computes the firing instant itself.
+  // It ARMS a held action — "weapons free, squeeze when you have the solution" — and the fast Body calls
+  // its own shot (SOLUTION=now) while a geometric sear blocks firing at empty sky. `trigger` is the
+  // Pilot's coarse permission level (kept for back-compat + the non-Body adapters); `armedFire` is the
+  // held-action grant the two-key trigger reads. Optional ⇒ legacy intents (and the scripted duel) that
+  // don't set it default to disarmed, and existing replays/tests stay byte-identical.
   trigger: z.boolean(),
+  armedFire: z.boolean().optional(),
 });
 
 // Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
@@ -292,9 +313,10 @@ export const BodyProprioceptionSchema = z.object({
   stallMargin: z.string(),
   authority: BodyAuthoritySchema,
   terrain: z.string(),
-  // FIELD-FEED: the camera-ascii@2 glyph-field — the 33x15 frustum grid plus its legend lines
-  // (own state + each in-view contact). This is the Body's PRIMARY spatial sense; it replaces the
-  // old single `target` token, carrying the same target/spatial information at much higher fidelity.
+  // FIELD-FEED: the camera-ascii@2 glyph-field — the 65x31 frustum grid (raised from 33x15 for the
+  // v0.9.x aiming loop) plus its legend lines (own state + each in-view contact). This is the Body's
+  // PRIMARY spatial sense; it replaces the old single `target` token, and is what the Body flies the
+  // reticle on to call its own shot.
   field: z.string(),
   pain: BodyPainSchema,
   affordances: z.array(z.string()),
@@ -309,6 +331,12 @@ export const BodyProprioceptionSchema = z.object({
     .optional(),
 });
 
+// v0.9.x held-action firing: the Body reads its own glyph-field (target vs the boresight reticle) and
+// reports a felt firing readiness — cold → warming → hot → now. SOLUTION=now is the Body calling its
+// own shot; the assisted sear discharges the gun only when the Body says now AND the Pilot armed it AND
+// a bullet fired now would actually hit. Optional ⇒ a Body that omits the line simply never fires.
+export const BodySolutionSchema = z.enum(["cold", "warming", "hot", "now"]);
+
 export const BodyParsedOutputSchema = z.object({
   status: z.enum(["ok", "clipped", "degraded", "failed"]),
   muscle: BodyMuscleCommandSchema.optional(),
@@ -316,6 +344,7 @@ export const BodyParsedOutputSchema = z.object({
   expect: BodyExpectationSchema.optional(),
   feel: z.string().optional(),
   memory: z.string().optional(),
+  solution: BodySolutionSchema.optional(),
   errors: z.array(z.string()),
   clipped: z.boolean(),
   bodyChatter: z.string().optional(),
@@ -520,6 +549,7 @@ export type ControlInput = z.infer<typeof ControlInputSchema>;
 export type SurfaceControlSnapshot = z.infer<typeof SurfaceControlSnapshotSchema>;
 export type AircraftSnapshot = z.infer<typeof AircraftSnapshotSchema>;
 export type ReplayEvent = z.infer<typeof ReplayEventSchema>;
+export type ProjectileSnapshot = z.infer<typeof ProjectileSnapshotSchema>;
 export type ReplayFrame = z.infer<typeof ReplayFrameSchema>;
 export type MatchReplay = z.infer<typeof MatchReplaySchema>;
 export type StickCommand = z.infer<typeof StickCommandSchema>;
@@ -540,6 +570,7 @@ export type PerceptContact = z.infer<typeof PerceptContactSchema>;
 export type Percept = z.infer<typeof PerceptSchema>;
 export type BodyMuscleCommand = z.infer<typeof BodyMuscleCommandSchema>;
 export type BodyTone = z.infer<typeof BodyToneSchema>;
+export type BodySolution = z.infer<typeof BodySolutionSchema>;
 export type BodyExpectation = z.infer<typeof BodyExpectationSchema>;
 export type BodyActualResult = z.infer<typeof BodyActualResultSchema>;
 export type BodyPain = z.infer<typeof BodyPainSchema>;

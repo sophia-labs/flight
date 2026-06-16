@@ -1,27 +1,66 @@
 // Time-on-balloon metric — the first scoring rule of the embodied-Body flight benchmark.
 //
 // The balloon scenario (FILM_SCENARIO=balloon) flies the embodied Body (blue-1) at a single static red
-// balloon. A run is "good" to the degree the Body holds the balloon inside the gun solution it can
-// actually score on — so we score the run PER FRAME against the EXACT cone + range resolveWeapons uses
-// for a balloon target (src/sim/flight.ts): cone half-angle 0.42 rad, max range 2900 m. A fired shot
-// only damages the balloon when angle < coneRad AND range < maxRangeM, so "on-solution" must match that
-// gate or the metric would reward shots that can't land.
+// balloon. A run is "good" to the degree the Body holds a REAL GUN SOLUTION it can actually score on.
+//
+// v0.9.x — projectiles replace the hitscan cone, so "on-solution" now means "a bullet fired THIS frame
+// would actually intercept the balloon" — i.e. the gun axis (the ray from the muzzle along the nose)
+// passes within the balloon's hit radius (its perceivedRadiusM, ~42 m) before the round overranges.
+// For the stationary balloon that is the swept closest-approach of the boresight ray to the balloon
+// centre <= HIT_RADIUS, which is roughly "within angle atan(HIT_RADIUS/range) of dead-on" — FAR tighter
+// than the old 0.42 rad (~24deg) cone at long range. This is the exact geometry resolveWeapons /
+// stepProjectiles use (src/sim/flight.ts): a round goes where the muzzle points, not toward the target.
 //
 // Everything here is read from the recorded MatchReplay (frames + events + bodyTicks): the metric is a
 // pure fold over a replay, so it is deterministic, re-runnable, and never re-flies the sim.
 
-import { basisFromQuat, dot, length, normalize, sub } from "../sim/math";
-import type { AircraftSnapshot, MatchReplay } from "../protocol/schema";
+import { add, basisFromQuat, clamp, dot, length, normalize, scale, sub } from "../sim/math";
+import type { AircraftSnapshot, MatchReplay, Vec3 } from "../protocol/schema";
 
 const BODY_ID = "blue-1";
 const BALLOON_ID = "balloon";
 
-// The balloon weapon envelope, copied from resolveWeapons (src/sim/flight.ts). If those change, change
-// these — the metric MUST mirror what a fired shot would actually hit. Cone half-angle in radians; a
-// frame is on-solution when the angle from the nose to the balloon is <= this, i.e. onNose >= cos(it).
-export const BALLOON_CONE_HALF_ANGLE_RAD = 0.42;
+// The balloon hit geometry, mirrored from src/sim/flight.ts (MUZZLE_OFFSET_M, the balloon hit radius,
+// and the round's max range). If those change, change these — the metric MUST mirror what a fired round
+// would actually hit. HIT_RADIUS is the balloon's perceived radius (its capture radius for a round).
+export const BALLOON_HIT_RADIUS_M = 42;
 export const BALLOON_MAX_GUN_RANGE_M = 2_900;
-const ON_SOLUTION_COS = Math.cos(BALLOON_CONE_HALF_ANGLE_RAD);
+const MUZZLE_OFFSET_M = 18;
+// Retained for the bench/leaderboard header (it reports the on-solution geometry). The on-solution test
+// is now the swept ray test below, but this cone is still a useful "how dead-on" reference at the kill
+// range and is kept exported so the bench markdown + tests have a stable handle.
+export const BALLOON_CONE_HALF_ANGLE_RAD = 0.42;
+
+// Closest approach (squared) of the gun-axis segment muzzle->reach to the balloon centre. Mirrors the
+// swept hit test stepProjectiles runs on a live round (sans gravity/shooter-velocity drift — the
+// stationary-balloon on-axis aim metric the brief specifies).
+function gunAxisClosestSq(muzzle: Vec3, forward: Vec3, reachM: number, c: Vec3): number {
+  const p1 = add(muzzle, scale(forward, reachM));
+  const seg = sub(p1, muzzle);
+  const segLenSq = dot(seg, seg);
+  if (segLenSq < 1e-9) {
+    const d = sub(c, muzzle);
+    return dot(d, d);
+  }
+  const t = clamp(dot(sub(c, muzzle), seg) / segLenSq, 0, 1);
+  const closest = add(muzzle, scale(seg, t));
+  const d = sub(c, closest);
+  return dot(d, d);
+}
+
+// Would a round fired this frame intercept the balloon? The gun axis is the ray from the muzzle (nose,
+// MUZZLE_OFFSET_M ahead of the ship) along the body-forward; it must pass within HIT_RADIUS of the
+// balloon centre within the round's reach. This is the exact projectile geometry, stationary target.
+export function bulletWouldHitBalloon(body: AircraftSnapshot, balloon: AircraftSnapshot): boolean {
+  const forward = basisFromQuat(body.orientation).forward;
+  const muzzle = add(body.position, scale(forward, MUZZLE_OFFSET_M));
+  const reach = BALLOON_MAX_GUN_RANGE_M; // the round despawns past this travelled distance
+  const closestSq = gunAxisClosestSq(muzzle, forward, reach, balloon.position);
+  // The closest approach must also be AHEAD of the muzzle (a balloon behind the nose is never hit); the
+  // segment-clamped t already enforces that, but guard the degenerate "balloon behind" with a range gate.
+  const range = length(sub(balloon.position, body.position));
+  return closestSq <= BALLOON_HIT_RADIUS_M * BALLOON_HIT_RADIUS_M && range <= BALLOON_MAX_GUN_RANGE_M;
+}
 
 export interface BalloonMetrics {
   timeOnBalloonSec: number; // on-solution frame count * frameDt
@@ -86,7 +125,9 @@ export function balloonMetrics(replay: MatchReplay): BalloonMetrics {
     const onNose = dot(forward, dir);
     if (onNose > peakOnNose) peakOnNose = onNose;
 
-    const onSolution = onNose >= ON_SOLUTION_COS && range <= BALLOON_MAX_GUN_RANGE_M;
+    // On-solution = a bullet fired this frame would actually intercept the balloon (the swept gun-axis
+    // test, the exact projectile geometry) — not the old generous cone.
+    const onSolution = bulletWouldHitBalloon(body, balloon);
     if (onSolution) {
       onSolutionFrames += 1;
       if (timeToFirstSolutionSec === null) timeToFirstSolutionSec = frame.time;

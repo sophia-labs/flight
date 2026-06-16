@@ -525,17 +525,18 @@ async function main(): Promise<void> {
     console.error(`collage: ${scene.name}  (${markerPayload.length} marker(s))`);
   }
 
-  // --- acuity variants (text, into the batch folder): the busy edge scene at 33x15 (default @2 grid)
-  // vs an 81x37 hi-res grid, to show how much acuity a bigger grid buys. ---
+  // --- acuity variants (text, into the batch folder): the busy edge scene at the default @2 grid
+  // (65x31, v0.9.x aiming-loop acuity) vs an 81x37 hi-res grid, to show how much acuity a bigger grid
+  // buys. ---
   const acuityScene = scenes.find((s) => s.name === "06-target-edge-right-mid")!;
   {
     const { self, world, device } = buildWorld(acuityScene);
     const frame = cameraSensor.sense(device, world, self);
     const lo = cameraAsciiEncoderV2.encode(frame);
     const hi = cameraAsciiEncoderV2Hi.encode(frame);
-    writeFileSync(`${BATCH_DIR}/acuity-lo-33x15.ascii.txt`, `# camera-ascii@2 (33x15), ${acuityScene.note}\n${lo.text}\n`);
+    writeFileSync(`${BATCH_DIR}/acuity-lo-65x31.ascii.txt`, `# camera-ascii@2 (65x31), ${acuityScene.note}\n${lo.text}\n`);
     writeFileSync(`${BATCH_DIR}/acuity-hi-81x37.ascii.txt`, `# hi-res encoder (81x37), ${acuityScene.note}\n${hi.text}\n`);
-    console.error("acuity variants (text): 33x15 vs 81x37");
+    console.error("acuity variants (text): 65x31 vs 81x37");
   }
 
   await browser.close();

@@ -21,6 +21,7 @@ import type {
   AircraftModel,
   AircraftState,
   FlightMetrics,
+  Projectile,
   StepResult,
   SurfaceAerodynamicState,
 } from "./types";
@@ -41,6 +42,87 @@ const MAX_BODY_RATE_RAD_S = 5.5;
 // Specific fuel consumption (kg burned per N of thrust per second). Sized so an ~1800 kg tank gives
 // ~400 s of full-throttle endurance — visible drain over a long fight, not match-ending in a short one.
 const SFC = 6e-5;
+
+// --- v0.9.x simulated projectiles -------------------------------------------------------------------
+// Real bullets replace the old instant hitscan cone. On a fired shot the gun spawns a round at the ship
+// nose travelling MUZZLE_SPEED along the gun axis plus the shooter's own velocity; the round integrates
+// pos += vel*dt every step and is swept against enemy targets. A 14deg-off lob no longer "hits" a fat
+// balloon — the bullet flies past it, because the round goes where the muzzle pointed, not where the
+// target is.
+const MUZZLE_SPEED = 900; // m/s muzzle velocity (added to shooter velocity)
+const PROJECTILE_LIFETIME_S = 2.5; // despawn after this many seconds of flight
+const PROJECTILE_MAX_RANGE_M = 2_900; // despawn past this travelled distance (matches the old balloon reach)
+const WEAPON_COOLDOWN_S = 2.65; // per-shot cadence — unchanged from the hitscan gun
+const MUZZLE_OFFSET_M = 18; // round spawns this far ahead of the ship origin (the nose)
+const BALLOON_HIT_RADIUS_M = 42; // a fat balloon target's capture radius (its perceivedRadiusM)
+const AIRCRAFT_HIT_RADIUS_M = 8; // a small airframe's capture radius
+const PROJECTILE_DAMAGE = 26; // damage a connecting round deals (one good burst pops the 12-hp balloon)
+
+// The capture radius a round must pass within to register a hit on a target. A balloon uses its big
+// perceived size; an aircraft is a small point target. Mirrored by the on-solution geometry in
+// src/eval/balloonMetrics.ts — change both together.
+export function targetHitRadiusM(target: AircraftState): number {
+  if (target.static === true) return target.perceivedRadiusM ?? BALLOON_HIT_RADIUS_M;
+  return AIRCRAFT_HIT_RADIUS_M;
+}
+
+// The RETICLE: a fixed angular aim circle around the gun axis (the boresight +). It is deliberately
+// WIDER than the round's hit radius, so a target sitting inside the reticle is NOT a guaranteed hit —
+// the Body still has to centre it. This is the assisted sear's gate: it blocks a SOLUTION=now called at
+// empty sky (nothing in the reticle), but it does NOT aim for the Body. Sloppy "now" inside the reticle
+// can still miss; a centred one connects. Skill stays in the seat. (~3.4deg half-angle ≈ a generous
+// gunsight pipper — at 1 km that is a ~60 m circle vs the round's much tighter capture.)
+export const RETICLE_HALF_ANGLE_RAD = 0.06; // ~3.4deg
+
+// Is any enemy target inside the reticle (within RETICLE_HALF_ANGLE_RAD of the gun axis, ahead, and in
+// range)? The third key of the assisted sear: the Body may only call its own shot at something actually
+// in the reticle — not at empty sky — but being in the reticle does not guarantee the round lands.
+// Pure geometry — no mutation/RNG — so it is deterministic and re-runnable.
+export function targetInReticle(shooter: AircraftState, aircraft: AircraftState[]): boolean {
+  const forward = basisFromQuat(shooter.orientation).forward;
+  const muzzle = add(shooter.position, scale(forward, MUZZLE_OFFSET_M));
+  const reach = Math.min(PROJECTILE_MAX_RANGE_M, MUZZLE_SPEED * PROJECTILE_LIFETIME_S);
+  for (const target of aircraft) {
+    if (target.team === shooter.team || target.health <= 0 || target.id === shooter.id) continue;
+    const toTarget = sub(target.position, muzzle);
+    const range = length(toTarget);
+    if (range < 1 || range > reach) continue;
+    // Reticle gate: the target is inside the fixed reticle half-angle, widened by the target's own
+    // angular size (a fat balloon fills more of the pipper, so its EDGE entering the circle counts).
+    const angularRadius = Math.atan2(targetHitRadiusM(target), range);
+    const onAxis = dot(forward, normalize(toTarget));
+    if (onAxis >= Math.cos(RETICLE_HALF_ANGLE_RAD + angularRadius)) return true;
+  }
+  return false;
+}
+
+export {
+  MUZZLE_SPEED,
+  PROJECTILE_LIFETIME_S,
+  PROJECTILE_MAX_RANGE_M,
+  WEAPON_COOLDOWN_S,
+  MUZZLE_OFFSET_M,
+  PROJECTILE_DAMAGE,
+};
+
+// Closest approach (squared) of the swept segment p0->p1 to a fixed point c. A fast bullet can step
+// past a small target in one frame, so we test the whole segment, not just the endpoints — no tunnelling.
+function closestApproachSqToPoint(
+  p0: ReturnType<typeof vec3>,
+  p1: ReturnType<typeof vec3>,
+  c: ReturnType<typeof vec3>,
+): number {
+  const seg = sub(p1, p0);
+  const segLenSq = dot(seg, seg);
+  if (segLenSq < 1e-9) {
+    const d = sub(c, p0);
+    return dot(d, d);
+  }
+  const t = clamp(dot(sub(c, p0), seg) / segLenSq, 0, 1);
+  const closest = add(p0, scale(seg, t));
+  const d = sub(c, closest);
+  return dot(d, d);
+}
 
 // The default airframe's compiled model — the calibration baseline. Computed via compileAirframe (one
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
@@ -130,6 +212,8 @@ export function stepSimulation(
   aircraft: AircraftState[],
   controlsById: Record<string, ControlInput>,
   dt: number,
+  projectiles: Projectile[] = [],
+  time = 0,
 ): StepResult {
   const events: ReplayEvent[] = [];
 
@@ -155,9 +239,63 @@ export function stepSimulation(
     }
   }
 
-  events.push(...resolveWeapons(aircraft));
+  // 1) Integrate the rounds already in flight (and resolve their hits) against this frame's geometry.
+  const surviving = stepProjectiles(projectiles, aircraft, dt, time, events);
+  // 2) Spawn new rounds for ships that fired this step; the fresh rounds fly next step.
+  const spawned = resolveWeapons(aircraft, time, events);
+  surviving.push(...spawned);
 
-  return { aircraft, events };
+  return { aircraft, events, projectiles: surviving };
+}
+
+// Integrate each live round one step, sweep it against enemy targets, apply damage on the closest
+// intercept, and drop rounds that hit / time out / overrange. Mutates `events` (pushes 'hit'); returns
+// the survivors.
+function stepProjectiles(
+  projectiles: Projectile[],
+  aircraft: AircraftState[],
+  dt: number,
+  time: number,
+  events: ReplayEvent[],
+): Projectile[] {
+  const survivors: Projectile[] = [];
+  for (const round of projectiles) {
+    const p0 = round.position;
+    const p1 = add(p0, scale(round.velocity, dt));
+    const stepLen = length(sub(p1, p0));
+
+    // Swept hit test against every enemy target with health, keeping the closest intercept along the
+    // segment so a round can't pass two contacts and credit the wrong one.
+    let hit: { target: AircraftState; distSq: number } | undefined;
+    for (const target of aircraft) {
+      if (target.team === round.team || target.health <= 0 || target.id === round.ownerId) continue;
+      const radius = targetHitRadiusM(target);
+      const distSq = closestApproachSqToPoint(p0, p1, target.position);
+      if (distSq <= radius * radius && (!hit || distSq < hit.distSq)) {
+        hit = { target, distSq };
+      }
+    }
+
+    if (hit) {
+      const target = hit.target;
+      target.health = clamp(target.health - PROJECTILE_DAMAGE, 0, 100);
+      events.push({
+        type: "hit",
+        actorId: round.ownerId,
+        targetId: target.id,
+        message: `round from ${round.ownerId} hits ${target.callsign} for ${PROJECTILE_DAMAGE}`,
+        origin: p0,
+        impact: target.position,
+      });
+      continue; // round is consumed
+    }
+
+    const travelled = round.distanceTravelledM + stepLen;
+    const age = time + dt - round.spawnTime;
+    if (travelled > PROJECTILE_MAX_RANGE_M || age > PROJECTILE_LIFETIME_S) continue; // despawn
+    survivors.push({ ...round, position: p1, distanceTravelledM: travelled });
+  }
+  return survivors;
 }
 
 function stepAircraft(
@@ -293,69 +431,59 @@ function stepAircraft(
   };
 }
 
-function resolveWeapons(aircraft: AircraftState[]): ReplayEvent[] {
-  const events: ReplayEvent[] = [];
+// Spawn a real round for any ship that pulls the trigger this step. The round is born at the muzzle
+// (nose) travelling MUZZLE_SPEED along the gun axis plus the shooter's own velocity — it goes where the
+// nose points, NOT toward the target, so aim now matters. Fires on a rising trigger edge gated by the
+// per-shot cooldown (held-true ⇒ one round per cooldown, not an auto-stream). Returns the new rounds;
+// the 'shot' event is emitted here, while 'hit'/'miss' are decided downstream when the round arrives.
+function resolveWeapons(
+  aircraft: AircraftState[],
+  time: number,
+  events: ReplayEvent[],
+): Projectile[] {
+  const spawned: Projectile[] = [];
 
   for (const shooter of aircraft) {
-    if (!shooter.controls.trigger || shooter.weaponCooldown > 0 || shooter.health <= 0) {
+    const trigger = shooter.controls.trigger === true;
+    shooter.prevTrigger = trigger; // tracked for the held-action sear (Phase 2); not the fire gate here
+
+    // Fire when the trigger is held AND the per-shot cooldown is ready — the cooldown paces a held
+    // trigger to one round per WEAPON_COOLDOWN_S (it does not auto-stream every frame).
+    if (!trigger || shooter.weaponCooldown > 0 || shooter.health <= 0) {
       continue;
     }
 
-    shooter.weaponCooldown = 2.65;
-    const target = nearestOpponent(shooter, aircraft);
-    if (!target) {
-      continue;
-    }
-
-    const toTarget = sub(target.position, shooter.position);
-    const range = length(toTarget);
-    const direction = normalize(toTarget);
+    shooter.weaponCooldown = WEAPON_COOLDOWN_S;
     const forward = basisFromQuat(shooter.orientation).forward;
-    const angle = Math.acos(clamp(dot(direction, forward), -1, 1));
-    const origin = add(shooter.position, scale(forward, 18));
-    const impact = target.position;
+    const muzzle = add(shooter.position, scale(forward, MUZZLE_OFFSET_M));
+    // Bullet velocity in the world frame: gun axis * muzzle speed + the platform's own velocity.
+    const velocity = add(scale(forward, MUZZLE_SPEED), shooter.velocity);
 
+    // Deterministic id: a ship fires at most one round per step and each step has a unique time, so
+    // owner+time is unique across a match AND reproducible run-to-run (no module-level counter that
+    // would drift between matches and break replay-determinism).
+    spawned.push({
+      id: `bullet-${shooter.id}-${time.toFixed(4)}`,
+      position: muzzle,
+      velocity,
+      ownerId: shooter.id,
+      team: shooter.team,
+      spawnTime: time,
+      distanceTravelledM: 0,
+    });
+
+    const target = nearestOpponent(shooter, aircraft);
     events.push({
       type: "shot",
       actorId: shooter.id,
-      targetId: target.id,
+      ...(target ? { targetId: target.id } : {}),
       message: `${shooter.callsign} fires`,
-      origin,
-      impact,
+      origin: muzzle,
+      ...(target ? { impact: target.position } : {}),
     });
-
-    // A fat balloon is a generous target: widen the gun cone + range so a weak shooter who lines up
-    // roughly on it can actually pop it (gettable, not frustrating). Its angular size scales the cone,
-    // so a ~50 m balloon subtends far more sky than a 16 m airframe. Aircraft keep the tight default.
-    const balloon = target.static === true;
-    const coneRad = balloon ? 0.42 : 0.155;
-    const maxRangeM = balloon ? 2_900 : 1_180;
-    if (range < maxRangeM && angle < coneRad) {
-      const damage = balloon
-        ? clamp(30 * (1 - angle / (coneRad + 0.06)), 12, 30)
-        : clamp(36 * (1 - range / 1_420) * (1 - angle / 0.19), 7, 28);
-      target.health = clamp(target.health - damage, 0, 100);
-      events.push({
-        type: "hit",
-        actorId: shooter.id,
-        targetId: target.id,
-        message: `${shooter.callsign} scores ${Math.round(damage)} damage on ${target.callsign}`,
-        origin,
-        impact,
-      });
-    } else {
-      events.push({
-        type: "miss",
-        actorId: shooter.id,
-        targetId: target.id,
-        message: `${shooter.callsign} misses ${target.callsign}`,
-        origin,
-        impact,
-      });
-    }
   }
 
-  return events;
+  return spawned;
 }
 
 function nearestOpponent(shooter: AircraftState, aircraft: AircraftState[]) {

@@ -129,6 +129,10 @@ export interface AircraftState {
   // Perceived size override (m). When set, perception uses this instead of AIRFRAME_RADIUS_M so a fat
   // balloon shows as a big glyph from far away and is acquirable by a weak shooter. Static config.
   perceivedRadiusM?: number;
+  // v0.9.x firing edge: the trigger level on the previous step. The gun discharges on a rising edge
+  // (false→true) gated by cooldown, so a held trigger fires one round per cooldown rather than auto-
+  // repeating every frame. Runtime-only; not copied into AircraftSnapshot. Absent ⇒ treated as false.
+  prevTrigger?: boolean;
 }
 
 export interface FlightMetrics {
@@ -139,9 +143,26 @@ export interface FlightMetrics {
   stalled: boolean;
 }
 
+// v0.9.x simulated projectile (a bullet in flight). Spawned at the muzzle on a fired shot, integrated
+// pos += vel*dt every physics step, swept against enemy targets for a hit, and despawned on hit /
+// lifetime / max-range. Runtime-only state carried across steps by the match loop (NOT part of the
+// serialized AircraftState); a per-frame ProjectileSnapshot is what lands on the replay.
+export interface Projectile {
+  id: string;
+  position: Vec3;
+  velocity: Vec3;
+  ownerId: string;
+  team: Team;
+  spawnTime: number;
+  distanceTravelledM: number;
+}
+
 export interface StepResult {
   aircraft: AircraftState[];
   events: ReplayEvent[];
+  // Live projectiles after this step (post-integration, post-despawn). The match loop threads the
+  // previous step's surviving rounds back in as input and records these onto the frame.
+  projectiles: Projectile[];
 }
 
 export function surfaceHingeDeflectionRad(surface: AeroSurface, controls: ControlInput): number {

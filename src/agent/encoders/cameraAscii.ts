@@ -387,11 +387,14 @@ export const cameraAsciiEncoder: Encoder = makeCameraAsciiEncoder("camera-ascii@
 //   * the HORIZON is the TRUE sky/ground boundary per column, glyph by the local boundary slope;
 //   * contacts are positioned glyphs at their true projected cell (size-coded), painted on top;
 //   * plus the two legend fixes: clock dead-zone and legend gated to the rectangular viewport.
-// 33x15 is the default acuity; resolution IS the acuity knob — cameraAsciiEncoderV2Hi is the SAME
-// projection at a finer grid (81x37), proving a high-res variant is just a resolution change.
+// 65x31 is the default acuity (raised from 33x15 for the v0.9.x aiming loop: the Body now flies the
+// reticle onto the target and calls its own shot, so it needs the spatial acuity to see the target
+// glyph creep onto the centre boresight cell — a coarse grid quantised the pipper too far to aim by).
+// Odd dimensions keep a single true CENTRE column+row under the boresight +. Resolution IS the acuity
+// knob — cameraAsciiEncoderV2Hi is the SAME projection at an even finer grid (81x37).
 export const cameraAsciiEncoderV2: Encoder = makeCameraAsciiEncoder("camera-ascii@2", {
-  width: 33,
-  height: 15,
+  width: 65,
+  height: 31,
   clockDeadzoneNdc: CLOCK_DEADZONE_NDC,
   legendGateToViewport: true,
   projection: DEFAULT_PROJECTION,

@@ -25,8 +25,12 @@ import {
 } from "../body/runtime";
 import { selectCameraDevice } from "../sim/mountedSensor";
 import { stepSimulation } from "../sim/flight";
-import { toSnapshot, type AircraftState } from "../sim/types";
+import { toSnapshot, type AircraftState, type Projectile } from "../sim/types";
 import type { AgentEntry, MatchConfig } from "./config";
+
+function projectileSnapshot(round: Projectile) {
+  return { id: round.id, position: round.position, velocity: round.velocity, team: round.team };
+}
 
 function snapshot(
   index: number,
@@ -34,6 +38,7 @@ function snapshot(
   turn: number,
   aircraft: AircraftState[],
   events: ReplayEvent[],
+  projectiles: Projectile[] = [],
 ): ReplayFrame {
   return {
     index,
@@ -41,6 +46,8 @@ function snapshot(
     turn,
     aircraft: aircraft.map(toSnapshot),
     events,
+    // Optional + only when rounds are airborne, so frames with no bullets stay byte-identical.
+    ...(projectiles.length > 0 ? { projectiles: projectiles.map(projectileSnapshot) } : {}),
   };
 }
 
@@ -102,6 +109,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
   let time = 0;
   let frameIndex = 0;
   let turnsRun = 0;
+  let projectiles: Projectile[] = []; // live rounds, carried across steps by the physics loop
 
   frames.push(snapshot(frameIndex, time, 0, aircraft, []));
   frameIndex += 1;
@@ -175,14 +183,15 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
           controlsById[ship.id] = adapterFor(action.kind).controlFor(action, ship);
         }
       }
-      const result = stepSimulation(aircraft, controlsById, config.frameDt);
+      const result = stepSimulation(aircraft, controlsById, config.frameDt, projectiles, time);
+      projectiles = result.projectiles;
       time += config.frameDt;
       for (const [agentId, pending] of Object.entries(pendingBodyTicks)) {
         const ship = result.aircraft.find((candidate) => candidate.id === agentId);
         const state = bodyStates[agentId];
         if (ship && state) bodyTicks.push(finishBodyTick(pending, state, ship));
       }
-      frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events));
+      frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events, projectiles));
       frameIndex += 1;
     }
 

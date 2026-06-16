@@ -1,4 +1,10 @@
-import type { BodyExpectation, BodyMuscleCommand, BodyParsedOutput, BodyTone } from "../protocol/schema";
+import type {
+  BodyExpectation,
+  BodyMuscleCommand,
+  BodyParsedOutput,
+  BodySolution,
+  BodyTone,
+} from "../protocol/schema";
 import type { BodyManifest } from "./manifest";
 
 const FIELD_RE = /([A-Z]+)\s*=\s*([^\s]+)/gi;
@@ -111,6 +117,16 @@ function parseExpect(line: string | undefined, errors: string[]): BodyExpectatio
   };
 }
 
+// SOLUTION <cold|warming|hot|now> — the Body's felt firing readiness, read from its glyph-field (the
+// target glyph against the boresight reticle). Optional: a Body that omits it (or emits garbage) simply
+// reports no solution and never calls a shot. Not an error to omit — it is an aiming verb, not a law.
+function parseSolution(line: string | undefined): BodySolution | undefined {
+  if (!line) return undefined;
+  const [, raw] = /^SOLUTION\s+(\S+)/i.exec(line.trim()) ?? [];
+  const levels = ["cold", "warming", "hot", "now"] as const;
+  return levels.find((candidate) => candidate === raw?.toLowerCase());
+}
+
 function parseRest(line: string | undefined, keyword: string, errors: string[], maxWords: number): string | undefined {
   if (!line) {
     errors.push(`missing ${keyword}`);
@@ -137,13 +153,18 @@ export function parseBodyOutput(raw: string, manifest: BodyManifest): BodyParsed
   const expectLine = lineWith(lines, "EXPECT");
   const feelLine = lineWith(lines, "FEEL");
   const memLine = lineWith(lines, "MEM");
+  const solutionLine = lineWith(lines, "SOLUTION");
 
   const parsedMuscle = parseMuscle(muscleLine, manifest, errors);
   const tone = parseTone(toneLine, errors);
   const expect = parseExpect(expectLine, errors);
   const feel = parseRest(feelLine, "FEEL", errors, 12);
   const memory = parseRest(memLine, "MEM", errors, 7);
-  const recognized = new Set([muscleLine, toneLine, expectLine, feelLine, memLine].filter(Boolean));
+  const solution = parseSolution(solutionLine); // optional aiming verb — never an error to omit
+  // SOLUTION is a recognized line (when present) so it is not flagged as chatter.
+  const recognized = new Set(
+    [muscleLine, toneLine, expectLine, feelLine, memLine, solutionLine].filter(Boolean),
+  );
   const chatter = lines.filter((line) => !recognized.has(line)).join("\n");
   if (chatter) errors.push("body_chatter");
 
@@ -152,6 +173,7 @@ export function parseBodyOutput(raw: string, manifest: BodyManifest): BodyParsed
       status: "failed",
       errors,
       clipped: parsedMuscle.clipped,
+      ...(solution ? { solution } : {}),
       ...(chatter ? { bodyChatter: chatter } : {}),
     };
   }
@@ -167,6 +189,7 @@ export function parseBodyOutput(raw: string, manifest: BodyManifest): BodyParsed
     ...(expect ? { expect } : {}),
     ...(feel ? { feel } : {}),
     ...(memory !== undefined ? { memory } : {}),
+    ...(solution ? { solution } : {}),
     errors,
     clipped: parsedMuscle.clipped,
     ...(chatter ? { bodyChatter: chatter } : {}),

@@ -59,6 +59,21 @@ function contactAhead(contact: FieldContact | undefined): boolean {
   return contact.clock === 12 || contact.clock === 11 || contact.clock === 1;
 }
 
+// SOLUTION: the scripted Body reads its own glyph-field (the legend clock + range against the boresight
+// reticle) and calls its firing readiness — the v0.9.x aiming loop in the fast seat. 12 o'clock means
+// the contact sits in the centre cell over the boresight + (the legend's clock dead-zone IS the
+// reticle); the closer it is, the hotter the call. The Pilot only ARMS — the Body decides WHEN.
+//   cold    : no contact, or off to the side (not near the reticle)
+//   warming : on the nose but still far
+//   hot     : on the nose, closing
+//   now     : on the nose AND inside the round's reach — FIRE
+function solutionCall(contact: FieldContact | undefined): "cold" | "warming" | "hot" | "now" {
+  if (!contact || contact.clock !== 12) return "cold"; // not on the boresight reticle
+  if (contact.rangeM <= 2_900) return "now"; // dead-on and in reach — call the shot
+  if (contact.rangeM <= 4_200) return "hot";
+  return "warming";
+}
+
 // FIELD-FEED: vision is FOV-limited, so the contact often leaves frame. We remember which way it last
 // sat (a `search_left`/`search_right` token in MEM) and keep a gentle turn that way to re-acquire,
 // rather than drifting dead-straight forever as a target-token-less Body otherwise would.
@@ -173,11 +188,15 @@ export const scriptedFixedWingBodyModel: BodyModel = async ({ pilotIntent, propr
 
   const speedExpect = pitch < 0 && push >= 4 ? "recover" : push <= 2 ? "bleed" : "stable";
   const marginExpect = dangerousMargin || pitch < 0 ? "better" : "stable";
+  // Call the shot from the field-read (only matters when the Pilot has armed weapons free; the sear
+  // still gates it on a real target in the reticle). The Body owns the firing decision here.
+  const solution = solutionCall(target);
 
   return [
     `MUSCLE ROLL=${roll} PITCH=${pitch} YAW=${yaw} PUSH=${push}`,
     `TONE ${tone} ${toneLevel}`,
     `EXPECT ROLL=${expectedRoll(roll)} PITCH=${expectedPitch(pitch)} SPEED=${speedExpect} MARGIN=${marginExpect}`,
+    `SOLUTION ${solution}`,
     `FEEL ${feel}`,
     `MEM ${nextMemory}`.trim(),
   ].join("\n");

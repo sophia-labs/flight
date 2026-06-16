@@ -96,7 +96,9 @@ const bodyMaxRetries = Number(process.env.BODY_MAX_RETRIES ?? 2);
 const bodyEmptyRetries = Number(process.env.BODY_EMPTY_RETRIES ?? 1);
 const sensorId = process.env.FILM_SENSOR_ID ?? "cockpit-cam";
 const scenario = process.env.FILM_SCENARIO ?? "duel"; // "duel" (default) | "balloon"
-const label = scripted ? "Pursuit" : (model.split("/").pop() ?? model);
+// FILM_LABEL overrides the subtitle speaker name — useful with --replay-in, where the filmed model is
+// the one baked into the replay, not the (unused) positional model arg. Falls back to the model slug.
+const label = process.env.FILM_LABEL ?? (scripted ? "Pursuit" : (model.split("/").pop() ?? model));
 
 function parseActionMode(raw: string): ActionMode {
   if (raw in actionSpecs) return raw as ActionMode;
@@ -210,6 +212,14 @@ interface ShipView {
   balloon: boolean; // static balloon target → rendered as a sphere, not an airframe
 }
 
+// A live bullet in flight, drawn as a bright tracer streak (a short segment along its velocity).
+interface TracerView {
+  id: string;
+  team: "blue" | "red";
+  x: number; y: number; z: number; // tracer head (current position)
+  vx: number; vy: number; vz: number; // velocity (defines the streak direction)
+}
+
 // Pull the W x H camera-ascii@2 glyph grid out of its bordered viewport text. The text is: header,
 // top border "+---+", H grid rows "|...|", bottom border, then footer/legend. We return ONLY the grid
 // cell rows (between the "|" borders) — the registered overlay places each cell at its frustum rect.
@@ -232,6 +242,7 @@ interface FilmFrame {
   // cinema-only payload (ignored by the ascii renderer):
   selfId: string;
   aircraft: ShipView[];
+  tracers: TracerView[]; // live projectiles drawn as tracer streaks
   eye: { x: number; y: number; z: number };
   fwd: { x: number; y: number; z: number };
   up: { x: number; y: number; z: number };
@@ -299,6 +310,20 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
         alive: s.health > 0,
         balloon: s.static === true,
       })),
+      // Live tracers: advance the recorded round to the interpolation time so the streak flies smoothly
+      // between replay frames (the round is a straight, constant-velocity segment, so a linear nudge by
+      // (t - frameTime) is exact). Rounds only exist on the segment frame fa.
+      tracers: (fa.projectiles ?? []).map((p) => {
+        const dtLocal = t - fa.time;
+        return {
+          id: p.id,
+          team: p.team,
+          x: p.position.x + p.velocity.x * dtLocal,
+          y: p.position.y + p.velocity.y * dtLocal,
+          z: p.position.z + p.velocity.z * dtLocal,
+          vx: p.velocity.x, vy: p.velocity.y, vz: p.velocity.z,
+        };
+      }),
       eye: pose.eye,
       fwd: pose.boresight,
       up: pose.basis.up,
@@ -439,6 +464,38 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
       return { group:g, glow, balloon:true };
     }
 
+    // Tracer pool: each live round is a short bright streak from its head back along -velocity. We keep
+    // a reusable pool of line meshes keyed by round id and hide the ones not present this frame.
+    const tracers = {};
+    const TRACER_LEN = 0.34; // streak length in scene units (S-scaled metres); a stubby bright dash
+    function tracerMesh(team){
+      const color = team === 'blue' ? '#bfe6ff' : '#ffd2a8';
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.05,8,8),
+        new THREE.MeshBasicMaterial({color:'#ffffff'}));
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color, transparent:true, opacity:0.95}));
+      const g = new THREE.Group(); g.add(line); g.add(head); scene.add(g);
+      return { group:g, line, head, geo };
+    }
+    function renderTracers(list){
+      const seen = new Set();
+      for (const tr of list){
+        seen.add(tr.id);
+        let t = tracers[tr.id]; if(!t){ t = tracerMesh(tr.team); tracers[tr.id] = t; }
+        const hx=tr.x*S, hy=tr.y*S, hz=tr.z*S;
+        const vlen = Math.hypot(tr.vx, tr.vy, tr.vz) || 1;
+        const ux=tr.vx/vlen, uy=tr.vy/vlen, uz=tr.vz/vlen; // unit velocity
+        const pos = t.geo.attributes.position.array;
+        pos[0]=hx; pos[1]=hy; pos[2]=hz;                                  // head
+        pos[3]=hx-ux*TRACER_LEN; pos[4]=hy-uy*TRACER_LEN; pos[5]=hz-uz*TRACER_LEN; // tail
+        t.geo.attributes.position.needsUpdate = true;
+        t.head.position.set(hx, hy, hz);
+        t.group.visible = true;
+      }
+      for (const id in tracers){ if(!seen.has(id)) tracers[id].group.visible = false; }
+    }
+
     window.renderFrame = (f) => {
       let cx=0, cy=0, cz=0, n=0;
       for (const a of f.aircraft){
@@ -455,6 +512,7 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
         }
         cx+=a.x*S; cy+=a.y*S; cz+=a.z*S; n++;
       }
+      renderTracers(f.tracers ?? []);
       pilotCam.fov = f.fovDeg; pilotCam.updateProjectionMatrix();
       pilotCam.position.set(f.eye.x*S, f.eye.y*S, f.eye.z*S);
       pilotCam.up.set(f.up.x, f.up.y, f.up.z);
