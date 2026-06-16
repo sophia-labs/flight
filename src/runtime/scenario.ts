@@ -10,6 +10,7 @@ import { perfectSensor } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
 import type { Airframe, MatchReplay, Vec3 } from "../protocol/schema";
 import { compileAirframe, defaultAirframe } from "../sim/airframe";
+import { fullFuelByTank } from "../sim/mass";
 import { length, normalize, quatLookRotation, scale, sub, vec3 } from "../sim/math";
 import type { AircraftState, FlightMetrics } from "../sim/types";
 import { runMatch } from "./match";
@@ -55,6 +56,7 @@ export function createInitialAircraft(
       metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: 1_080 },
       angularVelocity: vec3(0, 0, 0),
       fuelKg: blue.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(blue.model),
       devices: blue.devices,
       airframe: blueAirframe,
     },
@@ -73,6 +75,118 @@ export function createInitialAircraft(
       metrics: { ...INITIAL_METRICS, airspeed: length(redVelocity), altitude: 1_020 },
       angularVelocity: vec3(0, 0, 0),
       fuelKg: red.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(red.model),
+      devices: red.devices,
+      airframe: redAirframe,
+    },
+  ];
+}
+
+// A close stern-start duel for live Body iteration: both aircraft are dynamic and flown by whatever
+// agents the MatchConfig attaches, but blue starts with a real gunsight solution on red. This keeps
+// prompt/setup experiments cheap: if the Body reads the field correctly, a projectile should be born
+// immediately and the replay can prove whether the simulated round actually connects.
+export function createDuelGunStartAircraft(
+  blueAirframe: Airframe = defaultAirframe(),
+  redAirframe: Airframe = defaultAirframe(),
+): AircraftState[] {
+  const blueVelocity = vec3(0, 0, -165);
+  const redVelocity = vec3(0, 0, -135);
+
+  const blue = compileAirframe(blueAirframe);
+  const red = compileAirframe(redAirframe);
+
+  return [
+    {
+      id: "blue-1",
+      callsign: "Blue Kite",
+      team: "blue",
+      color: "#4da3ff",
+      position: vec3(0, 1_260, 900),
+      velocity: blueVelocity,
+      orientation: quatLookRotation(blueVelocity),
+      controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.92, trigger: false },
+      health: 100,
+      weaponCooldown: 0,
+      model: blue.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: 1_260 },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: blue.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(blue.model),
+      devices: blue.devices,
+      airframe: blueAirframe,
+    },
+    {
+      id: "red-1",
+      callsign: "Red Anvil",
+      team: "red",
+      color: "#ff6b61",
+      position: vec3(0, 1_260, 560),
+      velocity: redVelocity,
+      orientation: quatLookRotation(redVelocity),
+      controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.84, trigger: false },
+      health: 100,
+      weaponCooldown: 0,
+      model: red.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(redVelocity), altitude: 1_260 },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: red.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(red.model),
+      devices: red.devices,
+      airframe: redAirframe,
+    },
+  ];
+}
+
+// A less-instant live-Body duel: blue starts in a stern-quarter pursuit rather than already welded to
+// the crosshair, red is dynamic and turning, and blue's gun starts cold for a few seconds. The first
+// shot should therefore happen after a visible chase/lineup instead of on frame one.
+export function createDuelDogfightStartAircraft(
+  blueAirframe: Airframe = defaultAirframe(),
+  redAirframe: Airframe = defaultAirframe(),
+): AircraftState[] {
+  const blueVelocity = vec3(12, 0, -165);
+  const redVelocity = vec3(-12, 0, -140);
+
+  const blue = compileAirframe(blueAirframe);
+  const red = compileAirframe(redAirframe);
+
+  return [
+    {
+      id: "blue-1",
+      callsign: "Blue Kite",
+      team: "blue",
+      color: "#4da3ff",
+      position: vec3(-80, 1_260, 1_060),
+      velocity: blueVelocity,
+      orientation: quatLookRotation(blueVelocity),
+      controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.94, trigger: false },
+      health: 100,
+      weaponCooldown: 0,
+      model: blue.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: 1_260 },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: blue.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(blue.model),
+      devices: blue.devices,
+      airframe: blueAirframe,
+    },
+    {
+      id: "red-1",
+      callsign: "Red Anvil",
+      team: "red",
+      color: "#ff6b61",
+      position: vec3(20, 1_260, 380),
+      velocity: redVelocity,
+      orientation: quatLookRotation(redVelocity),
+      controls: { pitch: 0.02, roll: -0.1, yaw: -0.04, throttle: 0.86, trigger: false },
+      health: 100,
+      weaponCooldown: 2.8,
+      model: red.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(redVelocity), altitude: 1_260 },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: red.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(red.model),
       devices: red.devices,
       airframe: redAirframe,
     },
@@ -117,18 +231,18 @@ export const staticController: Controller = async () => ({
 // must navigate to + pop a hovering red balloon. "Longer distance + more flight time" — the Body manages
 // energy by cruising/diving but climbs poorly, so the balloon is placed level-to-slightly-above.
 export function createBalloonScenarioAircraft(): AircraftState[] {
-  // Blue Body up and to one side; balloon ~3.2 km ahead and ~110 m BELOW (a shallow dive — the Body
+  // Blue Body up and to one side; balloon ~2.8 km ahead and ~100 m BELOW (a shallow dive — the Body
   // manages energy by diving and cruises well, but climbs poorly, so the target sits a touch lower than
   // its start, never above it). With REAL projectiles (v0.9.x) the gun is no longer a forgiving cone, so
-  // the Body must enter the ~2.9 km round-reach while STILL lined up — before its dive reflex scatters
-  // the geometry. 3.2 km (was 4.3 km under the old hitscan cone) keeps the clean early on-nose run
-  // overlapping the in-range window. The Phase-2 assisted sear (the Body calling its own SOLUTION=now
-  // only when the round would truly intercept) is what then converts that alignment into a reliable pop.
+  // the Body must be inside the ~2.9 km round-reach while STILL lined up — before its dive reflex
+  // scatters the geometry. 2.8 km gives the assisted sear several early aligned ticks instead of a
+  // single knife-edge frame.
   const blueStart = vec3(-2_750, 1_320, 2_550);
-  const balloonAt = vec3(-397, 1_208, 384);
+  const balloonAt = vec3(-691, 1_222, 655);
   const heading = sub(balloonAt, blueStart); // point the Body roughly at the balloon at spawn
   const blueVelocity = scale(normalize(heading), 150);
 
+  const blue = compileAirframe(defaultAirframe());
   return [
     {
       id: "blue-1",
@@ -141,11 +255,12 @@ export function createBalloonScenarioAircraft(): AircraftState[] {
       controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.92, trigger: false },
       health: 100,
       weaponCooldown: 0.4,
-      model: compileAirframe(defaultAirframe()).model,
+      model: blue.model,
       metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: blueStart.y },
       angularVelocity: vec3(0, 0, 0),
-      fuelKg: compileAirframe(defaultAirframe()).model.fuelCapacityKg,
-      devices: compileAirframe(defaultAirframe()).devices,
+      fuelKg: blue.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(blue.model),
+      devices: blue.devices,
       airframe: defaultAirframe(),
     },
     createBalloonTarget(balloonAt),
