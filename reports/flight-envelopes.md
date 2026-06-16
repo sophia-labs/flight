@@ -14,7 +14,7 @@ This is a deterministic point-mass envelope sweep over the compiled aircraft mod
 
 | Aircraft | Stall mph | Top mph | Best climb | Service ceiling | Inst turn | Sust turn | Corner mph | 60-100 m/s |
 | --- | ---: | ---: | ---: | ---: | --- | --- | ---: | ---: |
-| Super Tomcat | 178 | 1,555 @ 14,000 m | 49,391 @ 772 | >18,000 m | 18.0 deg/s @ 514, R 734 m | 18.0 deg/s @ 514, R 734 m | 487 | below-stall |
+| Super Tomcat | 178 | 1,532 @ 14,000 m | 47,966 @ 772 | >18,000 m | 18.0 deg/s @ 514, R 734 m | 18.0 deg/s @ 514, R 734 m | 487 | below-stall |
 | Long-Nose Escort | 92 | 425 @ 8,000 m | 2,997 @ 179 | 12,512 m | 36.3 deg/s @ 257, R 181 m | 17.8 deg/s @ 145, R 209 m | 253 | 21.9 s |
 | Clipped-Wing Interceptor | 89 | 414 @ 6,000 m | 4,372 @ 190 | 11,947 m | 38.0 deg/s @ 246, R 166 m | 21.3 deg/s @ 145, R 174 m | 243 | 15.0 s |
 | Radial Deck Fighter | 91 | 414 @ 8,000 m | 3,772 @ 179 | 12,895 m | 37.0 deg/s @ 246, R 171 m | 19.5 deg/s @ 145, R 191 m | 249 | 17.4 s |
@@ -28,7 +28,7 @@ This is a deterministic point-mass envelope sweep over the compiled aircraft mod
 
 | Aircraft | Top speed | Climb | Service ceiling |
 | --- | ---: | ---: | ---: |
-| Super Tomcat | 1,555 / 1,544 mph (+1%) | 49,391 / 45,000 fpm (+10%) | >18,000 / 15,200 m (exceeds target) |
+| Super Tomcat | 1,532 / 1,544 mph (-1%) | 47,966 / 45,000 fpm (+7%) | >18,000 / 15,200 m (exceeds target) |
 | Long-Nose Escort | 425 / 437 mph (-3%) | 2,997 / 3,200 fpm (-6%) | 12,512 / 12,770 m (-2%) |
 | Clipped-Wing Interceptor | 414 / 405 mph (+2%) | 4,372 / 3,600 fpm (+21%) | 11,947 / 12,950 m (-8%) |
 | Radial Deck Fighter | 414 / 446 mph (-7%) | 3,772 / 4,500 fpm (-16%) | 12,895 / 12,650 m (+2%) |
@@ -44,17 +44,17 @@ This is a deterministic point-mass envelope sweep over the compiled aircraft mod
 
 | Alt m | Stall mph | Top mph | Best climb fpm | Inst turn | Sust turn | Corner mph |
 | ---: | ---: | ---: | ---: | --- | --- | ---: |
-| 0 | 178 | 772 | 49,391 | 18.0 deg/s @ 514, R 734 m | 18.0 deg/s @ 514, R 734 m | 487 |
-| 1,000 | 188 | 828 | 48,864 | 16.7 deg/s @ 559, R 857 m | 16.7 deg/s @ 559, R 857 m | 515 |
-| 2,000 | 199 | 872 | 47,610 | 15.5 deg/s @ 593, R 981 m | 15.5 deg/s @ 593, R 981 m | 545 |
-| 4,000 | 223 | 973 | 44,780 | 13.2 deg/s @ 705, R 1,367 m | 12.7 deg/s @ 649, R 1,310 m | 611 |
-| 6,000 | 250 | 1,096 | 41,673 | 11.0 deg/s @ 850, R 1,981 m | 10.2 deg/s @ 693, R 1,737 m | 684 |
-| 8,000 | 280 | 1,230 | 38,430 | 9.2 deg/s @ 1,007, R 2,804 m | 8.1 deg/s @ 738, R 2,320 m | 767 |
-| 10,000 | 314 | 1,376 | 35,254 | 8.0 deg/s @ 1,174, R 3,780 m | 6.4 deg/s @ 783, R 3,124 m | 859 |
-| 12,000 | 351 | 1,488 | 33,902 | 7.0 deg/s @ 1,331, R 4,861 m | 5.1 deg/s @ 828, R 4,193 m | 963 |
-| 14,000 | 394 | 1,555 | 31,941 | 6.2 deg/s @ 1,488, R 6,102 m | 4.0 deg/s @ 872, R 5,598 m | 1,078 |
-| 16,000 | 441 | 1,376 | 13,263 | 5.2 deg/s @ 1,566, R 7,679 m | 2.8 deg/s @ 772, R 6,956 m | 1,208 |
-| 18,000 | 494 | 1,163 | 4,119 | 4.1 deg/s @ 1,566, R 9,705 m | 1.6 deg/s @ 671, R 10,554 m | 1,354 |
+| 0 | 178 | 772 | 47,966 | 18.0 deg/s @ 514, R 734 m | 18.0 deg/s @ 514, R 734 m | 487 |
+| 1,000 | 188 | 828 | 47,410 | 16.7 deg/s @ 559, R 857 m | 16.7 deg/s @ 559, R 857 m | 515 |
+| 2,000 | 199 | 872 | 46,299 | 15.5 deg/s @ 593, R 981 m | 15.5 deg/s @ 593, R 981 m | 545 |
+| 4,000 | 223 | 973 | 43,709 | 13.2 deg/s @ 705, R 1,367 m | 12.6 deg/s @ 638, R 1,296 m | 611 |
+| 6,000 | 250 | 1,096 | 40,808 | 11.0 deg/s @ 850, R 1,981 m | 10.2 deg/s @ 693, R 1,743 m | 684 |
+| 8,000 | 280 | 1,230 | 37,717 | 9.2 deg/s @ 1,007, R 2,804 m | 8.1 deg/s @ 738, R 2,320 m | 767 |
+| 10,000 | 314 | 1,376 | 34,539 | 8.0 deg/s @ 1,174, R 3,780 m | 6.4 deg/s @ 783, R 3,127 m | 859 |
+| 12,000 | 351 | 1,476 | 32,981 | 7.0 deg/s @ 1,331, R 4,861 m | 5.0 deg/s @ 816, R 4,154 m | 963 |
+| 14,000 | 394 | 1,532 | 31,183 | 6.2 deg/s @ 1,488, R 6,102 m | 4.0 deg/s @ 861, R 5,548 m | 1,078 |
+| 16,000 | 441 | 1,365 | 12,880 | 5.2 deg/s @ 1,566, R 7,679 m | 2.8 deg/s @ 761, R 6,863 m | 1,208 |
+| 18,000 | 494 | 1,141 | 3,958 | 4.1 deg/s @ 1,566, R 9,705 m | 1.6 deg/s @ 660, R 10,474 m | 1,354 |
 
 ### Long-Nose Escort
 

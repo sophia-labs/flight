@@ -26,8 +26,8 @@ The catalog aircraft is `variable-sweep-tomcat`, displayed as `Super Tomcat`. It
 
 Current generated audit:
 
-- Top speed: 1,555 mph at 14,000 m.
-- Best climb: 49,391 ft/min.
+- Top speed: 1,532 mph at 14,000 m.
+- Best climb: 47,966 ft/min.
 - Service ceiling: greater than 18,000 m in the current audit grid.
 - Afterburning thrust-to-weight: 0.81 at the modeled full-fuel/stores mass.
 
