@@ -1,5 +1,5 @@
 import { useFrame } from "@react-three/fiber";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from "react";
 import * as THREE from "three";
 import type { GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -10,6 +10,7 @@ import {
   VRMUtils,
 } from "@pixiv/three-vrm";
 import type { AircraftSnapshot, Part } from "../protocol/schema";
+import type { PilotProfile } from "../studio/schema";
 import { solveCcdIk } from "./contactIk";
 import {
   computeCockpitRig,
@@ -21,6 +22,7 @@ import {
   positionAvatarRootForSeat,
 } from "./pilotRig";
 import {
+  buildPilotLoadoutPose,
   buildPilotPose,
   CONTROLLED_PILOT_BONES,
   PILOT_EXPRESSION_NAMES,
@@ -34,9 +36,14 @@ declare global {
   }
 }
 
-interface PilotAvatarProps {
+interface CockpitPilotAvatarProps {
   parts?: Part[];
+  profile?: PilotProfile;
   ship: AircraftSnapshot;
+}
+
+interface LoadoutPilotAvatarProps {
+  profile: PilotProfile;
 }
 
 interface PilotRuntimeRig {
@@ -63,6 +70,14 @@ interface PilotRenderProbeStats {
   shaderMaterialCount: number;
   skinnedMeshCount: number;
   visibleMeshCount: number;
+}
+
+interface PilotAvatarRuntime {
+  lookTarget: THREE.Object3D;
+  probeConfig: PilotRenderProbeConfig;
+  probeStats: MutableRefObject<PilotRenderProbeStats | undefined>;
+  runtimeRig: MutableRefObject<PilotRuntimeRig | null>;
+  vrm: VRM | null;
 }
 
 interface PilotRigDebug {
@@ -113,116 +128,11 @@ const CONTACT_SPECS = [
   },
 ] as const;
 
-export function PilotAvatar({ parts, ship }: PilotAvatarProps) {
-  const avatarRootRef = useRef<THREE.Group>(null);
-  const elapsedRef = useRef(0);
-  const lookTarget = useMemo(() => new THREE.Object3D(), []);
-  const probeConfig = useMemo(() => readPilotRenderProbeConfig(), []);
-  const anchors = useMemo(
-    () => ({
-      leftFoot: new THREE.Object3D(),
-      leftThrottle: new THREE.Object3D(),
-      rightFoot: new THREE.Object3D(),
-      rightGrip: new THREE.Object3D(),
-      seatBack: new THREE.Object3D(),
-      seatHip: new THREE.Object3D(),
-    }),
-    [],
-  );
-  const runtimeRig = useRef<PilotRuntimeRig | null>(null);
-  const probeStats = useRef<PilotRenderProbeStats | undefined>(undefined);
-  const [vrm, setVrm] = useState<VRM | null>(null);
-
-  useEffect(() => {
-    let disposed = false;
-    const loader = new GLTFLoader();
-    loader.crossOrigin = "anonymous";
-    loader.register((parser) => new VRMLoaderPlugin(parser));
-
-    loader
-      .loadAsync(PILOT_MODEL_URL)
-      .then((gltf: GLTF) => {
-        if (disposed) return;
-        const loaded = gltf.userData.vrm as VRM | undefined;
-        if (!loaded) throw new Error("Pilot model did not contain VRM data.");
-
-        VRMUtils.rotateVRM0(loaded);
-        probeStats.current = prepareVrmScene(loaded.scene, probeConfig);
-        fitAvatarToLocalOrigin(loaded.scene);
-        loaded.scene.updateMatrixWorld(true);
-
-        const rig = capturePilotRuntimeRig(loaded);
-        if (loaded.lookAt && probeConfig.lookAt) loaded.lookAt.target = lookTarget;
-        runtimeRig.current = rig;
-        setVrm(loaded);
-      })
-      .catch((error: unknown) => {
-        console.error("Pilot avatar load failed", error);
-      });
-
-    return () => {
-      disposed = true;
-    };
-  }, [lookTarget, probeConfig]);
-
-  useFrame((_, delta) => {
-    const avatarRoot = avatarRootRef.current;
-    const rig = runtimeRig.current;
-    if (!avatarRoot || !rig || !vrm) {
-      publishPilotDebug(null, null, false);
-      return;
-    }
-
-    elapsedRef.current += Math.min(delta, 0.05);
-    const cockpit = computeCockpitRig(ship.controls, parts);
-    for (const [name, anchor] of Object.entries(anchors)) {
-      anchor.position.copy(cockpit.anchors[name as keyof typeof cockpit.anchors]);
-      anchor.updateMatrixWorld(true);
-    }
-
-    avatarRoot.parent?.updateMatrixWorld(true);
-    avatarRoot.position.copy(
-      positionAvatarRootForSeat({
-        hipLocalMeters: rig.hips,
-        seatHip: cockpit.anchors.seatHip,
-      }),
-    );
-    avatarRoot.rotation.set(0, PILOT_AVATAR_YAW_RAD, 0);
-    avatarRoot.scale.setScalar(PILOT_AVATAR_SCALE);
-
-    const forces = computePilotForces(ship);
-    const pose = buildPilotPose({
-      elapsed: elapsedRef.current,
-      forces,
-      trigger: ship.controls.trigger,
-    });
-    applyPilotPose(vrm, rig, pose, lookTarget, cockpit.anchors.seatHip, probeConfig);
-
-    avatarRoot.updateMatrixWorld(true);
-    vrm.scene.updateMatrixWorld(true);
-    if (probeConfig.ik) {
-      solvePilotContacts(vrm, avatarRoot, anchors);
-    }
-    if (probeConfig.vrmUpdate) {
-      vrm.update(delta);
-    }
-    avatarRoot.updateMatrixWorld(true);
-    vrm.scene.updateMatrixWorld(true);
-    publishPilotDebug(vrm, avatarRoot, true, forces, anchors, probeStats.current, cockpit.station);
-  });
-
-  return (
-    <>
-      {Object.entries(anchors).map(([name, anchor]) => (
-        <primitive key={name} object={anchor} />
-      ))}
-      <primitive object={lookTarget} />
-      <group ref={avatarRootRef}>{vrm ? <primitive object={vrm.scene} /> : null}</group>
-    </>
-  );
-}
-
-function prepareVrmScene(scene: THREE.Object3D, config: PilotRenderProbeConfig): PilotRenderProbeStats {
+function prepareVrmScene(
+  scene: THREE.Object3D,
+  config: PilotRenderProbeConfig,
+  appearance?: PilotAppearanceConfig,
+): PilotRenderProbeStats {
   let meshIndex = 0;
   let morphMeshCount = 0;
   let shaderMaterialCount = 0;
@@ -243,7 +153,7 @@ function prepareVrmScene(scene: THREE.Object3D, config: PilotRenderProbeConfig):
       const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       shaderMaterialCount += materials.filter((material) => material?.type === "ShaderMaterial").length;
       if (config.morphs === "strip") stripMorphTargets(mesh);
-      if (config.material !== "vrm") replaceMaterial(mesh, meshIndex, config.material);
+      if (config.material !== "vrm") replaceMaterial(mesh, meshIndex, config.material, appearance);
       meshIndex += 1;
     }
   });
@@ -258,17 +168,247 @@ function prepareVrmScene(scene: THREE.Object3D, config: PilotRenderProbeConfig):
   };
 }
 
-function replaceMaterial(mesh: THREE.Mesh, index: number, material: "basic" | "standard") {
+function applyVrmAppearance(
+  scene: THREE.Object3D,
+  config: PilotRenderProbeConfig,
+  appearance?: PilotAppearanceConfig,
+) {
+  if (config.material === "vrm") return;
+
+  scene.traverse((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh) return;
+
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) {
+      const nextColor = materialNameColor(material.name || mesh.name, material, appearance);
+      const target = material as THREE.Material & { color?: THREE.Color };
+      if (nextColor && target.color instanceof THREE.Color) target.color.copy(nextColor);
+    }
+  });
+}
+
+interface PilotAppearanceConfig {
+  accentTint?: string;
+  eyeTint?: string;
+  hairTint?: string;
+  outfitTint?: string;
+  skinWarmth?: number;
+}
+
+function usePilotAvatarRuntime(profile?: PilotProfile): PilotAvatarRuntime {
+  const lookTarget = useMemo(() => new THREE.Object3D(), []);
+  const probeConfig = useMemo(() => readPilotRenderProbeConfig(profile), [profile?.materialPreset]);
+  const appearance = useMemo(() => profile?.appearance, [profile?.appearance]);
+  const modelUrl = profile?.modelUrl ?? PILOT_MODEL_URL;
+  const runtimeRig = useRef<PilotRuntimeRig | null>(null);
+  const probeStats = useRef<PilotRenderProbeStats | undefined>(undefined);
+  const appearanceRef = useRef<PilotAppearanceConfig | undefined>(appearance);
+  const [vrm, setVrm] = useState<VRM | null>(null);
+
+  useEffect(() => {
+    appearanceRef.current = appearance;
+    if (vrm) applyVrmAppearance(vrm.scene, probeConfig, appearance);
+  }, [appearance, probeConfig, vrm]);
+
+  useEffect(() => {
+    let disposed = false;
+    runtimeRig.current = null;
+    probeStats.current = undefined;
+    setVrm(null);
+    const loader = new GLTFLoader();
+    loader.crossOrigin = "anonymous";
+    loader.register((parser) => new VRMLoaderPlugin(parser));
+
+    loader
+      .loadAsync(modelUrl)
+      .then((gltf: GLTF) => {
+        if (disposed) return;
+        const loaded = gltf.userData.vrm as VRM | undefined;
+        if (!loaded) throw new Error("Pilot model did not contain VRM data.");
+
+        VRMUtils.rotateVRM0(loaded);
+        probeStats.current = prepareVrmScene(loaded.scene, probeConfig, appearanceRef.current);
+        fitAvatarToLocalOrigin(loaded.scene);
+        loaded.scene.updateMatrixWorld(true);
+
+        const rig = capturePilotRuntimeRig(loaded);
+        if (loaded.lookAt && probeConfig.lookAt) loaded.lookAt.target = lookTarget;
+        runtimeRig.current = rig;
+        setVrm(loaded);
+      })
+      .catch((error: unknown) => {
+        console.error("Pilot avatar load failed", error);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [lookTarget, modelUrl, probeConfig]);
+
+  return { lookTarget, probeConfig, probeStats, runtimeRig, vrm };
+}
+
+export function PilotAvatar({ parts, profile, ship }: CockpitPilotAvatarProps) {
+  const avatarRootRef = useRef<THREE.Group>(null);
+  const elapsedRef = useRef(0);
+  const { lookTarget, probeConfig, probeStats, runtimeRig, vrm } = usePilotAvatarRuntime(profile);
+  const avatarScale = profile?.scale ?? PILOT_AVATAR_SCALE;
+  const avatarYaw = profile?.yawRad ?? PILOT_AVATAR_YAW_RAD;
+  const expressionPreset = profile?.expressionPreset ?? "focused";
+  const anchors = useMemo(
+    () => ({
+      leftFoot: new THREE.Object3D(),
+      leftThrottle: new THREE.Object3D(),
+      rightFoot: new THREE.Object3D(),
+      rightGrip: new THREE.Object3D(),
+      seatBack: new THREE.Object3D(),
+      seatHip: new THREE.Object3D(),
+    }),
+    [],
+  );
+
+  useFrame((_, delta) => {
+    const avatarRoot = avatarRootRef.current;
+    const rig = runtimeRig.current;
+    if (!avatarRoot || !rig || !vrm) {
+      publishPilotDebug(null, null, false);
+      return;
+    }
+
+    elapsedRef.current += Math.min(delta, 0.05);
+    const cockpit = computeCockpitRig(ship.controls, parts);
+    for (const [name, anchor] of Object.entries(anchors)) {
+      anchor.position.copy(cockpit.anchors[name as keyof typeof cockpit.anchors]);
+      anchor.updateMatrixWorld(true);
+    }
+
+    avatarRoot.parent?.updateMatrixWorld(true);
+    avatarRoot.position.copy(
+      positionAvatarRootForSeat({
+        hipLocalMeters: rig.hips,
+        scale: avatarScale,
+        seatHip: cockpit.anchors.seatHip,
+        yawRad: avatarYaw,
+      }),
+    );
+    avatarRoot.rotation.set(0, avatarYaw, 0);
+    avatarRoot.scale.setScalar(avatarScale);
+
+    const forces = computePilotForces(ship);
+    const pose = buildPilotPose({
+      elapsed: elapsedRef.current,
+      forces,
+      trigger: ship.controls.trigger,
+    });
+    applyExpressionPreset(pose, expressionPreset);
+    applyPilotPose(vrm, rig, pose, lookTarget, cockpit.anchors.seatHip, probeConfig);
+
+    avatarRoot.updateMatrixWorld(true);
+    vrm.scene.updateMatrixWorld(true);
+    if (probeConfig.ik) {
+      solvePilotContacts(vrm, avatarRoot, anchors);
+    }
+    if (probeConfig.vrmUpdate) {
+      vrm.update(delta);
+    }
+    avatarRoot.updateMatrixWorld(true);
+    vrm.scene.updateMatrixWorld(true);
+    publishPilotDebug(vrm, avatarRoot, true, forces, anchors, probeStats.current, cockpit.station);
+  });
+
+  return (
+    <PilotAvatarObjects
+      anchors={anchors}
+      avatarRootRef={avatarRootRef}
+      lookTarget={lookTarget}
+      vrm={vrm}
+    />
+  );
+}
+
+export function LoadoutPilotAvatar({ profile }: LoadoutPilotAvatarProps) {
+  const avatarRootRef = useRef<THREE.Group>(null);
+  const elapsedRef = useRef(0);
+  const lookAnchor = useMemo(() => new THREE.Vector3(0, 0.95, 0), []);
+  const { lookTarget, probeConfig, probeStats, runtimeRig, vrm } = usePilotAvatarRuntime(profile);
+  const expressionPreset = profile.expressionPreset ?? "focused";
+
+  useFrame((_, delta) => {
+    const avatarRoot = avatarRootRef.current;
+    const rig = runtimeRig.current;
+    if (!avatarRoot || !rig || !vrm) {
+      publishPilotDebug(null, null, false);
+      return;
+    }
+
+    elapsedRef.current += Math.min(delta, 0.05);
+    avatarRoot.parent?.updateMatrixWorld(true);
+    avatarRoot.position.set(0, 0, 0);
+    avatarRoot.rotation.set(0, Math.sin(elapsedRef.current * 0.38) * 0.08, 0);
+    avatarRoot.scale.setScalar(0.72);
+
+    const forces = { vertical: 0, lateral: 0, foreAft: 0 };
+    const pose = buildPilotLoadoutPose({
+      elapsed: elapsedRef.current,
+      expressionPreset,
+    });
+    applyPilotPose(vrm, rig, pose, lookTarget, lookAnchor, probeConfig);
+
+    avatarRoot.updateMatrixWorld(true);
+    vrm.scene.updateMatrixWorld(true);
+    if (probeConfig.vrmUpdate) vrm.update(delta);
+    avatarRoot.updateMatrixWorld(true);
+    vrm.scene.updateMatrixWorld(true);
+    publishPilotDebug(vrm, avatarRoot, true, forces, undefined, probeStats.current, undefined);
+  });
+
+  return <PilotAvatarObjects avatarRootRef={avatarRootRef} lookTarget={lookTarget} vrm={vrm} />;
+}
+
+function PilotAvatarObjects({
+  anchors,
+  avatarRootRef,
+  lookTarget,
+  vrm,
+}: {
+  anchors?: Record<string, THREE.Object3D>;
+  avatarRootRef: RefObject<THREE.Group | null>;
+  lookTarget: THREE.Object3D;
+  vrm: VRM | null;
+}) {
+  return (
+    <>
+      {Object.entries(anchors ?? {}).map(([name, anchor]) => (
+        <primitive key={name} object={anchor} />
+      ))}
+      <primitive object={lookTarget} />
+      <group ref={avatarRootRef}>{vrm ? <primitive object={vrm.scene} /> : null}</group>
+    </>
+  );
+}
+
+function replaceMaterial(
+  mesh: THREE.Mesh,
+  index: number,
+  material: "basic" | "standard",
+  appearance?: PilotAppearanceConfig,
+) {
   const hue = (index * 0.17) % 1;
-  const source = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-  const color = materialColor(source) ?? materialNameColor(source?.name) ?? new THREE.Color().setHSL(hue, 0.48, 0.68);
+  const oldMaterials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  const source = oldMaterials[0];
+  const materialName = source?.name || mesh.name;
+  const color =
+    materialColor(source, appearance) ??
+    materialNameColor(materialName, source, appearance) ??
+    new THREE.Color().setHSL(hue, 0.48, 0.68);
   const map = materialTexture(source, "map") ?? materialTexture(source, "shadeMultiplyTexture");
   const emissive = materialNonWhiteColor(source, "emissive") ?? new THREE.Color("#000000");
   const emissiveMap = materialTexture(source, "emissiveMap");
   const alphaTest = materialNumber(source, "alphaTest") ?? 0;
   const transparent = materialBoolean(source, "transparent") ?? false;
   const opacity = materialNumber(source, "opacity") ?? 1;
-  mesh.material =
+  const replacement =
     material === "basic"
       ? new THREE.MeshBasicMaterial({
           color,
@@ -291,16 +431,14 @@ function replaceMaterial(mesh: THREE.Mesh, index: number, material: "basic" | "s
           side: THREE.DoubleSide,
           transparent,
         });
-  if (Array.isArray(mesh.material)) {
-    for (const oldMaterial of mesh.material) oldMaterial.dispose();
-  } else {
-    source?.dispose();
-  }
+  replacement.name = materialName;
+  mesh.material = replacement;
+  for (const oldMaterial of oldMaterials) oldMaterial?.dispose();
 }
 
-function materialColor(material: THREE.Material | undefined): THREE.Color | null {
+function materialColor(material: THREE.Material | undefined, appearance?: PilotAppearanceConfig): THREE.Color | null {
   if (!material) return null;
-  const namedColor = materialNameColor(material.name, material);
+  const namedColor = materialNameColor(material.name, material, appearance);
   if (namedColor) return namedColor;
   const uniformValue =
     materialNonWhiteColor(material, "shadeColorFactor") ??
@@ -312,23 +450,46 @@ function materialColor(material: THREE.Material | undefined): THREE.Color | null
   return null;
 }
 
-function materialNameColor(name: string | undefined, material?: THREE.Material): THREE.Color | null {
+function materialNameColor(
+  name: string | undefined,
+  material?: THREE.Material,
+  appearance?: PilotAppearanceConfig,
+): THREE.Color | null {
   const upperName = name?.toUpperCase() ?? "";
   if (upperName.includes("HAIR")) {
-    return materialNonWhiteColor(material, "emissive") ?? new THREE.Color("#d58a48");
+    return colorFromHex(appearance?.hairTint) ?? materialNonWhiteColor(material, "emissive") ?? new THREE.Color("#d58a48");
   }
-  if (upperName.includes("IRIS")) return new THREE.Color("#5f8fdc");
+  if (upperName.includes("IRIS")) return colorFromHex(appearance?.eyeTint) ?? new THREE.Color("#5f8fdc");
   if (upperName.includes("EYEWHITE") || upperName.includes("EYEHIGHLIGHT")) return new THREE.Color("#f4fbff");
   if (upperName.includes("EYELINE") || upperName.includes("BROW")) return new THREE.Color("#28323c");
   if (upperName.includes("MOUTH")) return new THREE.Color("#7d3f56");
   if (upperName.includes("SKIN") || upperName.includes("FACE")) {
-    return materialNonWhiteColor(material, "shadeColorFactor") ?? new THREE.Color("#f3c9d2");
+    return warmSkinColor(appearance?.skinWarmth) ?? materialNonWhiteColor(material, "shadeColorFactor") ?? new THREE.Color("#f3c9d2");
   }
   if (upperName.includes("CLOTH") || upperName.includes("TOP") || upperName.includes("BOTTOM")) {
-    return materialNonWhiteColor(material, "shadeColorFactor") ?? new THREE.Color("#c6cce8");
+    return colorFromHex(appearance?.outfitTint) ?? materialNonWhiteColor(material, "shadeColorFactor") ?? new THREE.Color("#c6cce8");
   }
-  if (upperName.includes("SHOES")) return new THREE.Color("#6e7288");
+  if (upperName.includes("SHOES") || upperName.includes("RIBBON") || upperName.includes("TIE")) {
+    return colorFromHex(appearance?.accentTint) ?? new THREE.Color("#6e7288");
+  }
   return null;
+}
+
+function colorFromHex(value: string | undefined): THREE.Color | null {
+  if (!value) return null;
+  try {
+    return new THREE.Color(value);
+  } catch {
+    return null;
+  }
+}
+
+function warmSkinColor(warmth: number | undefined): THREE.Color | null {
+  if (warmth === undefined) return null;
+  const color = new THREE.Color("#f3c9d2");
+  const warm = new THREE.Color("#ffd0b1");
+  const cool = new THREE.Color("#e5c7ec");
+  return warmth >= 0 ? color.lerp(warm, Math.min(warmth, 1) * 0.45) : color.lerp(cool, Math.min(Math.abs(warmth), 1) * 0.35);
 }
 
 function materialNonWhiteColor(material: THREE.Material | undefined, name: string): THREE.Color | null {
@@ -425,6 +586,28 @@ function applyPilotPose(
   }
 }
 
+function applyExpressionPreset(pose: PilotPose, preset: PilotProfile["expressionPreset"]) {
+  if (preset === "neutral") {
+    pose.expressions.relaxed = Math.max(pose.expressions.relaxed ?? 0, 0.12);
+    return;
+  }
+  if (preset === "excited") {
+    pose.expressions.happy = Math.max(pose.expressions.happy ?? 0, 0.28);
+    pose.expressions.aa = Math.max(pose.expressions.aa ?? 0, 0.12);
+    pose.lookAt.y += 0.02;
+    return;
+  }
+  if (preset === "strained") {
+    pose.expressions.angry = Math.max(pose.expressions.angry ?? 0, 0.22);
+    pose.expressions.ih = Math.max(pose.expressions.ih ?? 0, 0.18);
+    pose.lookAt.y -= 0.02;
+    return;
+  }
+
+  pose.expressions.relaxed = Math.max(pose.expressions.relaxed ?? 0, 0.18);
+  pose.expressions.ih = Math.max(pose.expressions.ih ?? 0, 0.04);
+}
+
 function solvePilotContacts(
   vrm: VRM,
   avatarRoot: THREE.Object3D,
@@ -500,18 +683,20 @@ function publishPilotDebug(
   station?: ReturnType<typeof computeCockpitRig>["station"],
 ) {
   if (typeof window === "undefined") return;
-  if (!vrm || !avatarRoot || !anchors) {
+  if (!vrm || !avatarRoot) {
     window.__flightPilotRig = { contactErrors: {}, forces, loaded, probe, root: null, station: null };
     return;
   }
 
   const contactErrors: Record<string, number | null> = {};
-  for (const spec of CONTACT_SPECS) {
-    const bone = getRawBone(vrm, spec.effector) ?? getNormalizedBone(vrm, spec.effector);
-    const anchor = anchors[spec.anchor];
-    contactErrors[spec.effector] = bone && anchor
-      ? bone.getWorldPosition(new THREE.Vector3()).distanceTo(anchor.getWorldPosition(new THREE.Vector3()))
-      : null;
+  if (anchors) {
+    for (const spec of CONTACT_SPECS) {
+      const bone = getRawBone(vrm, spec.effector) ?? getNormalizedBone(vrm, spec.effector);
+      const anchor = anchors[spec.anchor];
+      contactErrors[spec.effector] = bone && anchor
+        ? bone.getWorldPosition(new THREE.Vector3()).distanceTo(anchor.getWorldPosition(new THREE.Vector3()))
+        : null;
+    }
   }
 
   window.__flightPilotRig = {
@@ -526,7 +711,7 @@ function publishPilotDebug(
   };
 }
 
-function readPilotRenderProbeConfig(): PilotRenderProbeConfig {
+function readPilotRenderProbeConfig(profile?: PilotProfile): PilotRenderProbeConfig {
   const params =
     typeof window === "undefined"
       ? new URLSearchParams()
@@ -535,7 +720,7 @@ function readPilotRenderProbeConfig(): PilotRenderProbeConfig {
     expressions: queryFlag(params, "pilotExpressions", true),
     ik: queryFlag(params, "pilotIk", true),
     lookAt: queryFlag(params, "pilotLookAt", true),
-    material: readMaterialMode(params),
+    material: readMaterialMode(params, profile),
     meshLimit: queryNumber(params, "pilotMeshLimit"),
     morphs: params.get("pilotMorphs") === "strip" ? "strip" : "keep",
     shadows: queryFlag(params, "pilotShadows", true),
@@ -544,9 +729,12 @@ function readPilotRenderProbeConfig(): PilotRenderProbeConfig {
   };
 }
 
-function readMaterialMode(params: URLSearchParams): PilotRenderProbeConfig["material"] {
+function readMaterialMode(params: URLSearchParams, profile?: PilotProfile): PilotRenderProbeConfig["material"] {
   const value = params.get("pilotMaterial");
-  return value === "basic" || value === "vrm" ? value : "standard";
+  if (value === "basic" || value === "vrm" || value === "standard") return value;
+  if (profile?.materialPreset === "vrm") return "vrm";
+  if (profile?.materialPreset === "diagnostic") return "basic";
+  return "standard";
 }
 
 function queryFlag(params: URLSearchParams, name: string, fallback: boolean): boolean {

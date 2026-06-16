@@ -799,6 +799,155 @@ h2 {
   font-size: 0.82rem;
 }
 
+.crew-sheet {
+  gap: 12px;
+}
+
+.crew-identity-card {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(88, 211, 140, 0.22);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(88, 211, 140, 0.13), rgba(77, 163, 255, 0.08)),
+    rgba(255, 255, 255, 0.04);
+}
+
+.crew-identity-card .studio-pilot-avatar {
+  width: 50px;
+  height: 50px;
+  color: #58d38c;
+  background: rgba(88, 211, 140, 0.14);
+}
+
+.crew-identity-card span {
+  color: #8fa0a6;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.crew-identity-card strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 2px;
+  color: #eef3f5;
+  font-size: 1.15rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crew-identity-card small {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  color: #9fb2bd;
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crew-loadout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.crew-loadout-grid div {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.crew-loadout-grid span,
+.crew-custom-row > span {
+  display: block;
+  color: #8fa0a6;
+  font-size: 0.67rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.crew-loadout-grid strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 3px;
+  color: #eef3f5;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crew-custom-row {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.crew-swatch-list,
+.crew-option-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.crew-swatch-list button {
+  width: 32px;
+  height: 32px;
+  border: 2px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+}
+
+.crew-swatch-list button.active {
+  border-color: #eef3f5;
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.35),
+    0 0 0 2px rgba(77, 163, 255, 0.36);
+}
+
+.crew-option-list button {
+  width: auto;
+  height: auto;
+  min-height: 30px;
+  padding: 6px 9px;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #cdd9e0;
+  font-size: 0.74rem;
+  font-weight: 800;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.crew-option-list button.active {
+  border-color: rgba(77, 163, 255, 0.42);
+  color: #eef8ff;
+  background: rgba(77, 163, 255, 0.16);
+}
+
+.model-source {
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.model-source span {
+  display: block;
+  overflow: hidden;
+  color: #9fb2bd;
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (max-width: 920px) {
   .studio-shell {
     grid-template-columns: 1fr;

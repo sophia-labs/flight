@@ -9,7 +9,7 @@ test("renders the VTuber Flight Studio first screen", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Hangar" })).toHaveClass(/active/);
   await expect(page.getByRole("button", { name: "Crew" })).toBeVisible();
   await expect(page.getByRole("button", { name: /Launch/ })).toBeVisible();
-  await expect(page.getByText("Sample VTuber Pilot")).toBeVisible();
+  await expect(page.getByLabel("VTuber Flight Studio").getByText("Echo").first()).toBeVisible();
   await expect(page.getByText("Head clearance")).toBeVisible();
   await expect(page.getByText("Right hand")).toBeVisible();
 
@@ -59,6 +59,40 @@ test("renders the VTuber Flight Studio first screen", async ({ page }) => {
   expect(stats.height).toBeGreaterThan(300);
   expect(stats.total).toBeGreaterThan(0);
   expect(stats.swatches).toBeGreaterThanOrEqual(2);
+});
+
+test("opens Crew as a pilot loadout and customization screen with a VRM preview", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Crew" }).click();
+  await expect(page.getByRole("button", { name: "Crew" })).toHaveClass(/active/);
+  await expect(page.getByText("Pilot Loadout")).toBeVisible();
+  await expect(page.getByText("Appearance")).toBeVisible();
+  await expect(page.getByText("Profile")).toBeVisible();
+  await expect(page.getByText("Model Core")).toBeVisible();
+  await expect(page.getByLabel("VTuber Flight Studio").getByText("Echo").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Hair #83d4ff" })).toBeVisible();
+  await page.getByRole("button", { name: "Hair #83d4ff" }).click();
+  await page.getByRole("button", { name: "Eyes #59d894" }).click();
+  await page.getByRole("button", { name: "Test Pilot" }).click();
+  await page.getByRole("button", { name: "Instructor" }).click();
+  await expect(page.getByRole("button", { name: "Test Pilot" })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: "Instructor" })).toHaveClass(/active/);
+
+  await page.waitForFunction(
+    () => {
+      const rig = (window as unknown as {
+        __flightPilotRig?: {
+          loaded: boolean;
+          root: [number, number, number] | null;
+          station: { source: string } | null;
+        };
+      }).__flightPilotRig;
+      return Boolean(rig?.loaded && rig.root && rig.station === null);
+    },
+    undefined,
+    { timeout: 30_000 },
+  );
 });
 
 test("opens the advanced builder from the studio screen", async ({ page }) => {

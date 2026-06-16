@@ -434,3 +434,15 @@ The first implementation slice now exists in the app:
 - `src/viewer/StudioScreen.tsx` is the new first screen with mode rail, 3D hangar stage, aircraft roster, pilot card, fit checks, launch, replay controls, and debug mode.
 - `src/App.tsx` now boots into `VTuber Flight Studio` instead of the old replay lab.
 - The old `HangarScreen` remains available through `Edit build` as the advanced builder.
+
+## Crew Loadout Slice
+
+Crew mode now starts becoming the pilot customization surface:
+
+- Clicking `Crew` switches the side panel into a pilot loadout sheet rather than the generic aircraft panel.
+- The stage switches to a standalone loadout scene with the live VRM pilot breathing on a studio deck, separate from aircraft cockpit mounting.
+- `PilotProfile` now carries preliminary RPG-facing data: appearance tints, expression preset, and loadout fields for callsign, role, flight suit, comms, and gloves.
+- `PilotAvatar` remains the cockpit-mounted presenter, while `LoadoutPilotAvatar` owns the personal Crew scene. Both share the same VRM runtime data from `PilotProfile`: model URL, material preset, scale, yaw, expression preset, and capture-safe color buckets.
+- Appearance controls currently tint conservative material buckets: hair, iris, outfit, accent, and skin warmth. Cosmetic updates retint the loaded VRM in place; only model-source/render-preset changes reload the asset.
+
+This is intentionally still a first pass. The controls are live and persistent, but the material bucketing is heuristic until we inspect richer VRM/material metadata and decide how much authoring support we want.

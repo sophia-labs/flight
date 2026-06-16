@@ -1,6 +1,7 @@
 import type { MatchReplay } from "../protocol/schema";
 import type {
   AircraftBuild,
+  PilotProfile,
   ReplayAsset,
   StudioMode,
   StudioProject,
@@ -78,6 +79,30 @@ export function selectAircraftBuild(project: StudioProject, aircraftBuildId: str
     }),
     now,
   );
+}
+
+export function updatePilotProfile(
+  project: StudioProject,
+  pilotProfileId: string,
+  update: (pilot: PilotProfile) => PilotProfile,
+  now = new Date(),
+): StudioProject {
+  let changed = false;
+  const pilots = project.library.pilots.map((pilot) => {
+    if (pilot.id !== pilotProfileId) return pilot;
+    changed = true;
+    return update(pilot);
+  });
+  if (!changed) return project;
+
+  return {
+    ...project,
+    updatedAt: now.toISOString(),
+    library: {
+      ...project.library,
+      pilots,
+    },
+  };
 }
 
 export function createReplayAsset({

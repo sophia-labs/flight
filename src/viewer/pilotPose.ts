@@ -77,6 +77,56 @@ export function buildPilotPose({
   return pose;
 }
 
+export function buildPilotLoadoutPose({
+  elapsed,
+  expressionPreset = "focused",
+}: {
+  elapsed: number;
+  expressionPreset?: "neutral" | "focused" | "excited" | "strained";
+}): PilotPose {
+  const pose = createPose();
+  const breath = Math.sin(elapsed * 1.35);
+  const sway = Math.sin(elapsed * 0.62);
+
+  addBones(pose, {
+    hips: rotationDeg(0, sway * 1.2, sway * 0.9),
+    spine: rotationDeg(1.5 + breath * 0.7, sway * 0.7, -sway * 0.4),
+    chest: rotationDeg(2.5 + breath * 0.9, sway * 1.1, -sway * 0.6),
+    upperChest: rotationDeg(1.8 + breath * 0.5, sway * 0.7, -sway * 0.4),
+    head: rotationDeg(0.8 + Math.sin(elapsed * 0.75) * 1.1, Math.sin(elapsed * 0.48) * 2.4, 0),
+    leftShoulder: rotationDeg(0, 0, -4),
+    rightShoulder: rotationDeg(0, 0, 4),
+    leftUpperArm: rotationDeg(8 + breath * 0.6, 2, -62 + sway * 2),
+    rightUpperArm: rotationDeg(8 + breath * 0.6, -2, 62 - sway * 2),
+    leftLowerArm: rotationDeg(-8, 0, -7),
+    rightLowerArm: rotationDeg(-8, 0, 7),
+    leftHand: rotationDeg(0, Math.sin(elapsed * 0.9) * 2, -8),
+    rightHand: rotationDeg(0, Math.sin(elapsed * 0.9 + 1.2) * 2, 8),
+    leftUpperLeg: rotationDeg(2, 0, -2),
+    rightUpperLeg: rotationDeg(2, 0, 2),
+    leftLowerLeg: rotationDeg(-2, 0, 0),
+    rightLowerLeg: rotationDeg(-2, 0, 0),
+    leftFoot: rotationDeg(1, 0, -2),
+    rightFoot: rotationDeg(1, 0, 2),
+  });
+
+  addExpressions(pose, {
+    blink: autoBlinkValue(elapsed),
+    relaxed: expressionPreset === "neutral" ? 0.22 : 0.14,
+  });
+
+  if (expressionPreset === "focused") addExpressions(pose, { ih: 0.04 });
+  if (expressionPreset === "excited") addExpressions(pose, { happy: 0.32, aa: 0.08 });
+  if (expressionPreset === "strained") addExpressions(pose, { angry: 0.2, ih: 0.18 });
+
+  pose.lookAt = {
+    x: Math.sin(elapsed * 0.45) * 0.18,
+    y: Math.sin(elapsed * 0.58 + 0.8) * 0.08,
+  };
+
+  return pose;
+}
+
 export function rotationDeg(x = 0, y = 0, z = 0): Rotation {
   const toRad = Math.PI / 180;
   return { x: x * toRad, y: y * toRad, z: z * toRad };

@@ -60,6 +60,25 @@ export const PilotProfileSchema = z.object({
   scale: z.number(),
   yawRad: z.number(),
   restPoseId: z.string().optional(),
+  appearance: z
+    .object({
+      accentTint: z.string().optional(),
+      eyeTint: z.string().optional(),
+      hairTint: z.string().optional(),
+      outfitTint: z.string().optional(),
+      skinWarmth: z.number().min(-1).max(1).optional(),
+    })
+    .optional(),
+  expressionPreset: z.enum(["neutral", "focused", "excited", "strained"]).optional(),
+  loadout: z
+    .object({
+      callsign: z.string(),
+      comms: z.enum(["open-cockpit", "throat-mic", "broadcast-rig"]),
+      flightSuit: z.enum(["cadet", "ace", "test-pilot"]),
+      gloves: z.enum(["none", "fingerless", "flight"]),
+      role: z.enum(["rookie", "duelist", "instructor"]),
+    })
+    .optional(),
 });
 
 export const CrewStationOverridesSchema = z.object({

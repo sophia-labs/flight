@@ -9,6 +9,7 @@ import {
   getActiveSession,
   selectAircraftBuild,
   selectStudioMode,
+  updatePilotProfile,
 } from "../src/studio/project";
 import { StudioProjectSchema } from "../src/studio/schema";
 import {
@@ -27,6 +28,18 @@ describe("studio project persistence", () => {
     expect(StudioProjectSchema.parse(project)).toEqual(project);
     expect(project.library.aircraft.length).toBeGreaterThan(1);
     expect(project.library.pilots[0]?.modelKind).toBe("vrm");
+    expect(project.library.pilots[0]?.appearance).toMatchObject({
+      hairTint: "#d68a48",
+      eyeTint: "#67a7ff",
+      outfitTint: "#c9d4ef",
+    });
+    expect(project.library.pilots[0]?.loadout).toMatchObject({
+      callsign: "Echo",
+      comms: "broadcast-rig",
+      flightSuit: "ace",
+      gloves: "flight",
+      role: "duelist",
+    });
     expect(session.ui.mode).toBe("hangar");
     expect(session.crewAssignments[0]).toMatchObject({
       aircraftBuildId: aircraft.id,
@@ -34,6 +47,39 @@ describe("studio project persistence", () => {
       pilotProfileId: "pilot-vrm-sample",
       stationId: "pilot-station",
     });
+  });
+
+  it("updates the active pilot loadout and appearance as persistent project data", () => {
+    const project = createDefaultStudioProject(new Date("2026-06-16T00:00:00.000Z"));
+    const pilot = project.library.pilots[0]!;
+    const next = updatePilotProfile(
+      project,
+      pilot.id,
+      (current) => ({
+        ...current,
+        appearance: {
+          ...current.appearance,
+          eyeTint: "#59d894",
+          hairTint: "#83d4ff",
+        },
+        loadout: {
+          ...current.loadout!,
+          flightSuit: "test-pilot",
+          role: "instructor",
+        },
+      }),
+      new Date("2026-06-16T00:03:00.000Z"),
+    );
+
+    expect(next.library.pilots[0]?.appearance).toMatchObject({
+      eyeTint: "#59d894",
+      hairTint: "#83d4ff",
+    });
+    expect(next.library.pilots[0]?.loadout).toMatchObject({
+      flightSuit: "test-pilot",
+      role: "instructor",
+    });
+    expect(StudioProjectSchema.parse(next)).toEqual(next);
   });
 
   it("changes aircraft through the session while keeping the crew assignment attached to the new station", () => {

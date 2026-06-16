@@ -11,8 +11,9 @@ import {
   getActiveSession,
   selectAircraftBuild,
   selectStudioMode,
+  updatePilotProfile,
 } from "./studio/project";
-import type { StudioMode, StudioProject } from "./studio/schema";
+import type { PilotProfile, StudioMode, StudioProject } from "./studio/schema";
 import { loadStudioProject, saveStudioProject } from "./studio/store";
 import type { CameraMode } from "./viewer/FlightScene";
 import { HangarScreen } from "./viewer/HangarScreen";
@@ -126,6 +127,12 @@ export function App() {
     [updateProject],
   );
 
+  const handleUpdatePilot = useCallback(
+    (pilotProfileId: string, update: (pilot: PilotProfile) => PilotProfile) =>
+      updateProject((current) => updatePilotProfile(current, pilotProfileId, update)),
+    [updateProject],
+  );
+
   const addReplayToProject = useCallback(
     (matchReplay: MatchReplay, title: string, aircraftBuildId = activeAircraft.id, sessionId = activeSession.id) => {
       const now = new Date();
@@ -189,6 +196,7 @@ export function App() {
         onOpenBuilder={() => setBuilderOpen(true)}
         onSelectAircraft={handleSelectAircraft}
         onSoundChange={setSoundOn}
+        onUpdatePilot={handleUpdatePilot}
         onVoiceChange={setVoiceOn}
         pilotId={pilotId}
         playback={{
