@@ -68,7 +68,7 @@ const PILOT_ASPECT = WL / H;
 const argv = process.argv.slice(2);
 const scripted = argv.includes("--scripted");
 const cinema = argv.includes("--cinema");
-const valueFlags = ["--out", "--replay-out"] as const;
+const valueFlags = ["--out", "--replay-out", "--replay-in"] as const;
 const consumedArgIndices = new Set<number>();
 function flagValue(flag: (typeof valueFlags)[number]): string | undefined {
   const index = argv.indexOf(flag);
@@ -80,6 +80,9 @@ function flagValue(flag: (typeof valueFlags)[number]): string | undefined {
 }
 const out = flagValue("--out") ?? "film.mp4";
 const replayOut = flagValue("--replay-out");
+// --replay-in <file>: render an already-recorded replay instead of flying a new match. The LLM Body is
+// non-deterministic, so this is the ONLY way to re-film a specific run (e.g. a benchmark take) exactly.
+const replayIn = flagValue("--replay-in");
 const model =
   argv.find((a, i) => !a.startsWith("--") && !consumedArgIndices.has(i)) ??
   "deepseek/deepseek-v4-flash";
@@ -542,7 +545,9 @@ async function main(): Promise<void> {
       `${turns} turns @ ${fps}fps -> ${out}`,
   );
 
-  const replay = await runMatch(buildConfig());
+  const replay: MatchReplay = replayIn
+    ? (JSON.parse(readFileSync(replayIn, "utf8")) as MatchReplay)
+    : await runMatch(buildConfig());
   if (replayOut) {
     mkdirSync(dirname(replayOut), { recursive: true });
     writeFileSync(replayOut, JSON.stringify(replay));

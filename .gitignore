@@ -12,3 +12,5 @@ public/matches/
 *.mp4
 clips/
 stills-tuning/
+
+bench/replays/
