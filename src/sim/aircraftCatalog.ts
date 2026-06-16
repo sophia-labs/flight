@@ -912,18 +912,39 @@ function variableSweepTomcatArchetype(): Airframe {
   };
   const parts: Part[] = [
     {
+      id: "nose-radome",
+      kind: "fuselage",
+      pose: { offset: vec3(0, 0.02, -7.6), rotation: body },
+      dims: { length: 3.4, width: 0.88, height: 0.82 },
+      massKg: 800,
+    },
+    {
       id: "forward-fuselage",
       kind: "fuselage",
-      pose: { offset: vec3(0, 0.05, -3.35), rotation: body },
-      dims: { length: 11.3, width: 2.25, height: 2.0 },
-      massKg: 7_600,
+      pose: { offset: vec3(0, 0.04, -4.7), rotation: body },
+      dims: { length: 5.1, width: 1.55, height: 1.55 },
+      massKg: 3_200,
+    },
+    {
+      id: "wing-glove-body",
+      kind: "fuselage",
+      pose: { offset: vec3(0, -0.02, -0.9), rotation: body },
+      dims: { length: 5.4, width: 3.15, height: 0.92 },
+      massKg: 3_600,
     },
     {
       id: "aft-fuselage",
       kind: "fuselage",
-      pose: { offset: vec3(0, -0.05, 3.25), rotation: body },
-      dims: { length: 7.8, width: 3.25, height: 1.72 },
-      massKg: 2_250,
+      pose: { offset: vec3(0, -0.06, 3.2), rotation: body },
+      dims: { length: 6.4, width: 3.1, height: 1.55 },
+      massKg: 1_900,
+    },
+    {
+      id: "beaver-tail",
+      kind: "fuselage",
+      pose: { offset: vec3(0, -0.1, 6.65), rotation: body },
+      dims: { length: 2.4, width: 1.2, height: 0.65 },
+      massKg: 350,
     },
     {
       id: "intake-left",
