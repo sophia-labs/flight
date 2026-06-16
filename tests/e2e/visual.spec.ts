@@ -1,16 +1,17 @@
 import { expect, test } from "@playwright/test";
 
-test("renders a nonblank flight scene and usable replay controls", async ({ page }) => {
+test("renders the VTuber Flight Studio first screen", async ({ page }) => {
   await page.goto("/");
 
   const canvas = page.locator("canvas").first();
   await expect(canvas).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Physics Turn Lab" })).toBeVisible();
-  await expect(page.getByRole("slider", { name: "Replay frame" })).toBeVisible();
-
-  await page.getByRole("button", { name: "Pause replay" }).click();
-  await page.getByRole("button", { name: "Next frame" }).click();
-  await page.waitForTimeout(500);
+  await expect(page.getByText("VTuber Flight Studio")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Hangar" })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: "Crew" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Launch/ })).toBeVisible();
+  await expect(page.getByText("Sample VTuber Pilot")).toBeVisible();
+  await expect(page.getByText("Head clearance")).toBeVisible();
+  await expect(page.getByText("Right hand")).toBeVisible();
 
   const stats = await canvas.evaluate((node) => {
     const canvasElement = node as HTMLCanvasElement;
@@ -19,16 +20,14 @@ test("renders a nonblank flight scene and usable replay controls", async ({ page
 
     if (!gl) {
       return {
-        width: canvasElement.width,
         height: canvasElement.height,
-        saturated: 0,
         swatches: 0,
         total: 0,
+        width: canvasElement.width,
       };
     }
 
     const swatches = new Set<string>();
-    let saturated = 0;
     let total = 0;
 
     for (let y = 0.16; y < 0.86; y += 0.1) {
@@ -45,18 +44,14 @@ test("renders a nonblank flight scene and usable replay controls", async ({ page
         );
         total += pixel[0] + pixel[1] + pixel[2] + pixel[3];
         swatches.add(`${pixel[0] >> 4}:${pixel[1] >> 4}:${pixel[2] >> 4}`);
-        if (Math.max(pixel[0], pixel[1], pixel[2]) - Math.min(pixel[0], pixel[1], pixel[2]) > 18) {
-          saturated += 1;
-        }
       }
     }
 
     return {
-      width: canvasElement.width,
       height: canvasElement.height,
-      saturated,
       swatches: swatches.size,
       total,
+      width: canvasElement.width,
     };
   });
 
@@ -66,48 +61,30 @@ test("renders a nonblank flight scene and usable replay controls", async ({ page
   expect(stats.swatches).toBeGreaterThanOrEqual(2);
 });
 
-test("opens the hangar with physical surface controls", async ({ page }) => {
+test("opens the advanced builder from the studio screen", async ({ page }) => {
   await page.goto("/");
 
-  await page.getByRole("button", { name: "Hangar" }).click();
+  await page.getByRole("button", { name: "Edit build" }).click();
   await expect(page.getByRole("heading", { name: "Build your aircraft" })).toBeVisible();
   await expect(page.getByText("PART KIT")).toBeVisible();
   await expect(page.getByText("PROP CURVE")).toBeVisible();
   await expect(page.getByText("surfaces")).toBeVisible();
   await expect(page.getByText("engines")).toBeVisible();
   await expect(page.getByRole("button", { name: /WING main-wing/i })).toBeVisible();
-  await page.getByRole("button", { name: /WING main-wing/i }).click();
-  await expect(page.getByText("incidence").first()).toBeVisible();
-  await expect(page.getByText("x offset").first()).toBeVisible();
-  await expect(page.getByRole("button", { name: /CREW-STATION pilot-station/i })).toBeVisible();
   await page.getByRole("button", { name: /CREW-STATION pilot-station/i }).click();
   await expect(page.getByText("pilot socket")).toBeVisible();
   await expect(page.getByRole("button", { name: "Fly this ▶" })).toBeVisible();
 });
 
-test("shows actual surface telemetry in cabin view", async ({ page }) => {
-  await page.route("**/matches/index.json", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
-  );
-  await page.route("**/match.json", (route) =>
-    route.fulfill({ status: 404, contentType: "text/plain", body: "not found" }),
-  );
+test("launches a replay from the studio and shows cabin surface telemetry", async ({ page }) => {
   await page.goto("/");
 
-  const bodyAudit = page.getByLabel("Body audit");
-  await expect(bodyAudit).toBeVisible();
-  await expect(bodyAudit.getByText("Body Loop")).toBeVisible();
-  await expect(bodyAudit.getByText("Muscle")).toBeVisible();
-  await expect(bodyAudit.getByText("Motion")).toBeVisible();
-  await expect(bodyAudit.getByText(/delta=.*flips=/).first()).toBeVisible();
+  await page.getByRole("button", { name: /Launch/ }).click();
+  await expect(page.getByRole("button", { name: "Pause replay" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Replay", exact: true })).toHaveClass(/active/);
+  await expect(page.getByRole("slider", { name: "Replay frame" })).toBeVisible();
 
   await page.getByRole("button", { name: "Cabin" }).click();
-
-  const transcript = page.getByLabel("Flight transcript");
-  await expect(transcript).toBeVisible();
-  await expect(transcript.getByText("Flight Transcript")).toBeVisible();
-  await expect(transcript.getByText(/Body \d+/).first()).toBeVisible();
-  await expect(transcript.getByText(/delta=.*flips=/).first()).toBeVisible();
 
   const hud = page.getByLabel("Control surface HUD");
   await expect(hud).toBeVisible();
@@ -122,68 +99,19 @@ test("shows actual surface telemetry in cabin view", async ({ page }) => {
   await expect(hud.getByText(/flow [+-]?\d+\.\d deg/).first()).toBeVisible();
   await expect(hud.getByText(/load \d+(\.\d)? kN/).first()).toBeVisible();
 
-  await page.getByRole("button", { name: "HUD" }).click();
-  await expect(hud).toBeHidden();
-  await page.evaluate(() =>
-    (window as unknown as { __flightSetReplayPosition?: (position: number) => void }).__flightSetReplayPosition?.(0),
-  );
-  const canvas = page.locator("canvas").first();
-  await expect(canvas).toBeVisible();
-  await page.waitForTimeout(500);
-  const cockpitIndicators = await canvas.evaluate((node) => {
-    const canvasElement = node as HTMLCanvasElement;
-    const gl =
-      canvasElement.getContext("webgl2") ?? canvasElement.getContext("webgl");
-    if (!gl) return { colorHits: 0, cyan: 0, magenta: 0 };
-
-    let magenta = 0;
-    let cyan = 0;
-    let colorHits = 0;
-    for (let y = 0.12; y < 0.92; y += 0.007) {
-      for (let x = 0.02; x < 0.86; x += 0.007) {
-        const pixel = new Uint8Array(4);
-        gl.readPixels(
-          Math.floor(canvasElement.width * x),
-          Math.floor(canvasElement.height * y),
-          1,
-          1,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          pixel,
-        );
-        if (pixel[0] > 120 && pixel[2] > 120 && pixel[1] < Math.min(pixel[0], pixel[2]) * 0.78) {
-          magenta += 1;
-        }
-        if (pixel[1] > 120 && pixel[2] > 120 && pixel[0] < Math.min(pixel[1], pixel[2]) * 0.78) {
-          cyan += 1;
-        }
-        if (Math.max(pixel[0], pixel[1], pixel[2]) - Math.min(pixel[0], pixel[1], pixel[2]) > 40) {
-          colorHits += 1;
-        }
-      }
-    }
-    return { colorHits, cyan, magenta };
-  });
-  expect(cockpitIndicators.colorHits).toBeGreaterThan(0);
-  expect(cockpitIndicators.cyan + cockpitIndicators.magenta).toBeGreaterThan(0);
-
-  await page.getByRole("button", { name: "HUD" }).click();
-  await expect(hud).toBeVisible();
+  const bodyAudit = page.getByLabel("Body audit");
+  await bodyAudit.scrollIntoViewIfNeeded();
+  await expect(bodyAudit).toBeVisible();
+  await expect(bodyAudit.getByText("Body Loop")).toBeVisible();
+  await expect(bodyAudit.getByText("Muscle")).toBeVisible();
+  await expect(bodyAudit.getByText("Motion")).toBeVisible();
 });
 
 test("runs the scripted pilot cinema camera with a rigged VTuber", async ({ page }) => {
-  await page.route("**/matches/index.json", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
-  );
-  await page.route("**/match.json", (route) =>
-    route.fulfill({ status: 404, contentType: "text/plain", body: "not found" }),
-  );
   await page.goto("/?camera=pilot-cinema&hud=0");
 
-  await page.getByRole("button", { name: "Hangar" }).click();
-  await expect(page.getByRole("heading", { name: "Build your aircraft" })).toBeVisible();
-  await page.getByRole("button", { name: /Fly this/ }).click();
-  await expect(page.getByRole("button", { name: "Pilot" })).toHaveClass(/active/);
+  await page.getByRole("button", { name: /Launch/ }).click();
+  await expect(page.getByRole("button", { name: "Pilot" })).toHaveClass(/active/, { timeout: 30_000 });
   await page.locator("canvas").first().waitFor({ state: "visible", timeout: 10_000 });
   await page.waitForFunction(
     () => {

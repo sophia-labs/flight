@@ -1,39 +1,23 @@
-import { Canvas } from "@react-three/fiber";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import type { MatchReplay } from "./protocol/schema";
+import { generateAirframeMatch } from "./runtime/scenario";
+import { aircraftArchetypes } from "./sim/aircraftCatalog";
 import {
-  Camera,
-  Captions,
-  Gauge,
-  Mic,
-  Orbit,
-  Pause,
-  Plane,
-  Play,
-  RotateCcw,
-  StepBack,
-  StepForward,
-  Volume2,
-  Wrench,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { z } from "zod";
-import {
-  MatchReplaySchema,
-  MatchSummarySchema,
-  type MatchReplay,
-  type MatchSummary,
-} from "./protocol/schema";
-import { generateDemoMatch } from "./runtime/scenario";
-import { ControlsPanel } from "./viewer/ControlsPanel";
-import { BodyPanel } from "./viewer/BodyPanel";
-import { FlightScene, type CameraMode } from "./viewer/FlightScene";
+  addReplayAsset,
+  createReplayAsset,
+  getActiveAircraft,
+  getActivePilot,
+  getActiveReplay,
+  getActiveSession,
+  selectAircraftBuild,
+  selectStudioMode,
+} from "./studio/project";
+import type { StudioMode, StudioProject } from "./studio/schema";
+import { loadStudioProject, saveStudioProject } from "./studio/store";
+import type { CameraMode } from "./viewer/FlightScene";
 import { HangarScreen } from "./viewer/HangarScreen";
-import { MatchBrowser } from "./viewer/MatchBrowser";
-import { MatchStats } from "./viewer/MatchStats";
 import { sampleReplayFrame } from "./viewer/replaySample";
-import { StatusPanel } from "./viewer/StatusPanel";
-import { SurfaceHud } from "./viewer/SurfaceHud";
-import { Timeline } from "./viewer/Timeline";
-import { TranscriptPanel } from "./viewer/TranscriptPanel";
+import { StudioScreen } from "./viewer/StudioScreen";
 import { usePlayback } from "./viewer/usePlayback";
 import { useReplayAudio } from "./viewer/useReplayAudio";
 
@@ -62,80 +46,35 @@ declare global {
 }
 
 export function App() {
-  const [matches, setMatches] = useState<MatchSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [replay, setReplay] = useState<MatchReplay | null>(null);
+  const [project, setProject] = useState<StudioProject>(() => loadStudioProject());
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => queryCameraMode());
-  const [screen, setScreen] = useState<"flight" | "hangar">("flight");
   const [hudOn, setHudOn] = useState(() => queryFlag("hud", true));
   const [captionsOn, setCaptionsOn] = useState(() => queryFlag("captions", true));
   const [soundOn, setSoundOn] = useState(() => queryFlag("sound", false));
   const [voiceOn, setVoiceOn] = useState(() => queryFlag("voice", false));
-  const requestRef = useRef(0);
+  const [builderOpen, setBuilderOpen] = useState(false);
+  const [launching, setLaunching] = useState(false);
 
-  // Source preference: sweep manifest (browser) → single recorded match.json → generated demo.
+  const activeSession = useMemo(() => getActiveSession(project), [project]);
+  const activeAircraft = useMemo(() => getActiveAircraft(project, activeSession), [project, activeSession]);
+  const activePilot = useMemo(() => getActivePilot(project, activeSession), [project, activeSession]);
+  const activeReplay = useMemo(() => getActiveReplay(project, activeSession), [project, activeSession]);
+  const activeArchetype = useMemo(
+    () => aircraftArchetypes.find((archetype) => archetype.id === activeAircraft.sourceArchetypeId),
+    [activeAircraft.sourceArchetypeId],
+  );
+  const replay = activeReplay?.matchReplay ?? null;
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const indexRes = await fetch("/matches/index.json");
-        if (indexRes.ok) {
-          const list = z.array(MatchSummarySchema).parse(await indexRes.json());
-          if (list.length > 0) {
-            const first = list[0];
-            const replayRes = await fetch(`/matches/${first.file}`);
-            const parsed = MatchReplaySchema.parse(await replayRes.json());
-            if (!cancelled) {
-              setMatches(list);
-              setSelectedId(first.id);
-              setReplay(parsed);
-            }
-            return;
-          }
-        }
-      } catch {
-        // no sweep manifest — fall through
-      }
-      try {
-        const single = await fetch("/match.json");
-        if (single.ok) {
-          const parsed = MatchReplaySchema.parse(await single.json());
-          if (!cancelled) setReplay(parsed);
-          return;
-        }
-      } catch {
-        // no recorded match — fall through
-      }
-      const demo = await generateDemoMatch();
-      if (!cancelled) setReplay(demo);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    saveStudioProject(project);
+  }, [project]);
 
-  const selectMatch = useCallback((match: MatchSummary) => {
-    setSelectedId(match.id);
-    const req = (requestRef.current += 1);
-    fetch(`/matches/${match.file}`)
-      .then((res) => res.json())
-      .then((json) => {
-        if (requestRef.current === req) setReplay(MatchReplaySchema.parse(json));
-      })
-      .catch(() => {});
-  }, []);
-
-  // A freshly-built airframe was flown in the hangar: show its replay (a one-off, not from the browser).
-  const onFlyBuild = useCallback((built: MatchReplay) => {
-    setSelectedId(null);
-    setReplay(built);
-    setScreen("flight");
+  const updateProject = useCallback((update: (current: StudioProject) => StudioProject) => {
+    setProject((current) => update(current));
   }, []);
 
   const playback = usePlayback(replay);
-  const frame = replay
-    ? sampleReplayFrame(replay.frames, playback.samplePosition)
-    : undefined;
+  const frame = replay ? sampleReplayFrame(replay.frames, playback.samplePosition) : undefined;
 
   useEffect(() => {
     window.__flightSetReplayPosition = (position: number) => {
@@ -177,193 +116,100 @@ export function App() {
     }
   }, [voiceOn]);
 
-  const hasBrowser = matches.length > 0;
+  const handleModeChange = useCallback(
+    (mode: StudioMode) => updateProject((current) => selectStudioMode(current, mode)),
+    [updateProject],
+  );
 
-  if (!replay || !frame) {
-    return (
-      <main className="app-shell">
-        <section className="simulation" />
-        <aside className="control-rail" aria-label="Match controls">
-          <header className="rail-header">
-            <div>
-              <p className="eyebrow">Flight Duel</p>
-              <h1>Physics Turn Lab</h1>
-            </div>
-          </header>
-          <p className="event-line">Loading matches…</p>
-        </aside>
-      </main>
-    );
-  }
+  const handleSelectAircraft = useCallback(
+    (aircraftBuildId: string) => updateProject((current) => selectAircraftBuild(current, aircraftBuildId)),
+    [updateProject],
+  );
+
+  const addReplayToProject = useCallback(
+    (matchReplay: MatchReplay, title: string, aircraftBuildId = activeAircraft.id, sessionId = activeSession.id) => {
+      const now = new Date();
+      const asset = createReplayAsset({
+        aircraftBuildId,
+        matchReplay,
+        now,
+        sessionId,
+        title,
+      });
+      updateProject((current) => addReplayAsset(current, asset, now));
+    },
+    [activeAircraft.id, activeSession.id, updateProject],
+  );
+
+  const launchFlight = useCallback(async () => {
+    if (launching) return;
+    const aircraft = activeAircraft;
+    const session = activeSession;
+    setLaunching(true);
+    try {
+      const built = await generateAirframeMatch(aircraft.airframe);
+      addReplayToProject(built, `${aircraft.name} sortie`, aircraft.id, session.id);
+      setCameraMode("pilot-cinema");
+    } finally {
+      setLaunching(false);
+    }
+  }, [activeAircraft, activeSession, addReplayToProject, launching]);
+
+  const onFlyBuild = useCallback(
+    (built: MatchReplay) => {
+      setBuilderOpen(false);
+      addReplayToProject(built, "Builder sortie");
+      setCameraMode("pilot-cinema");
+    },
+    [addReplayToProject],
+  );
 
   return (
     <>
-    {screen === "hangar" ? (
-      <HangarScreen onExit={() => setScreen("flight")} onFly={onFlyBuild} />
-    ) : null}
-    <main className={`app-shell${hasBrowser ? " with-browser" : ""}`}>
-      {hasBrowser ? (
-        <MatchBrowser matches={matches} selectedId={selectedId} onSelect={selectMatch} />
+      {builderOpen ? (
+        <HangarScreen onExit={() => setBuilderOpen(false)} onFly={onFlyBuild} />
       ) : null}
-
-      <section className="simulation">
-        <Canvas
-          camera={{ position: [0, 5.5, 13], fov: 54, near: 0.01, far: 1200 }}
-          shadows
-          gl={{ antialias: true, preserveDrawingBuffer: true }}
-          data-testid="flight-canvas"
-        >
-          <FlightScene
-            frame={frame}
-            replay={replay}
-            cameraMode={cameraMode}
-            pilotId={pilotId}
-            clock={playback.clock}
-            onIndex={playback.reportIndex}
-            onSample={playback.reportSample}
-          />
-        </Canvas>
-
-        {captionsOn && caption ? (
-          <div className="subtitle" key={caption}>
-            <span className="subtitle-speaker">Pilot</span>
-            {caption}
-          </div>
-        ) : null}
-
-        <SurfaceHud
-          frame={frame}
-          replay={replay}
-          pilotId={pilotId}
-          visible={cameraMode === "cabin" && hudOn}
-        />
-      </section>
-
-      <aside className="control-rail" aria-label="Match controls">
-        <header className="rail-header">
-          <div>
-            <p className="eyebrow">Flight Duel</p>
-            <h1>Physics Turn Lab</h1>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <button
-              type="button"
-              className="hangar-open"
-              onClick={() => setScreen("hangar")}
-              title="Build your own aircraft"
-            >
-              <Wrench size={15} /> Hangar
-            </button>
-            <div className="turn-pill">Turn {frame.turn}</div>
-          </div>
-        </header>
-
-        <div className="transport" aria-label="Replay transport controls">
-          <button type="button" aria-label="Restart replay" onClick={playback.restart}>
-            <RotateCcw size={18} />
-          </button>
-          <button type="button" aria-label="Previous frame" onClick={playback.previous}>
-            <StepBack size={18} />
-          </button>
-          <button
-            type="button"
-            className="primary-action"
-            aria-label={playback.playing ? "Pause replay" : "Play replay"}
-            onClick={playback.toggle}
-          >
-            {playback.playing ? <Pause size={20} /> : <Play size={20} />}
-          </button>
-          <button type="button" aria-label="Next frame" onClick={playback.next}>
-            <StepForward size={18} />
-          </button>
-        </div>
-
-        <div className="view-toggle" role="group" aria-label="Camera view">
-          <button
-            type="button"
-            className={cameraMode === "orbit" ? "active" : ""}
-            aria-pressed={cameraMode === "orbit"}
-            onClick={() => setCameraMode("orbit")}
-          >
-            <Orbit size={16} /> Orbit
-          </button>
-          <button
-            type="button"
-            className={cameraMode === "cabin" ? "active" : ""}
-            aria-pressed={cameraMode === "cabin"}
-            onClick={() => setCameraMode("cabin")}
-            title="Claude's cabin — pilot's-seat view of the blue aircraft"
-          >
-            <Plane size={16} /> Cabin
-          </button>
-          <button
-            type="button"
-            className={cameraMode === "pilot-cinema" ? "active" : ""}
-            aria-pressed={cameraMode === "pilot-cinema"}
-            onClick={() => setCameraMode("pilot-cinema")}
-            title="Scripted cockpit camera sequence"
-          >
-            <Camera size={16} /> Pilot
-          </button>
-        </div>
-
-        <div className="av-toggle" role="group" aria-label="Captions and audio">
-          <button
-            type="button"
-            className={hudOn ? "active" : ""}
-            aria-pressed={hudOn}
-            onClick={() => setHudOn((on) => !on)}
-            title="Surface telemetry overlay for the mounted camera view"
-          >
-            <Gauge size={16} /> HUD
-          </button>
-          <button
-            type="button"
-            className={captionsOn ? "active" : ""}
-            aria-pressed={captionsOn}
-            onClick={() => setCaptionsOn((on) => !on)}
-            title="Subtitles: the pilot's per-turn reasoning"
-          >
-            <Captions size={16} /> CC
-          </button>
-          <button
-            type="button"
-            className={soundOn ? "active" : ""}
-            aria-pressed={soundOn}
-            onClick={() => setSoundOn((on) => !on)}
-            title="Synthesized engine + weapon sound"
-          >
-            <Volume2 size={16} /> Sound
-          </button>
-          <button
-            type="button"
-            className={voiceOn ? "active" : ""}
-            aria-pressed={voiceOn}
-            onClick={() => setVoiceOn((on) => !on)}
-            title="Speak the pilot's reasoning aloud"
-          >
-            <Mic size={16} /> Voice
-          </button>
-        </div>
-
-        <Timeline
-          frameIndex={playback.frameIndex}
-          frameCount={replay.frames.length}
-          onChange={playback.setFrameIndex}
-        />
-
-        {hasBrowser ? <MatchStats replay={replay} pilotId={pilotId} /> : null}
-        <BodyPanel replay={replay} frame={frame} pilotId={pilotId} />
-        <TranscriptPanel
-          replay={replay}
-          frame={frame}
-          pilotId={pilotId}
-          onSeek={(position) => playback.setPosition(position, false)}
-        />
-        <StatusPanel frame={frame} />
-        <ControlsPanel frame={frame} />
-      </aside>
-    </main>
+      <StudioScreen
+        activeAircraft={activeAircraft}
+        activeArchetype={activeArchetype}
+        activePilot={activePilot}
+        activeSession={activeSession}
+        cameraMode={cameraMode}
+        caption={caption}
+        captionsOn={captionsOn}
+        frame={frame}
+        hudOn={hudOn}
+        launching={launching}
+        mode={activeSession.ui.mode}
+        onCameraModeChange={setCameraMode}
+        onCaptionsChange={setCaptionsOn}
+        onHudChange={setHudOn}
+        onLaunch={launchFlight}
+        onModeChange={handleModeChange}
+        onOpenBuilder={() => setBuilderOpen(true)}
+        onSelectAircraft={handleSelectAircraft}
+        onSoundChange={setSoundOn}
+        onVoiceChange={setVoiceOn}
+        pilotId={pilotId}
+        playback={{
+          clock: playback.clock,
+          frameCount: replay?.frames.length ?? 0,
+          frameIndex: playback.frameIndex,
+          next: playback.next,
+          playing: playback.playing,
+          previous: playback.previous,
+          reportIndex: playback.reportIndex,
+          reportSample: playback.reportSample,
+          restart: playback.restart,
+          setFrameIndex: playback.setFrameIndex,
+          setPosition: playback.setPosition,
+          toggle: playback.toggle,
+        }}
+        project={project}
+        replay={replay}
+        soundOn={soundOn}
+        voiceOn={voiceOn}
+      />
     </>
   );
 }

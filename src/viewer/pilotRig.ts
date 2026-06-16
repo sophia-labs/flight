@@ -1,10 +1,7 @@
 import * as THREE from "three";
 import type { AircraftSnapshot, ControlInput, Part } from "../protocol/schema";
-
-export const PILOT_MODEL_URL = "/models/VRM1_Constraint_Twist_Sample.vrm";
-export const COCKPIT_SCALE = 0.075;
-export const PILOT_AVATAR_SCALE = 0.082;
-export const PILOT_AVATAR_YAW_RAD = Math.PI;
+import { COCKPIT_SCALE, PILOT_AVATAR_SCALE, PILOT_AVATAR_YAW_RAD } from "../studio/pilotDefaults";
+export { COCKPIT_SCALE, PILOT_AVATAR_SCALE, PILOT_AVATAR_YAW_RAD, PILOT_MODEL_URL } from "../studio/pilotDefaults";
 
 export const PILOT_IK_CONFIG = Object.freeze({
   handIterations: 12,
