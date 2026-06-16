@@ -50,6 +50,11 @@ export const AircraftSnapshotSchema = z.object({
   altitude: z.number(),
   aoaDeg: z.number(),
   gLoad: z.number(),
+  mach: finiteNumber.optional(),
+  dynamicPressurePa: finiteNumber.optional(),
+  sweepDeg: finiteNumber.optional(),
+  afterburner: z.boolean().optional(),
+  engineSpool: finiteNumber.optional(),
   health: z.number(),
   weaponCooldown: z.number(),
   stalled: z.boolean(),
@@ -424,6 +429,14 @@ export const WingPartSchema = z.object({
   // A moving control surface on this wing + the axis it drives; area (m²) changes the surface's
   // deflection effectiveness. Omit for a plain lifting surface. A "yaw" surface is vertical.
   control: z.object({ axis: z.enum(["roll", "pitch", "yaw"]), area: finiteNumber }).optional(),
+  // Variable-sweep metadata for aircraft such as the F-14. The geometry still round-trips as a normal
+  // wing part; compileAirframe turns this into Mach-dependent lift, drag, and turn-envelope effects.
+  sweep: z.object({
+    minSweepDeg: finiteNumber,
+    maxSweepDeg: finiteNumber,
+    machForward: finiteNumber,
+    machSwept: finiteNumber,
+  }).optional(),
 });
 
 export const EnginePartSchema = z.object({
@@ -431,7 +444,11 @@ export const EnginePartSchema = z.object({
   kind: z.literal("engine"),
   pose: PartPoseSchema,
   thrustN: finiteNumber,
+  afterburnerThrustN: finiteNumber.optional(),
+  idleThrustFraction: finiteNumber.optional(),
+  afterburnerThrottle: finiteNumber.optional(),
   maxPowerW: finiteNumber.optional(),
+  criticalAltitudeM: finiteNumber.optional(),
   idleRpm: finiteNumber.optional(),
   maxRpm: finiteNumber.optional(),
   massKg: finiteNumber,

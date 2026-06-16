@@ -33,6 +33,10 @@ export function StatusPanel({ frame }: StatusPanelProps) {
             <p>
               {formatSpeed(ship.airspeed)} · {formatAltitude(ship.altitude)} ·{" "}
               {ship.stalled ? "stall buffet" : `${ship.gLoad.toFixed(1)} g`}
+              {ship.mach !== undefined ? ` · M ${ship.mach.toFixed(2)}` : ""}
+              {ship.sweepDeg !== undefined ? ` · sweep ${Math.round(ship.sweepDeg)} deg` : ""}
+              {ship.engineSpool !== undefined ? ` · spool ${Math.round(ship.engineSpool * 100)}%` : ""}
+              {ship.afterburner ? " · AB" : ""}
             </p>
           </div>
           <div className="health">{formatPercent(ship.health)}</div>

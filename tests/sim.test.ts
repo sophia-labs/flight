@@ -11,16 +11,27 @@ import {
   add,
   basisFromQuat,
   dot,
+  integrateLocalAngularVelocity,
   length,
   normalize,
+  quatFromAxisAngle,
   quatIdentity,
   quatLookRotation,
+  quatMultiply,
   scale,
   sub,
   vec3,
 } from "../src/sim/math";
+import { SEA_LEVEL_DENSITY_KG_M3, densityAtAltitude, stallSpeedMps } from "../src/sim/aero";
+import { aircraftArchetypes } from "../src/sim/aircraftCatalog";
 import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
 import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
+import {
+  currentMassProperties,
+  fullFuelByTank,
+  integrateBodyAngularVelocity,
+  mat3Diagonal,
+} from "../src/sim/mass";
 import type { AircraftState, FlightMetrics, Projectile } from "../src/sim/types";
 import {
   buildScriptedMatchConfig,
@@ -158,6 +169,28 @@ describe("flight sim replay generation", () => {
 
     expect(dot(basis.forward, desired)).toBeGreaterThan(0.999);
   });
+
+  it("integrates local angular velocity as a normalized quaternion delta", () => {
+    const orientation = quatLookRotation(vec3(1, 0.2, -1));
+    const stepped = integrateLocalAngularVelocity(orientation, vec3(0, 0, -2), 0.25);
+    const expected = quatMultiply(orientation, quatFromAxisAngle(vec3(0, 0, -1), 0.5));
+
+    expect(dot(basisFromQuat(stepped).up, basisFromQuat(expected).up)).toBeGreaterThan(0.99999);
+    expect(Math.hypot(stepped.x, stepped.y, stepped.z, stepped.w)).toBeCloseTo(1, 8);
+  });
+
+  it("integrates rigid-body angular velocity with gyroscopic coupling", () => {
+    const next = integrateBodyAngularVelocity(
+      vec3(0.2, 0.6, 1.1),
+      vec3(0, 0, 0),
+      mat3Diagonal(10, 20, 35),
+      0.2,
+    );
+
+    expect(Math.abs(next.x - 0.2)).toBeGreaterThan(0.001);
+    expect(Math.abs(next.y - 0.6)).toBeGreaterThan(0.001);
+    expect(Math.abs(next.z - 1.1)).toBeGreaterThan(0.001);
+  });
 });
 
 const STEP_DT = 0.16;
@@ -187,6 +220,7 @@ function makeAircraft(o: Partial<AircraftState> = {}): AircraftState {
     metrics: o.metrics ?? { ...ZERO_METRICS, airspeed: length(velocity), altitude: position.y },
     angularVelocity: o.angularVelocity ?? vec3(0, 0, 0),
     fuelKg: o.fuelKg ?? 0,
+    fuelByTankKg: o.fuelByTankKg ?? fullFuelByTank(o.model ?? DEFAULT_MODEL),
   };
 }
 
@@ -213,6 +247,12 @@ function step(
   return events;
 }
 
+function archetypeModel(id: string) {
+  const archetype = aircraftArchetypes.find((candidate) => candidate.id === id);
+  if (!archetype) throw new Error(`missing archetype ${id}`);
+  return compileAirframe(archetype.airframe).model;
+}
+
 describe("flight physics characterization", () => {
   it("throttle accelerates and idle does not", () => {
     const full = makeAircraft();
@@ -235,12 +275,26 @@ describe("flight physics characterization", () => {
     expect(ship.position.y).toBeGreaterThan(1000 - 28);
   });
 
-  it("flags stall below the speed floor", () => {
+  it("flags stall below the computed stall speed", () => {
     const ship = makeAircraft({ velocity: vec3(0, 0, -40) });
 
     step([ship], { "blue-1": controls({ throttle: 0.5 }) }, 1);
 
     expect(ship.metrics.stalled).toBe(true);
+  });
+
+  it("computes stall speed from wing loading and air density", () => {
+    const base = compileAirframe(defaultAirframe()).model;
+    const stubby = defaultAirframe();
+    const wing = stubby.parts.find((p) => p.id === "main-wing");
+    if (wing && wing.kind === "wing") {
+      wing.planform = { ...wing.planform, span: wing.planform.span * 0.55 };
+    }
+    const stubbyModel = compileAirframe(stubby).model;
+    const baseStall = stallSpeedMps(base, SEA_LEVEL_DENSITY_KG_M3, base.massKg);
+
+    expect(stallSpeedMps(stubbyModel, SEA_LEVEL_DENSITY_KG_M3, stubbyModel.massKg)).toBeGreaterThan(baseStall);
+    expect(stallSpeedMps(base, densityAtAltitude(3_000), base.massKg)).toBeGreaterThan(baseStall);
   });
 
   it("flags stall and cuts lift at high angle of attack", () => {
@@ -270,6 +324,47 @@ describe("flight physics characterization", () => {
 
     expect(ship.health).toBeLessThan(100);
     expect(ship.position.y).toBeGreaterThanOrEqual(55);
+  });
+
+  it("reports Super Tomcat sweep and delayed afterburner spool in live high-Mach flight", () => {
+    const model = archetypeModel("variable-sweep-tomcat");
+    const ship = makeAircraft({
+      model,
+      position: vec3(0, 14_000, 0),
+      velocity: vec3(0, 0, -620),
+      fuelKg: model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(model),
+    });
+
+    step([ship], { "blue-1": controls({ throttle: 1 }) }, 1);
+    const firstFrameSpool = ship.metrics.engineSpool ?? 0;
+    expect(firstFrameSpool).toBeGreaterThan(0.14);
+    expect(firstFrameSpool).toBeLessThan(0.5);
+    expect(ship.metrics.afterburner).toBe(false);
+
+    step([ship], { "blue-1": controls({ throttle: 1 }) }, 12);
+
+    expect(ship.metrics.mach).toBeGreaterThan(2);
+    expect(ship.metrics.sweepDeg).toBeGreaterThan(60);
+    expect(ship.metrics.engineSpool).toBeGreaterThan(0.82);
+    expect(ship.metrics.afterburner).toBe(true);
+  });
+
+  it("damages Mach-aero aircraft when they exceed q or Mach limits", () => {
+    const model = archetypeModel("variable-sweep-tomcat");
+    const ship = makeAircraft({
+      model,
+      position: vec3(0, 1_000, 0),
+      velocity: vec3(0, 0, -560),
+      fuelKg: model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(model),
+    });
+
+    step([ship], { "blue-1": controls({ throttle: 0 }) }, 3);
+
+    expect(ship.metrics.dynamicPressurePa).toBeGreaterThan(model.machAero?.qLimitPa ?? Infinity);
+    expect(ship.health).toBeLessThan(100);
+    expect(ship.metrics.stalled).toBe(true);
   });
 
   // v0.9.x projectiles: the gun fires a real bullet (900 m/s) that flies where the nose points and is
@@ -545,7 +640,7 @@ describe("fuel as consumable mass", () => {
     expect(def.fuelKg).toBe(0); // no tank ⇒ no burn ⇒ effectiveMass stays massKg
   });
 
-  it("a tanked aircraft burns fuel and runs dry → thrust cuts → it decelerates", () => {
+  it("a tanked aircraft burns fuel and runs dry → throttle no longer produces thrust", () => {
     const compiled = compileAirframe(tankedAirframe(6)); // tiny tank (~0.7 kg/frame at full thrust)
     const tanked = makeAircraft({ model: compiled.model, fuelKg: compiled.model.fuelCapacityKg });
     expect(tanked.fuelKg).toBe(6);
@@ -557,9 +652,49 @@ describe("fuel as consumable mass", () => {
     step([tanked], { "blue-1": controls({ throttle: 1 }) }, 20);
     expect(tanked.fuelKg).toBe(0); // emptied
 
-    const speedDry = tanked.metrics.airspeed;
-    step([tanked], { "blue-1": controls({ throttle: 1 }) }, 15); // dry: thrust cut → glide
-    expect(tanked.metrics.airspeed).toBeLessThan(speedDry); // decelerating
+    const dryFull = structuredClone(tanked) as AircraftState;
+    const dryIdle = structuredClone(tanked) as AircraftState;
+    step([dryFull], { "blue-1": controls({ throttle: 1 }) }, 15);
+    step([dryIdle], { "blue-1": controls({ throttle: 0 }) }, 15);
+    expect(dryFull.metrics.airspeed).toBeCloseTo(dryIdle.metrics.airspeed, 6);
+  });
+
+  it("tracks fuel by tank and updates CoM/inertia as fuel burns", () => {
+    const foreAftTanks = defaultAirframe();
+    foreAftTanks.parts.push(
+      {
+        id: "fore-tank",
+        kind: "tank",
+        pose: { offset: vec3(0, 0, -3), rotation: quatIdentity() },
+        fuelKg: 80,
+        dryMassKg: 30,
+        dims: { radius: 0.35, length: 1.4 },
+      },
+      {
+        id: "aft-tank",
+        kind: "tank",
+        pose: { offset: vec3(0, 0, 5), rotation: quatIdentity() },
+        fuelKg: 160,
+        dryMassKg: 30,
+        dims: { radius: 0.35, length: 1.4 },
+      },
+    );
+    const compiled = compileAirframe(foreAftTanks);
+    const ship = makeAircraft({
+      model: compiled.model,
+      fuelKg: compiled.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(compiled.model),
+    });
+    const wet = currentMassProperties(ship);
+
+    step([ship], { "blue-1": controls({ throttle: 1 }) }, 12);
+    const burned = currentMassProperties(ship);
+
+    expect(ship.fuelByTankKg?.["fore-tank"]).toBeLessThan(80);
+    expect(ship.fuelByTankKg?.["aft-tank"]).toBeLessThan(160);
+    expect(burned.massKg).toBeLessThan(wet.massKg);
+    expect(burned.com.z).not.toBeCloseTo(wet.com.z, 5);
+    expect(burned.inertia.roll).toBeLessThan(wet.inertia.roll);
   });
 
   it("does not NaN for a fully-empty all-fuel build (0/0 guard)", () => {

@@ -1,8 +1,20 @@
-import type { Airframe, Part, Vec3 } from "../protocol/schema";
+import type { Airframe, Part, Quaternion, Vec3 } from "../protocol/schema";
+import { GRAVITY_MPS2, SEA_LEVEL_DENSITY_KG_M3, stallSpeedMps } from "./aero";
+import { boxInertiaTensor, computeMassProperties, fullFuelByTank, rotateInertiaTensor } from "./mass";
 import { add, clamp, normalize, quatIdentity, rotateVec, scale, vec3 } from "./math";
 import type { SensorDevice } from "./parts";
 import { DEFAULT_PROP_CURVE, estimatePropulsionPeakThrust } from "./propulsion";
-import type { AeroSurface, AircraftModel, ControlAxis, Inertia, PropulsionPoint, ThrustPoint } from "./types";
+import type {
+  AeroSurface,
+  AircraftModel,
+  ControlAxis,
+  FuelTankMass,
+  JetPropulsionPoint,
+  MassElement,
+  PropulsionPoint,
+  ThrustPoint,
+  VariableSweep,
+} from "./types";
 
 // The aircraft builder's keystone: a PURE fold from a parts list to the physical AircraftModel that
 // stepAircraft consumes. Wings become aerodynamic surfaces with local axes and optional moving control
@@ -143,8 +155,10 @@ export interface CompiledAirframe {
 }
 
 interface PartBox {
+  id: string;
   mass: number;
   offset: Vec3;
+  rotation: Quaternion;
   dimX: number; // body lateral extent (m)
   dimY: number; // body vertical extent
   dimZ: number; // body longitudinal extent
@@ -177,6 +191,7 @@ function makeSurface(
     up: Vec3;
     kind: AeroSurface["kind"];
     control?: AeroSurface["control"];
+    sweep?: VariableSweep;
   },
 ): AeroSurface {
   const aspectRatio = opts.areaM2 > 0 ? (opts.spanM * opts.spanM) / opts.areaM2 : 1;
@@ -193,9 +208,10 @@ function makeSurface(
     kind: opts.kind,
     liftSlope: vertical ? 3.8 : 4.7,
     zeroLiftCl: vertical ? 0 : 0.24,
-    cd0: vertical ? 0.018 : 0.026,
+    cd0: vertical ? 0.012 : 0.008,
     stallAoARad: STALL_AOA_RAD,
     ...(opts.control ? { control: opts.control } : {}),
+    ...(opts.sweep ? { sweep: opts.sweep } : {}),
   };
 }
 
@@ -224,6 +240,7 @@ function wingSurfaces(part: Extract<Part, { kind: "wing" }>): AeroSurface[] {
           up: panelUp,
           kind: "horizontal",
           control: controlFor("roll", -side, fraction),
+          sweep: part.sweep,
         });
       },
     );
@@ -246,6 +263,7 @@ function wingSurfaces(part: Extract<Part, { kind: "wing" }>): AeroSurface[] {
       up,
       kind: yawSurface ? "vertical" : "horizontal",
       control,
+      sweep: yawSurface ? undefined : part.sweep,
     }),
   ];
 }
@@ -259,6 +277,19 @@ function thrustPoint(part: Extract<Part, { kind: "engine" }>): ThrustPoint {
   };
 }
 
+function jetPropulsionPoint(engine: Extract<Part, { kind: "engine" }>): JetPropulsionPoint {
+  return {
+    id: engine.id,
+    engineId: engine.id,
+    dryThrustN: engine.thrustN,
+    afterburnerThrustN: engine.afterburnerThrustN ?? engine.thrustN,
+    idleThrustFraction: engine.idleThrustFraction ?? 0.06,
+    afterburnerThrottle: engine.afterburnerThrottle ?? 0.82,
+    localOffset: engine.pose.offset,
+    localForward: rotateVec(engine.pose.rotation, vec3(0, 0, -1)),
+  };
+}
+
 function propulsionPoint(
   engine: Extract<Part, { kind: "engine" }>,
   prop: Extract<Part, { kind: "prop" }>,
@@ -268,6 +299,7 @@ function propulsionPoint(
     engineId: engine.id,
     propId: prop.id,
     maxPowerW: engine.maxPowerW ?? Math.max(engine.thrustN * 36, 1),
+    criticalAltitudeM: engine.criticalAltitudeM ?? 0,
     idleRpm: engine.idleRpm ?? 650,
     maxRpm: engine.maxRpm ?? 2850,
     diameterM: prop.radius * 2,
@@ -282,15 +314,21 @@ function propulsionPoint(
 
 function pairPropulsions(parts: Part[]): {
   propulsions: PropulsionPoint[];
+  jetPropulsions: JetPropulsionPoint[];
   staticEngines: Extract<Part, { kind: "engine" }>[];
 } {
   const engines = parts.filter((part): part is Extract<Part, { kind: "engine" }> => part.kind === "engine");
   const props = parts.filter((part): part is Extract<Part, { kind: "prop" }> => part.kind === "prop");
   const usedProps = new Set<string>();
   const propulsions: PropulsionPoint[] = [];
+  const jetPropulsions: JetPropulsionPoint[] = [];
   const staticEngines: Extract<Part, { kind: "engine" }>[] = [];
 
   for (const engine of engines) {
+    if (engine.afterburnerThrustN !== undefined) {
+      jetPropulsions.push(jetPropulsionPoint(engine));
+      continue;
+    }
     if (!engine.maxPowerW) {
       staticEngines.push(engine);
       continue;
@@ -312,7 +350,7 @@ function pairPropulsions(parts: Part[]): {
     propulsions.push(propulsionPoint(engine, match));
   }
 
-  return { propulsions, staticEngines };
+  return { propulsions, jetPropulsions, staticEngines };
 }
 
 function partDistanceSquared(a: Vec3, b: Vec3): number {
@@ -322,71 +360,129 @@ function partDistanceSquared(a: Vec3, b: Vec3): number {
   return dx * dx + dy * dy + dz * dz;
 }
 
+function massElementFromBox(box: PartBox): MassElement {
+  return {
+    id: box.id,
+    massKg: box.mass,
+    localOffset: box.offset,
+    localInertia: rotateInertiaTensor(
+      boxInertiaTensor(box.mass, box.dimX, box.dimY, box.dimZ),
+      box.rotation,
+    ),
+  };
+}
+
 // A massive part's mass, body-frame position, and bounding-box extents — the inputs to CoM + box
-// inertia. Sensors are treated as massless structure and contribute nothing. (Tanks: fuel milestone.)
+// inertia. Sensors and crew stations are massless sockets and contribute nothing. (Tanks: fuel milestone.)
 function partBox(part: Part): PartBox | null {
   switch (part.kind) {
     case "fuselage":
-      return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.width, dimY: part.dims.height, dimZ: part.dims.length };
+      return {
+        id: part.id,
+        mass: part.massKg,
+        offset: part.pose.offset,
+        rotation: part.pose.rotation,
+        dimX: part.dims.width,
+        dimY: part.dims.height,
+        dimZ: part.dims.length,
+      };
     case "wing": {
       const vertical = part.control?.axis === "yaw"; // a fin's span runs up the Y axis
       return vertical
-        ? { mass: part.massKg, offset: part.pose.offset, dimX: WING_THICKNESS_M, dimY: part.planform.span, dimZ: part.planform.chord }
-        : { mass: part.massKg, offset: part.pose.offset, dimX: part.planform.span, dimY: WING_THICKNESS_M, dimZ: part.planform.chord };
+        ? {
+            id: part.id,
+            mass: part.massKg,
+            offset: part.pose.offset,
+            rotation: part.pose.rotation,
+            dimX: WING_THICKNESS_M,
+            dimY: part.planform.span,
+            dimZ: part.planform.chord,
+          }
+        : {
+            id: part.id,
+            mass: part.massKg,
+            offset: part.pose.offset,
+            rotation: part.pose.rotation,
+            dimX: part.planform.span,
+            dimY: WING_THICKNESS_M,
+            dimZ: part.planform.chord,
+          };
     }
     case "engine":
-      return { mass: part.massKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
-    case "prop":
       return {
+        id: part.id,
         mass: part.massKg,
         offset: part.pose.offset,
+        rotation: part.pose.rotation,
+        dimX: part.dims.radius * 2,
+        dimY: part.dims.radius * 2,
+        dimZ: part.dims.length,
+      };
+    case "prop":
+      return {
+        id: part.id,
+        mass: part.massKg,
+        offset: part.pose.offset,
+        rotation: part.pose.rotation,
         dimX: part.radius * 2,
         dimY: part.radius * 2,
         dimZ: Math.max(0.08, part.radius * 0.08),
       };
     case "canopy":
       return {
+        id: part.id,
         mass: part.massKg,
         offset: part.pose.offset,
+        rotation: part.pose.rotation,
         dimX: part.dims.width,
         dimY: part.dims.height,
         dimZ: part.dims.length,
       };
     case "gear":
       return {
+        id: part.id,
         mass: part.massKg,
         offset: part.pose.offset,
+        rotation: part.pose.rotation,
         dimX: Math.max(part.trackM, part.wheelRadiusM * 2),
         dimY: part.heightM,
         dimZ: part.wheelRadiusM * 2,
       };
     case "weapon":
       return {
+        id: part.id,
         mass: part.massKg,
         offset: part.pose.offset,
+        rotation: part.pose.rotation,
         dimX: part.dims.width * part.count,
         dimY: part.dims.height,
         dimZ: part.dims.length,
       };
     case "tank":
-      // Full (wet) mass for CoM + inertia; inertia is held at the wet value as fuel burns (a stated cut).
-      return { mass: part.dryMassKg + part.fuelKg, offset: part.pose.offset, dimX: part.dims.radius * 2, dimY: part.dims.radius * 2, dimZ: part.dims.length };
+      return {
+        id: `${part.id}:dry`,
+        mass: part.dryMassKg,
+        offset: part.pose.offset,
+        rotation: part.pose.rotation,
+        dimX: part.dims.radius * 2,
+        dimY: part.dims.radius * 2,
+        dimZ: part.dims.length,
+      };
     default:
-      return null; // sensor
+      return null; // sensor / crew-station
   }
 }
 
-// Solid-box inertia about the part's own centroid + parallel-axis transfer to the aircraft CoM.
-// roll = about body Z (forward); pitch = about body X (right); yaw = about body Y (up). The box self
-// term is what gives a long fuselage its real pitch/yaw inertia (m·L²/12) — a point mass would miss it.
-function addBoxInertia(acc: Inertia, box: PartBox, com: Vec3): void {
-  const { mass: m, dimX, dimY, dimZ } = box;
-  const dx = box.offset.x - com.x;
-  const dy = box.offset.y - com.y;
-  const dz = box.offset.z - com.z;
-  acc.roll += (m * (dimX * dimX + dimY * dimY)) / 12 + m * (dx * dx + dy * dy);
-  acc.pitch += (m * (dimY * dimY + dimZ * dimZ)) / 12 + m * (dy * dy + dz * dz);
-  acc.yaw += (m * (dimX * dimX + dimZ * dimZ)) / 12 + m * (dx * dx + dz * dz);
+function fuelTankMass(part: Extract<Part, { kind: "tank" }>): FuelTankMass {
+  return {
+    id: part.id,
+    capacityKg: part.fuelKg,
+    localOffset: part.pose.offset,
+    localInertiaFull: rotateInertiaTensor(
+      boxInertiaTensor(part.fuelKg, part.dims.radius * 2, part.dims.radius * 2, part.dims.length),
+      part.pose.rotation,
+    ),
+  };
 }
 
 export function compileAirframe(airframe: Airframe): CompiledAirframe {
@@ -398,26 +494,27 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   let liftArea = 0;
   let liftAreaZ = 0;
   let maxLiftSpan = 0;
+  let sweptLiftArea = 0;
+  let sweepMinDeg = 0;
+  let sweepMaxDeg = 0;
+  let sweepMachForward = 0;
+  let sweepMachSwept = 0;
   const devices: SensorDevice[] = [];
   const aeroSurfaces: AeroSurface[] = [];
   const thrustPoints: ThrustPoint[] = [];
+  const jetPropulsions: JetPropulsionPoint[] = [];
   const propulsions: PropulsionPoint[] = [];
+  const fixedMassElements: MassElement[] = [];
+  const fuelTanks: FuelTankMass[] = [];
 
-  // Pass 1: scalar sums, lift geometry, and mass-weighted CoM accumulation.
-  let comMassX = 0;
-  let comMassY = 0;
-  let comMassZ = 0;
+  // Pass 1: scalar sums, lift geometry, and mass-element accumulation.
   for (const part of airframe.parts) {
     const box = partBox(part);
-    if (box) {
-      comMassX += box.mass * box.offset.x;
-      comMassY += box.mass * box.offset.y;
-      comMassZ += box.mass * box.offset.z;
-    }
+    if (box && box.mass > 0) fixedMassElements.push(massElementFromBox(box));
     switch (part.kind) {
       case "fuselage":
         massKg += part.massKg;
-        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.25;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.12;
         break;
       case "wing":
         massKg += part.massKg;
@@ -429,65 +526,80 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
           liftArea += area;
           liftAreaZ += area * part.pose.offset.z;
           if (part.planform.span > maxLiftSpan) maxLiftSpan = part.planform.span;
+          if (part.sweep) {
+            sweptLiftArea += area;
+            sweepMinDeg += part.sweep.minSweepDeg * area;
+            sweepMaxDeg += part.sweep.maxSweepDeg * area;
+            sweepMachForward += part.sweep.machForward * area;
+            sweepMachSwept += part.sweep.machSwept * area;
+          }
         }
         break;
       case "engine":
         massKg += part.massKg;
-        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.25;
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.14;
         break;
       case "prop":
         massKg += part.massKg;
-        parasiteDragAreaM2 += part.radius * part.radius * 0.012;
+        parasiteDragAreaM2 += part.radius * part.radius * 0.006;
         break;
       case "canopy":
         massKg += part.massKg;
-        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.08;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * 0.04;
         break;
       case "gear":
         massKg += part.massKg;
-        parasiteDragAreaM2 += part.style === "skid" ? part.trackM * 0.015 : part.wheelRadiusM * part.trackM * 0.04;
+        parasiteDragAreaM2 += part.style === "skid" ? part.trackM * 0.008 : part.wheelRadiusM * part.trackM * 0.018;
         break;
       case "weapon":
         massKg += part.massKg;
-        parasiteDragAreaM2 += part.dims.width * part.dims.height * Math.max(1, part.count) * 0.08;
+        parasiteDragAreaM2 += part.dims.width * part.dims.height * Math.max(1, part.count) * 0.04;
         break;
       case "tank":
         massKg += part.dryMassKg + part.fuelKg; // full mass; the fuel portion is burnable
         fuelCapacityKg += part.fuelKg;
-        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.2;
+        fuelTanks.push(fuelTankMass(part));
+        parasiteDragAreaM2 += Math.PI * part.dims.radius * part.dims.radius * 0.1;
         break;
       case "sensor":
         devices.push(part);
         break;
+      case "crew-station":
+        break;
     }
   }
 
-  const com: Vec3 = massKg > 0 ? vec3(comMassX / massKg, comMassY / massKg, comMassZ / massKg) : vec3(0, 0, 0);
+  const wetMassProperties = computeMassProperties(fixedMassElements, fuelTanks, fullFuelByTank({ fuelTanks }));
+  const dryMassProperties = computeMassProperties(fixedMassElements);
+  const com: Vec3 = wetMassProperties.com;
 
   const paired = pairPropulsions(airframe.parts);
   propulsions.push(...paired.propulsions);
+  jetPropulsions.push(...paired.jetPropulsions);
   for (const point of paired.propulsions) {
     maxThrustN += estimatePropulsionPeakThrust(point);
+  }
+  for (const point of paired.jetPropulsions) {
+    maxThrustN += Math.max(point.dryThrustN, point.afterburnerThrustN);
   }
   for (const engine of paired.staticEngines) {
     maxThrustN += engine.thrustN;
     thrustPoints.push(thrustPoint(engine));
   }
 
-  // Pass 2: inertia about the CoM. Floor each axis so a degenerate (massless) build can't divide by 0.
-  const inertia: Inertia = { roll: 0, pitch: 0, yaw: 0 };
-  for (const part of airframe.parts) {
-    const box = partBox(part);
-    if (box) addBoxInertia(inertia, box, com);
-  }
-  inertia.roll = Math.max(inertia.roll, 1);
-  inertia.pitch = Math.max(inertia.pitch, 1);
-  inertia.yaw = Math.max(inertia.yaw, 1);
-
   // Aerodynamic centre = area-weighted longitudinal centre of the lifting surfaces; aspect ratio from
   // the widest lifting span. Both fall back to safe values for a wingless build.
   const aeroCenterZ = liftArea > 0 ? liftAreaZ / liftArea : com.z;
   const aspectRatio = liftArea > 0 && maxLiftSpan > 0 ? (maxLiftSpan * maxLiftSpan) / liftArea : 6;
+  const variableSweep: VariableSweep | undefined = sweptLiftArea > 0 && liftArea > 0
+    ? {
+        minSweepDeg: sweepMinDeg / sweptLiftArea,
+        maxSweepDeg: sweepMaxDeg / sweptLiftArea,
+        machForward: sweepMachForward / sweptLiftArea,
+        machSwept: sweepMachSwept / sweptLiftArea,
+        affectedAreaFraction: Math.min(1, sweptLiftArea / liftArea),
+      }
+    : undefined;
 
   const auth = authorities(airframe.parts);
   const controlAuthority: Record<ControlAxis, number> = {
@@ -503,17 +615,36 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     maxRollRate: rateFor(BASE_ROLL_RATE, auth.roll, DEFAULT_AUTHORITY.roll),
     maxYawRate: rateFor(BASE_YAW_RATE, auth.yaw, DEFAULT_AUTHORITY.yaw),
     stallAoARad: STALL_AOA_RAD,
-    inertia,
+    inertia: wetMassProperties.inertia,
+    inertiaTensor: wetMassProperties.inertiaTensor,
     com,
     aeroCenterZ,
     staticMarginM: aeroCenterZ - com.z, // > 0 ⇒ CoM ahead of AC ⇒ statically stable
     aspectRatio,
+    fixedMassElements,
+    fuelTanks,
+    wetMassProperties,
+    dryMassProperties,
     aeroSurfaces,
     thrustPoints,
+    jetPropulsions,
     propulsions,
+    ...(variableSweep ? { variableSweep } : {}),
+    ...(jetPropulsions.length > 0 || variableSweep
+      ? {
+          machAero: {
+            dragRiseMach: variableSweep ? 0.78 : 0.72,
+            waveDragCd: variableSweep ? 0.009 : 0.026,
+            supersonicWaveDragCd: variableSweep ? 0.0076 : 0.024,
+            parasiteAreaScale: variableSweep ? 0.48 : 0.76,
+            maxMach: variableSweep ? 2.38 : 1.05,
+            qLimitPa: variableSweep ? 75_000 : 58_000,
+          },
+        }
+      : {}),
     controlAuthority,
     parasiteDragAreaM2,
-    dryMassKg: massKg - fuelCapacityKg,
+    dryMassKg: dryMassProperties.massKg,
     fuelCapacityKg,
   };
 
@@ -528,17 +659,19 @@ export interface AirframeReport {
   maxYawRate: number;
   surfaceCount: number;
   thrustPointCount: number;
+  jetPropulsionCount: number;
   propulsionCount: number;
   controlAuthority: Record<ControlAxis, number>;
   warnings: string[];
 }
 
-// Flyability cues for the builder, computed against the EXACT sim constants (9.81 m/s², the 62 m/s
-// stall floor that stepAircraft enforces). Warnings, not hard blocks — feeling a bad design is the game.
+// Flyability cues for the builder, computed against the same aero helpers stepAircraft uses. Warnings,
+// not hard blocks — feeling a bad design is the game.
 export function airframeReport(model: AircraftModel): AirframeReport {
-  const weightN = model.massKg * 9.81;
+  const weightN = model.massKg * GRAVITY_MPS2;
   const thrustToWeight = model.maxThrustN / weightN;
   const wingLoadingNm2 = model.wingAreaM2 > 0 ? weightN / model.wingAreaM2 : Infinity;
+  const seaLevelStallMps = stallSpeedMps(model, SEA_LEVEL_DENSITY_KG_M3, model.massKg);
   const warnings: string[] = [];
 
   if (model.wingAreaM2 <= 0) {
@@ -547,12 +680,20 @@ export function airframeReport(model: AircraftModel): AirframeReport {
     warnings.push("very high wing loading: needs high speed to stay airborne");
   }
   if (thrustToWeight < 0.3) {
-    warnings.push("low thrust-to-weight (<0.3): may not accelerate past the 62 m/s stall floor");
+    const stallCue = Number.isFinite(seaLevelStallMps)
+      ? `${Math.round(seaLevelStallMps)} m/s sea-level stall speed`
+      : "stall speed";
+    warnings.push(`low thrust-to-weight (<0.3): may not accelerate past its ${stallCue}`);
   }
   if (model.aeroSurfaces.length === 0) {
     warnings.push("no aerodynamic surfaces: the aircraft is ballistic");
   }
-  if (model.thrustPoints.length === 0 && model.propulsions.length === 0 && model.maxThrustN > 0) {
+  if (
+    model.thrustPoints.length === 0 &&
+    model.jetPropulsions.length === 0 &&
+    model.propulsions.length === 0 &&
+    model.maxThrustN > 0
+  ) {
     warnings.push("thrust has no mounted engine point");
   }
   for (const axis of ["roll", "pitch", "yaw"] as const) {
@@ -573,6 +714,7 @@ export function airframeReport(model: AircraftModel): AirframeReport {
     maxYawRate: model.maxYawRate,
     surfaceCount: model.aeroSurfaces.length,
     thrustPointCount: model.thrustPoints.length,
+    jetPropulsionCount: model.jetPropulsions.length,
     propulsionCount: model.propulsions.length,
     controlAuthority: model.controlAuthority,
     warnings,

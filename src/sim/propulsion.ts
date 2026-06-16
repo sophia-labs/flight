@@ -11,15 +11,17 @@ export interface PropellerSample {
 }
 
 const MIN_CP = 0.008;
+const SEA_LEVEL_DENSITY_KG_M3 = 1.225;
+const DENSITY_SCALE_HEIGHT_M = 8_800;
 
 export const DEFAULT_PROP_CURVE: PropCurvePoint[] = [
-  { j: 0, ct: 0.22, cp: 0.09 },
-  { j: 0.25, ct: 0.205, cp: 0.095 },
-  { j: 0.5, ct: 0.16, cp: 0.085 },
-  { j: 0.75, ct: 0.105, cp: 0.068 },
-  { j: 1.0, ct: 0.052, cp: 0.049 },
-  { j: 1.2, ct: 0.012, cp: 0.035 },
-  { j: 1.35, ct: -0.01, cp: 0.028 },
+  { j: 0, ct: 0.2, cp: 0.09 },
+  { j: 0.25, ct: 0.19, cp: 0.092 },
+  { j: 0.5, ct: 0.15, cp: 0.083 },
+  { j: 0.75, ct: 0.1, cp: 0.066 },
+  { j: 1.0, ct: 0.055, cp: 0.048 },
+  { j: 1.25, ct: 0.024, cp: 0.034 },
+  { j: 1.5, ct: 0.008, cp: 0.026 },
 ];
 
 export function samplePropulsion(
@@ -31,7 +33,7 @@ export function samplePropulsion(
   const density = Math.max(densityKgM3, 0.05);
   const throttle = Math.max(0, Math.min(1, throttleSetting));
   const diameter = Math.max(point.diameterM, 0.2);
-  const powerAvailableW = point.maxPowerW * throttle * densityPowerFactor(densityKgM3);
+  const powerAvailableW = point.maxPowerW * throttle * densityPowerFactor(point, density);
   if (powerAvailableW <= 0) {
     return zeroSample(point, 0);
   }
@@ -58,7 +60,10 @@ export function samplePropulsion(
   const j = advanceRatio(airspeedMps, rps, diameter);
   const coeff = coefficients(point, j);
   const shaftPowerW = Math.min(powerAvailableW, coeff.cp * density * rps ** 3 * diameter ** 5);
-  const thrustN = coeff.ct * density * rps ** 2 * diameter ** 4;
+  const coefficientThrustN = coeff.ct * density * rps ** 2 * diameter ** 4;
+  const propulsiveThrustN =
+    airspeedMps > 8 ? (propulsiveEfficiency(point, j) * shaftPowerW) / Math.max(airspeedMps, 1) : Infinity;
+  const thrustN = Math.max(0, Math.min(coefficientThrustN, propulsiveThrustN));
   return {
     thrustN: Number.isFinite(thrustN) ? thrustN : 0,
     shaftPowerW: Number.isFinite(shaftPowerW) ? shaftPowerW : 0,
@@ -83,18 +88,34 @@ export function estimatePropulsionPeakThrust(point: PropulsionPoint, densityKgM3
 
 function coefficients(point: PropulsionPoint, advanceRatioValue: number) {
   const diameter = Math.max(point.diameterM, 0.2);
-  const pitchRatio = clamp(point.pitchM / diameter, 0.35, 1.35);
-  const pitchJScale = clamp(pitchRatio / 0.7, 0.62, 1.48);
+  const pitchRatio = effectivePitchRatio(point, advanceRatioValue, diameter);
+  const pitchJScale = clamp(pitchRatio / 0.7, 0.62, 2.35);
   const bladeCtScale = 1 + (point.bladeCount - 3) * 0.04;
   const bladeCpScale = 1 + (point.bladeCount - 3) * 0.08;
-  const pitchCtScale = clamp(1 + (pitchRatio - 0.7) * 0.22, 0.84, 1.14);
-  const pitchCpScale = clamp(1 + (pitchRatio - 0.7) * 0.32, 0.82, 1.22);
+  const pitchCtScale = clamp(1 + (pitchRatio - 0.7) * 0.16, 0.84, 1.16);
+  const pitchCpScale = clamp(1 + (pitchRatio - 0.7) * 0.24, 0.82, 1.25);
   const lookupJ = advanceRatioValue / pitchJScale;
   const curve = point.curve.length >= 2 ? point.curve : DEFAULT_PROP_CURVE;
   return {
     ct: interpolateCurve(curve, lookupJ, "ct") * bladeCtScale * pitchCtScale,
     cp: Math.max(interpolateCurve(curve, lookupJ, "cp") * bladeCpScale * pitchCpScale, MIN_CP),
   };
+}
+
+function effectivePitchRatio(point: PropulsionPoint, advanceRatioValue: number, diameterM: number): number {
+  const basePitchRatio = clamp(point.pitchM / diameterM, 0.35, 1.45);
+  if (point.mode !== "constant-speed") return basePitchRatio;
+  return clamp(Math.max(basePitchRatio, advanceRatioValue * 0.78), basePitchRatio, 1.65);
+}
+
+function propulsiveEfficiency(point: PropulsionPoint, advanceRatioValue: number): number {
+  const bestJ = point.mode === "constant-speed" ? 1.05 : 0.75;
+  const bladeEfficiency = point.bladeCount <= 2 ? 0.9 : clamp(1 + (point.bladeCount - 3) * 0.025, 0.95, 1.06);
+  const peakEfficiency = (point.mode === "constant-speed" ? 0.86 : 0.74) * bladeEfficiency;
+  const rise = Math.sin(clamp(advanceRatioValue / bestJ, 0, 1) * (Math.PI / 2));
+  const overspeedStart = point.mode === "constant-speed" ? 1.6 : 1.15;
+  const overspeedPenalty = clamp(1 - Math.max(0, advanceRatioValue - overspeedStart) * 0.35, 0.65, 1);
+  return peakEfficiency * rise * overspeedPenalty;
 }
 
 function interpolateCurve(curve: PropCurvePoint[], j: number, key: "ct" | "cp"): number {
@@ -126,8 +147,11 @@ function advanceRatio(airspeedMps: number, rps: number, diameterM: number): numb
   return Math.max(0, airspeedMps) / Math.max(rps * diameterM, 0.1);
 }
 
-function densityPowerFactor(densityKgM3: number): number {
-  return clamp((densityKgM3 / 1.225) ** 0.85, 0.18, 1.05);
+function densityPowerFactor(point: PropulsionPoint, densityKgM3: number): number {
+  const criticalAltitudeM = Math.max(0, point.criticalAltitudeM);
+  const criticalDensity = SEA_LEVEL_DENSITY_KG_M3 * Math.exp(-criticalAltitudeM / DENSITY_SCALE_HEIGHT_M);
+  if (densityKgM3 >= criticalDensity) return 1;
+  return clamp((densityKgM3 / criticalDensity) ** 1.35, 0.08, 1.03);
 }
 
 function clamp(value: number, min: number, max: number): number {

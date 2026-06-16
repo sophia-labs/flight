@@ -121,6 +121,17 @@ function lerpAircraft(a: AircraftSnapshot, b: AircraftSnapshot | undefined, t: n
     altitude: lerp(a.altitude, b.altitude, t),
     aoaDeg: lerp(a.aoaDeg, b.aoaDeg, t),
     gLoad: lerp(a.gLoad, b.gLoad, t),
+    ...(lerpMaybe(a.mach, b.mach, t) !== undefined ? { mach: lerpMaybe(a.mach, b.mach, t) } : {}),
+    ...(lerpMaybe(a.dynamicPressurePa, b.dynamicPressurePa, t) !== undefined
+      ? { dynamicPressurePa: lerpMaybe(a.dynamicPressurePa, b.dynamicPressurePa, t) }
+      : {}),
+    ...(lerpMaybe(a.sweepDeg, b.sweepDeg, t) !== undefined
+      ? { sweepDeg: lerpMaybe(a.sweepDeg, b.sweepDeg, t) }
+      : {}),
+    ...(a.afterburner || b.afterburner ? { afterburner: t < 0.5 ? a.afterburner === true : b.afterburner === true } : {}),
+    ...(lerpMaybe(a.engineSpool, b.engineSpool, t) !== undefined
+      ? { engineSpool: lerpMaybe(a.engineSpool, b.engineSpool, t) }
+      : {}),
     health: lerp(a.health, b.health, t),
     weaponCooldown: lerp(a.weaponCooldown, b.weaponCooldown, t),
     stalled: t < 0.5 ? a.stalled : b.stalled,

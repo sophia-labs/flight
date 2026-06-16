@@ -20,6 +20,39 @@ export interface Inertia {
   yaw: number;
 }
 
+export interface Mat3 {
+  xx: number;
+  xy: number;
+  xz: number;
+  yx: number;
+  yy: number;
+  yz: number;
+  zx: number;
+  zy: number;
+  zz: number;
+}
+
+export interface MassElement {
+  id: string;
+  massKg: number;
+  localOffset: Vec3;
+  localInertia: Mat3; // inertia about this element's centroid, expressed in body axes
+}
+
+export interface FuelTankMass {
+  id: string;
+  capacityKg: number;
+  localOffset: Vec3;
+  localInertiaFull: Mat3; // fuel inertia about the tank centroid at full capacity, body axes
+}
+
+export interface MassProperties {
+  massKg: number;
+  com: Vec3;
+  inertiaTensor: Mat3; // about current CoM, expressed in body axes (+X right, +Y up, +Z aft)
+  inertia: Inertia; // compatibility summary: roll=Izz, pitch=Ixx, yaw=Iyy
+}
+
 export type ControlAxis = "pitch" | "roll" | "yaw";
 
 export interface AeroSurfaceControl {
@@ -27,6 +60,23 @@ export interface AeroSurfaceControl {
   sign: number;
   maxDeflectionRad: number;
   effectiveness: number;
+}
+
+export interface VariableSweep {
+  minSweepDeg: number;
+  maxSweepDeg: number;
+  machForward: number;
+  machSwept: number;
+  affectedAreaFraction?: number;
+}
+
+export interface MachAeroProfile {
+  dragRiseMach: number;
+  waveDragCd: number;
+  supersonicWaveDragCd: number;
+  parasiteAreaScale?: number;
+  maxMach?: number;
+  qLimitPa?: number;
 }
 
 export interface AeroSurface {
@@ -44,6 +94,7 @@ export interface AeroSurface {
   cd0: number;
   stallAoARad: number;
   control?: AeroSurfaceControl;
+  sweep?: VariableSweep;
 }
 
 export interface ThrustPoint {
@@ -53,11 +104,23 @@ export interface ThrustPoint {
   localForward: Vec3;
 }
 
+export interface JetPropulsionPoint {
+  id: string;
+  engineId: string;
+  dryThrustN: number;
+  afterburnerThrustN: number;
+  idleThrustFraction: number;
+  afterburnerThrottle: number;
+  localOffset: Vec3;
+  localForward: Vec3;
+}
+
 export interface PropulsionPoint {
   id: string;
   engineId: string;
   propId: string;
   maxPowerW: number;
+  criticalAltitudeM: number;
   idleRpm: number;
   maxRpm: number;
   diameterM: number;
@@ -82,13 +145,21 @@ export interface AircraftModel {
   stallAoARad: number;
   // --- v0.7 surface-force rigid body: derived from airframe geometry by compileAirframe ---
   inertia: Inertia; // resists angular acceleration; from part masses + layout (box self + parallel axis)
+  inertiaTensor: Mat3; // full wet inertia tensor about com; old inertia is the diagonal summary
   com: Vec3; // centre of mass, body frame (m); the point moment arms + inertia are measured from
   aeroCenterZ: number; // area-weighted longitudinal centre of the lifting surfaces (m, body Z)
   staticMarginM: number; // aeroCenterZ − com.z; > 0 = CoM ahead of AC = statically stable
   aspectRatio: number; // span²/area of the lifting surfaces; drives induced drag
+  fixedMassElements: MassElement[];
+  fuelTanks: FuelTankMass[];
+  wetMassProperties: MassProperties;
+  dryMassProperties: MassProperties;
   aeroSurfaces: AeroSurface[];
   thrustPoints: ThrustPoint[];
+  jetPropulsions: JetPropulsionPoint[];
   propulsions: PropulsionPoint[];
+  variableSweep?: VariableSweep;
+  machAero?: MachAeroProfile;
   controlAuthority: Record<ControlAxis, number>;
   parasiteDragAreaM2: number;
   dryMassKg: number; // massKg − fuelCapacityKg (structure + payload, no fuel)
@@ -112,6 +183,9 @@ export interface AircraftState {
   // between frames — the momentum the kinematic puppet never had — and remaining fuel mass (kg).
   angularVelocity: Vec3;
   fuelKg: number;
+  fuelByTankKg?: Record<string, number>;
+  massProperties?: MassProperties;
+  engineSpool?: number; // jet throttle response state, 0..1; prop aircraft ignore it
   devices?: SensorDevice[]; // v0.4.0: mounted sensors (camera, …). Static config, not per-frame state.
   // v0.5.0: the source airframe this aircraft was compiled from (model + devices above are its output).
   // Config-time metadata, NOT copied into AircraftSnapshot — runMatch records it onto the replay so the
@@ -141,6 +215,11 @@ export interface FlightMetrics {
   aoaDeg: number;
   gLoad: number;
   stalled: boolean;
+  mach?: number;
+  dynamicPressurePa?: number;
+  sweepDeg?: number;
+  afterburner?: boolean;
+  engineSpool?: number;
 }
 
 // v0.9.x simulated projectile (a bullet in flight). Spawned at the muzzle on a fired shot, integrated
@@ -221,6 +300,13 @@ export function toSnapshot(aircraft: AircraftState): AircraftSnapshot {
     altitude: aircraft.metrics.altitude,
     aoaDeg: aircraft.metrics.aoaDeg,
     gLoad: aircraft.metrics.gLoad,
+    ...(aircraft.metrics.mach !== undefined ? { mach: aircraft.metrics.mach } : {}),
+    ...(aircraft.metrics.dynamicPressurePa !== undefined
+      ? { dynamicPressurePa: aircraft.metrics.dynamicPressurePa }
+      : {}),
+    ...(aircraft.metrics.sweepDeg !== undefined ? { sweepDeg: aircraft.metrics.sweepDeg } : {}),
+    ...(aircraft.metrics.afterburner !== undefined ? { afterburner: aircraft.metrics.afterburner } : {}),
+    ...(aircraft.metrics.engineSpool !== undefined ? { engineSpool: aircraft.metrics.engineSpool } : {}),
     health: aircraft.health,
     weaponCooldown: aircraft.weaponCooldown,
     stalled: aircraft.metrics.stalled,

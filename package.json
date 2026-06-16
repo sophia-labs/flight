@@ -16,6 +16,8 @@
     "export:native-timeline": "tsx src/headless/renderNative.ts --timeline-only",
     "render:native": "tsx src/headless/renderNative.ts",
     "demo:physics": "tsx src/headless/surfaceDemo.ts",
+    "audit:props": "tsx src/headless/propPerformanceAudit.ts",
+    "audit:envelopes": "tsx src/headless/performanceEnvelopeReport.ts",
     "clip:controls": "tsx src/headless/cockpitClip.ts",
     "probe:pilot-capture": "tsx src/headless/probePilotCapture.ts",
     "stills:pairs": "tsx src/headless/cockpitStills.ts",

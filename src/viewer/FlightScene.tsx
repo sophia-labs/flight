@@ -395,6 +395,7 @@ function AircraftMesh({
         stalled={ship.stalled}
         surfaceControls={ship.surfaceControls ?? deriveSurfaceControls(parts, ship.controls)}
         controls={ship.controls}
+        sweepDeg={ship.sweepDeg}
       />
       {showCockpit ? (
         <>

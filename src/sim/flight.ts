@@ -1,4 +1,18 @@
 import { clampControlInput, type ControlInput, type ReplayEvent } from "../protocol/schema";
+import {
+  GRAVITY,
+  GRAVITY_MPS2,
+  densityAtAltitude,
+  dynamicPressure,
+  machAtSpeed,
+  machControlFactor,
+  machLiftSlopeFactor,
+  machWaveDragCd,
+  modelSweepState,
+  airspeedLimitExceedance,
+  stallSpeedMps,
+  sweepStateForMach,
+} from "./aero";
 import { compileAirframe, defaultAirframe } from "./airframe";
 import {
   add,
@@ -6,14 +20,24 @@ import {
   clamp,
   cross,
   dot,
+  integrateLocalAngularVelocity,
+  lerp,
   length,
   normalize,
-  rotateAroundWorldAxis,
   rotateVec,
   scale,
   sub,
   vec3,
 } from "./math";
+import {
+  bodyRatesToLocalOmega,
+  burnFuel,
+  currentMassProperties,
+  integrateBodyAngularVelocity,
+  localOmegaToBodyRates,
+  worldVectorToLocal,
+} from "./mass";
+import { sampleJetPropulsion } from "./jet";
 import { samplePropulsion } from "./propulsion";
 import { surfaceControlSnapshot, surfaceEffectiveDeflectionRad } from "./types";
 import type {
@@ -26,8 +50,6 @@ import type {
   SurfaceAerodynamicState,
 } from "./types";
 
-const GRAVITY = vec3(0, -9.81, 0);
-const SEA_LEVEL_DENSITY = 1.225;
 const TERRAIN_FLOOR_M = 55;
 
 // Oswald span efficiency for the induced-drag polar cd_i = cl²/(π·AR·e). With the default AR≈7.5 this
@@ -38,6 +60,13 @@ const OSWALD_E = 0.8;
 // Numerical guardrail, not an authority model: forces still decide the acceleration, but absurd builds
 // and high-speed stalls cannot integrate to unbounded spin rates in one coarse replay frame.
 const MAX_BODY_RATE_RAD_S = 5.5;
+
+// Live overspeed is intentionally soft before it is catastrophic: buffet/drag shows up first, then
+// sustained over-q or over-Mach starts hurting the airframe. Envelope sweeps use the same limits as a
+// hard boundary because they are measuring usable performance, not damage tolerance.
+const OVERSPEED_DAMAGE_PER_S = 22;
+const OVERSPEED_DRAG_AREA_M2 = 0.35;
+const JET_IDLE_SPOOL = 0.14;
 
 // Specific fuel consumption (kg burned per N of thrust per second). Sized so an ~1800 kg tank gives
 // ~400 s of full-throttle endurance — visible drain over a long fight, not match-ending in a short one.
@@ -128,10 +157,6 @@ function closestApproachSqToPoint(
 // source of truth) rather than a hand-written literal now that the model carries derived inertia/CoM/etc.
 export const DEFAULT_MODEL: AircraftModel = compileAirframe(defaultAirframe()).model;
 
-function densityAtAltitude(altitudeM: number): number {
-  return SEA_LEVEL_DENSITY * Math.exp(-Math.max(altitudeM, 0) / 8_800);
-}
-
 function bodyOmegaWorld(aircraft: AircraftState) {
   const basis = basisFromQuat(aircraft.orientation);
   return add(
@@ -154,10 +179,12 @@ function sampleSurface(
   aircraft: AircraftState,
   controls: ControlInput,
   density: number,
+  altitudeM: number,
   omegaWorld: ReturnType<typeof vec3>,
+  com: ReturnType<typeof vec3>,
 ): SurfaceSample {
   const basis = basisFromQuat(aircraft.orientation);
-  const rWorld = rotateVec(aircraft.orientation, sub(surface.localOffset, aircraft.model.com));
+  const rWorld = rotateVec(aircraft.orientation, sub(surface.localOffset, com));
   const surfaceVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
   const surfaceSpeed = length(surfaceVelocity);
   if (surfaceSpeed < 0.5 || surface.areaM2 <= 0) {
@@ -179,29 +206,49 @@ function sampleSurface(
   const alpha = Math.atan2(-vLift, Math.max(Math.abs(vForward), 1));
   const deflection = surfaceEffectiveDeflectionRad(surface, controls);
   const alphaEffective = alpha + deflection;
+  const mach = machAtSpeed(surfaceSpeed, altitudeM);
+  const sweep = sweepStateForMach(surface.sweep, mach);
+  const sweepDeg = sweep?.sweepDeg ?? 0;
+  const liftSlopeFactor = machLiftSlopeFactor(mach, sweepDeg);
+  const controlFactor = machControlFactor(mach);
+  const sweepT = sweep?.t ?? 0;
+  const stallAoA = surface.stallAoARad * (1 - 0.18 * sweepT);
   const stallSeverity = clamp(
-    (Math.abs(alphaEffective) - surface.stallAoARad) / Math.max(surface.stallAoARad * 0.85, 1e-3),
+    (Math.abs(alphaEffective) - stallAoA) / Math.max(stallAoA * 0.85, 1e-3),
     0,
     1,
   );
 
-  const clLinear = surface.zeroLiftCl + surface.liftSlope * alphaEffective;
-  const cl = clamp(clLinear, -1.28, 1.55) * (1 - stallSeverity * 0.78);
-  const inducedDrag = (cl * cl) / (Math.PI * Math.max(surface.aspectRatio, 0.3) * OSWALD_E);
+  const zeroLiftCl = surface.zeroLiftCl * (1 - 0.45 * sweepT);
+  const clLinear = zeroLiftCl + surface.liftSlope * liftSlopeFactor * (alpha + deflection * controlFactor);
+  const positiveClMax = (surface.kind === "vertical" ? 1.25 : 1.55) * (1 - 0.24 * sweepT);
+  const negativeClMax = (surface.kind === "vertical" ? 1.1 : 1.28) * (1 - 0.2 * sweepT);
+  const clAttached = clamp(clLinear, -negativeClMax, positiveClMax);
+  const clSeparated = Math.sin(2 * alphaEffective) * (surface.kind === "vertical" ? 0.32 : 0.38);
+  const cl = lerp(clAttached, clSeparated, stallSeverity);
+  const sweepAspect = sweep ? surface.aspectRatio * (1 - sweep.affectedAreaFraction * (1 - Math.cos(sweep.sweepRad) ** 2) * 0.85) : surface.aspectRatio;
+  const inducedDrag = (cl * cl) / (Math.PI * Math.max(sweepAspect, 0.3) * OSWALD_E);
   const aileronDrag = surface.control?.axis === "roll" ? Math.max(0, -deflection) * 0.11 : 0;
+  const separatedDrag = stallSeverity * (0.38 + 0.32 * Math.sin(Math.min(Math.abs(alphaEffective), Math.PI / 2)) ** 2);
+  const waveDrag = machWaveDragCd(mach, sweepDeg, aircraft.model.machAero);
   const cd =
-    surface.cd0 + inducedDrag + stallSeverity * 0.38 + Math.abs(deflection) * 0.035 + aileronDrag;
-  const qbar = 0.5 * density * surfaceSpeed * surfaceSpeed;
+    surface.cd0 + waveDrag + inducedDrag + separatedDrag + Math.abs(deflection) * 0.035 + aileronDrag;
+  const qbar = dynamicPressure(density, surfaceSpeed);
 
   const vhat = normalize(surfaceVelocity, forward);
   const liftDir = normalize(sub(up, scale(vhat, dot(up, vhat))), up);
   const liftForce = scale(liftDir, qbar * surface.areaM2 * cl);
   const dragForce = scale(vhat, -qbar * surface.areaM2 * cd);
   const force = add(liftForce, dragForce);
+  const cpShiftWorld = rotateVec(
+    aircraft.orientation,
+    scale(surface.localForward, -surface.chordM * 0.18 * stallSeverity),
+  );
+  const forceArmWorld = add(rWorld, cpShiftWorld);
   return {
     force,
     liftForce,
-    torque: cross(rWorld, force),
+    torque: cross(forceArmWorld, force),
     alpha,
     alphaEffective,
     stallSeverity,
@@ -310,17 +357,25 @@ function stepAircraft(
   const bodyVerticalSpeed = dot(aircraft.velocity, basis.up);
   const aoa = Math.atan2(-bodyVerticalSpeed, Math.max(Math.abs(forwardSpeed), 1));
   const density = densityAtAltitude(aircraft.position.y);
-  const qbar = 0.5 * density * speed * speed;
+  const qbar = dynamicPressure(density, speed);
+  const mach = machAtSpeed(speed, aircraft.position.y);
+  const sweep = modelSweepState(model, speed, aircraft.position.y);
+  const overspeed = airspeedLimitExceedance(model, speed, aircraft.position.y);
 
   // Fuel: a tanked airframe (fuelCapacityKg > 0) burns ∝ thrust and cuts thrust when dry; a tankless
-  // one has infinite fuel. effectiveMass shrinks as fuel burns, so the aircraft accelerates/climbs
-  // better light. (CoM + inertia are held at the wet value — a stated cut.)
+  // one has infinite fuel. Fuel lives in individual tanks, so burn changes total mass, CoM, and inertia.
+  currentMassProperties(aircraft);
   const tanked = model.fuelCapacityKg > 0;
   const hasFuel = !tanked || aircraft.fuelKg > 0;
-  const thrustSetting = hasFuel ? 0.14 + controls.throttle * 0.86 : 0;
+  const targetThrustSetting = hasFuel ? JET_IDLE_SPOOL + controls.throttle * (1 - JET_IDLE_SPOOL) : 0;
+  const spoolSetting = model.jetPropulsions.length > 0
+    ? stepJetSpool(aircraft, targetThrustSetting, dt)
+    : targetThrustSetting;
+  const thrustSetting = hasFuel ? spoolSetting : 0;
   const commandedThrustN = model.maxThrustN * thrustSetting;
-  if (tanked) aircraft.fuelKg = Math.max(0, aircraft.fuelKg - SFC * commandedThrustN * dt);
-  const effectiveMassKg = Math.max(model.dryMassKg + aircraft.fuelKg, 1); // floor guards a fully-empty build
+  const massProperties = currentMassProperties(aircraft);
+  const effectiveMassKg = Math.max(massProperties.massKg, 1); // floor guards a fully-empty build
+  const com = massProperties.com;
 
   const omegaWorld = bodyOmegaWorld(aircraft);
   let totalForce = vec3(0, 0, 0);
@@ -329,10 +384,12 @@ function stepAircraft(
   let maxSurfaceStall = 0;
   let horizontalAlphaArea = 0;
   let horizontalArea = 0;
+  let fuelBurnKgS = 0;
+  let afterburnerFraction = 0;
   const surfaceControls: NonNullable<AircraftState["surfaceControls"]> = [];
 
   for (const surface of model.aeroSurfaces) {
-    const sample = sampleSurface(surface, aircraft, controls, density, omegaWorld);
+    const sample = sampleSurface(surface, aircraft, controls, density, aircraft.position.y, omegaWorld, com);
     totalForce = add(totalForce, sample.force);
     totalTorque = add(totalTorque, sample.torque);
     loadForce = add(loadForce, sample.liftForce);
@@ -355,38 +412,68 @@ function stepAircraft(
   aircraft.surfaceControls = surfaceControls;
 
   if (speed > 0.5 && model.parasiteDragAreaM2 > 0) {
+    const parasiteArea = model.parasiteDragAreaM2 * (model.machAero?.parasiteAreaScale ?? 1);
+    const bodyWaveDragN = model.machAero
+      ? qbar * Math.max(model.wingAreaM2, 1) * machWaveDragCd(mach, sweep?.sweepDeg ?? 0, model.machAero) * 0.45
+      : 0;
+    const overspeedDragN = overspeed > 0
+      ? qbar * OVERSPEED_DRAG_AREA_M2 * Math.min(overspeed * overspeed * 18, 6)
+      : 0;
     totalForce = add(
       totalForce,
-      scale(normalize(aircraft.velocity), -qbar * model.parasiteDragAreaM2),
+      scale(normalize(aircraft.velocity), -(qbar * parasiteArea + bodyWaveDragN + overspeedDragN)),
     );
+  }
+
+  if (overspeed > 0) {
+    aircraft.health = clamp(aircraft.health - OVERSPEED_DAMAGE_PER_S * overspeed * dt, 0, 100);
   }
 
   if (commandedThrustN > 0) {
     let appliedThrustPoint = false;
     for (const point of model.propulsions) {
       const localForward = rotateVec(aircraft.orientation, point.localForward);
-      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, com));
       const diskVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
       const axialAirspeed = Math.max(0, dot(diskVelocity, localForward));
       const sample = samplePropulsion(point, axialAirspeed, density, thrustSetting);
       const force = scale(localForward, sample.thrustN);
       totalForce = add(totalForce, force);
       totalTorque = add(totalTorque, cross(rWorld, force));
+      fuelBurnKgS += SFC * sample.thrustN;
+      appliedThrustPoint = true;
+    }
+
+    for (const point of model.jetPropulsions) {
+      const localForward = rotateVec(aircraft.orientation, point.localForward);
+      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, com));
+      const inletVelocity = add(aircraft.velocity, cross(omegaWorld, rWorld));
+      const axialAirspeed = Math.max(0, dot(inletVelocity, localForward));
+      const sample = sampleJetPropulsion(point, axialAirspeed, aircraft.position.y, thrustSetting);
+      const force = scale(localForward, sample.thrustN);
+      totalForce = add(totalForce, force);
+      totalTorque = add(totalTorque, cross(rWorld, force));
+      fuelBurnKgS += sample.fuelFlowKgS;
+      afterburnerFraction = Math.max(afterburnerFraction, sample.afterburnerFraction);
       appliedThrustPoint = true;
     }
 
     for (const point of model.thrustPoints) {
       const force = scale(rotateVec(aircraft.orientation, point.localForward), point.maxThrustN * thrustSetting);
-      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, model.com));
+      const rWorld = rotateVec(aircraft.orientation, sub(point.localOffset, com));
       totalForce = add(totalForce, force);
       totalTorque = add(totalTorque, cross(rWorld, force));
+      fuelBurnKgS += SFC * point.maxThrustN * thrustSetting;
       appliedThrustPoint = true;
     }
 
     if (!appliedThrustPoint) {
       totalForce = add(totalForce, scale(basis.forward, commandedThrustN));
+      fuelBurnKgS += SFC * commandedThrustN;
     }
   }
+
+  if (tanked && fuelBurnKgS > 0) burnFuel(aircraft, fuelBurnKgS * dt);
 
   const acceleration = add(scale(totalForce, 1 / effectiveMassKg), GRAVITY);
 
@@ -401,34 +488,60 @@ function stepAircraft(
     };
   }
 
-  const omega = aircraft.angularVelocity;
-  const nextRoll = omega.x + (dot(totalTorque, basis.forward) / model.inertia.roll) * dt;
-  const nextPitch = omega.y + (dot(totalTorque, basis.right) / model.inertia.pitch) * dt;
-  const nextYaw = omega.z + (dot(totalTorque, basis.up) / model.inertia.yaw) * dt;
-  aircraft.angularVelocity = vec3(
-    clamp(Number.isFinite(nextRoll) ? nextRoll : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
-    clamp(Number.isFinite(nextPitch) ? nextPitch : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
-    clamp(Number.isFinite(nextYaw) ? nextYaw : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+  const torqueLocal = worldVectorToLocal(totalTorque, basis);
+  let omegaLocal = integrateBodyAngularVelocity(
+    bodyRatesToLocalOmega(aircraft.angularVelocity),
+    torqueLocal,
+    massProperties.inertiaTensor,
+    dt,
   );
+  const nextRates = localOmegaToBodyRates(omegaLocal);
+  aircraft.angularVelocity = vec3(
+    clamp(Number.isFinite(nextRates.x) ? nextRates.x : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextRates.y) ? nextRates.y : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+    clamp(Number.isFinite(nextRates.z) ? nextRates.z : 0, -MAX_BODY_RATE_RAD_S, MAX_BODY_RATE_RAD_S),
+  );
+  omegaLocal = bodyRatesToLocalOmega(aircraft.angularVelocity);
 
-  let orientation = aircraft.orientation;
-  orientation = rotateAroundWorldAxis(orientation, basis.forward, aircraft.angularVelocity.x * dt);
-  orientation = rotateAroundWorldAxis(orientation, basis.right, aircraft.angularVelocity.y * dt);
-  orientation = rotateAroundWorldAxis(orientation, basis.up, aircraft.angularVelocity.z * dt);
-  aircraft.orientation = orientation;
+  aircraft.orientation = integrateLocalAngularVelocity(
+    aircraft.orientation,
+    omegaLocal,
+    dt,
+  );
   aircraft.weaponCooldown = Math.max(0, aircraft.weaponCooldown - dt);
 
   const metricAoa = horizontalArea > 0 ? horizontalAlphaArea / horizontalArea : aoa;
-  const stalled = speed < 62 || maxSurfaceStall > 0.2;
-  const gLoad = length(loadForce) / (effectiveMassKg * 9.81);
+  const stalled = speed < stallSpeedMps(model, density, effectiveMassKg) || maxSurfaceStall > 0.2;
+  const gLoad = length(loadForce) / (effectiveMassKg * GRAVITY_MPS2);
+  const finalAirspeed = length(aircraft.velocity);
+  const finalMach = machAtSpeed(finalAirspeed, aircraft.position.y);
+  const finalDensity = densityAtAltitude(aircraft.position.y);
+  const finalSweep = modelSweepState(model, finalAirspeed, aircraft.position.y);
 
   return {
-    airspeed: length(aircraft.velocity),
+    airspeed: finalAirspeed,
     altitude: aircraft.position.y,
     aoaDeg: (metricAoa * 180) / Math.PI,
     gLoad,
-    stalled,
+    stalled: stalled || overspeed > 0.18,
+    mach: finalMach,
+    dynamicPressurePa: dynamicPressure(finalDensity, finalAirspeed),
+    ...(finalSweep ? { sweepDeg: finalSweep.sweepDeg } : {}),
+    afterburner: afterburnerFraction > 0.05,
+    ...(model.jetPropulsions.length > 0 ? { engineSpool: aircraft.engineSpool ?? thrustSetting } : {}),
   };
+}
+
+function stepJetSpool(aircraft: AircraftState, targetThrustSetting: number, dt: number): number {
+  const previous = clamp(aircraft.engineSpool ?? JET_IDLE_SPOOL, 0, 1);
+  const target = clamp(targetThrustSetting, 0, 1);
+  const increasing = target > previous;
+  const burnerTransition = target > 0.82 || previous > 0.82;
+  const tau = increasing ? (burnerTransition ? 0.75 : 2.2) : 1.0;
+  const alpha = 1 - Math.exp(-Math.max(dt, 0) / tau);
+  const next = previous + (target - previous) * alpha;
+  aircraft.engineSpool = clamp(next, 0, 1);
+  return aircraft.engineSpool;
 }
 
 // Spawn a real round for any ship that pulls the trigger this step. The round is born at the muzzle

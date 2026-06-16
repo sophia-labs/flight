@@ -193,12 +193,14 @@ function PartMesh({
   accentColor,
   propSpin,
   surfaceControls,
+  sweepDeg,
 }: {
   part: Part;
   color: string;
   accentColor: string;
   propSpin: number;
   surfaceControls: Map<string, SurfaceControlSnapshot>;
+  sweepDeg?: number;
 }) {
   if (part.kind === "sensor" || part.kind === "crew-station") return null; // sockets have no structural body
 
@@ -270,12 +272,28 @@ function PartMesh({
     const chord = part.planform.chord * s;
     // A yaw surface is vertical (a fin): its span runs up the Y axis. Others lie flat in the XZ plane.
     const vertical = part.control?.axis === "yaw";
+    const wingSweepDeg = !vertical && part.sweep ? sweepDeg ?? part.sweep.minSweepDeg : 0;
+    const wingSweepRad = wingSweepDeg * DEG;
+    const swept = !vertical && part.sweep !== undefined;
     return (
       <group position={pos} quaternion={quat}>
         {vertical ? (
           <group position={[0, -span / 2, 0]} rotation={[0, 0, Math.PI / 2]}>
             <WingPanel side={1} span={span} chord={chord} thickness={WING_THICKNESS} color={color} />
           </group>
+        ) : swept ? (
+          <>
+            <mesh castShadow receiveShadow>
+              <boxGeometry args={[span * 0.18, WING_THICKNESS * 1.18, chord * 1.16]} />
+              <meshStandardMaterial color={color} roughness={0.5} metalness={0.16} flatShading />
+            </mesh>
+            <group rotation={[0, wingSweepRad, 0]}>
+              <WingPanel side={-1} span={span / 2} chord={chord} thickness={WING_THICKNESS} color={color} />
+            </group>
+            <group rotation={[0, -wingSweepRad, 0]}>
+              <WingPanel side={1} span={span / 2} chord={chord} thickness={WING_THICKNESS} color={color} />
+            </group>
+          </>
         ) : (
           <>
             <mesh castShadow receiveShadow>
@@ -292,6 +310,7 @@ function PartMesh({
           span={span}
           chord={chord}
           vertical={vertical}
+          sweepRad={wingSweepRad}
           surfaceControls={surfaceControls}
         />
       </group>
@@ -548,12 +567,14 @@ function WingControlSurfaces({
   span,
   chord,
   vertical,
+  sweepRad = 0,
   surfaceControls,
 }: {
   part: Extract<Part, { kind: "wing" }>;
   span: number;
   chord: number;
   vertical: boolean;
+  sweepRad?: number;
   surfaceControls: Map<string, SurfaceControlSnapshot>;
 }) {
   const axis = part.control?.axis;
@@ -562,24 +583,28 @@ function WingControlSurfaces({
   if (axis === "roll") {
     return (
       <>
-        <ControlPanel
-          surfaceId={`${part.id}-left`}
-          axis={axis}
-          side={-1}
-          span={span}
-          chord={chord}
-          vertical={false}
-          surfaceControls={surfaceControls}
-        />
-        <ControlPanel
-          surfaceId={`${part.id}-right`}
-          axis={axis}
-          side={1}
-          span={span}
-          chord={chord}
-          vertical={false}
-          surfaceControls={surfaceControls}
-        />
+        <group rotation={[0, sweepRad, 0]}>
+          <ControlPanel
+            surfaceId={`${part.id}-left`}
+            axis={axis}
+            side={-1}
+            span={span}
+            chord={chord}
+            vertical={false}
+            surfaceControls={surfaceControls}
+          />
+        </group>
+        <group rotation={[0, -sweepRad, 0]}>
+          <ControlPanel
+            surfaceId={`${part.id}-right`}
+            axis={axis}
+            side={1}
+            span={span}
+            chord={chord}
+            vertical={false}
+            surfaceControls={surfaceControls}
+          />
+        </group>
       </>
     );
   }
@@ -658,6 +683,7 @@ export function PartMeshes({
   surfaceControls = [],
   controls,
   propSpin,
+  sweepDeg,
 }: {
   parts: Part[];
   color: string;
@@ -666,6 +692,7 @@ export function PartMeshes({
   surfaceControls?: SurfaceControlSnapshot[];
   controls?: ControlInput;
   propSpin?: number;
+  sweepDeg?: number;
 }) {
   const surfaceControlsById = new Map(surfaceControls.map((state) => [state.id, state]));
   const spin = propSpin ?? controls?.throttle ?? 0;
@@ -678,6 +705,7 @@ export function PartMeshes({
           color={color}
           accentColor={accentColor}
           propSpin={spin}
+          sweepDeg={sweepDeg}
           surfaceControls={surfaceControlsById}
         />
       ))}

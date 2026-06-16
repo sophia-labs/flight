@@ -235,9 +235,34 @@ export const referenceAircraft: ReferenceAircraft[] = [
     loadedMassKg: 2548,
     silhouette: "long greenhouse canopy, forgiving wing, modest radial nose",
   },
+  {
+    id: "f14d",
+    name: "Grumman F-14D Super Tomcat",
+    era: "Cold War",
+    country: "US",
+    role: "fleet-defense / air-superiority fighter",
+    engine: "two General Electric F110-GE-400 afterburning turbofans",
+    powerHp: 0,
+    spanM: 19.55,
+    lengthM: 19.1,
+    wingAreaM2: 52.5,
+    loadedMassKg: 28_700,
+    silhouette: "long twin-engine body, variable-sweep wings, twin tails, tandem canopy",
+  },
 ];
 
 export const aircraftArchetypes: AircraftArchetype[] = [
+  {
+    id: "variable-sweep-tomcat",
+    name: "Super Tomcat",
+    shortName: "Super Tomcat",
+    role: "supersonic fleet interceptor",
+    summary: "Twin afterburning turbofans, variable-sweep wing schedule, tandem cockpit, twin fins, and heavy fuel.",
+    designLine: "F-14D thinking: a carrier fighter whose envelope is defined by F110 thrust, sweep, Mach drag, and high-altitude acceleration.",
+    referenceIds: ["f14d"],
+    palette: { base: "#8f989e", trim: "#d14438" },
+    airframe: variableSweepTomcatArchetype(),
+  },
   {
     id: "inline-escort",
     name: "Long-Nose Escort",
@@ -264,6 +289,7 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       weaponCount: 6,
       gearStyle: "taildragger",
       fuelFraction: 0.13,
+      criticalAltitudeM: 7_600,
     }),
   },
   {
@@ -282,8 +308,8 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       spanM: 9.8,
       lengthM: 8.9,
       wingAreaM2: 18.2,
-      loadedMassKg: 3200,
-      powerHp: 1680,
+      loadedMassKg: 3400,
+      powerHp: 1565,
       bodyWidthM: 0.95,
       bodyHeightM: 1.05,
       canopyStyle: "framed",
@@ -293,6 +319,7 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       gearStyle: "taildragger",
       fuelFraction: 0.1,
       controlBias: 1.15,
+      criticalAltitudeM: 5_000,
     }),
   },
   {
@@ -322,6 +349,9 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       gearStyle: "taildragger",
       fuelFraction: 0.12,
       wingYOffsetM: -0.08,
+      criticalAltitudeM: 7_500,
+      propPitchRatio: 0.82,
+      propRadiusM: 2.03,
     }),
   },
   {
@@ -351,6 +381,8 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       gearStyle: "taildragger",
       fuelFraction: 0.16,
       controlBias: 1.25,
+      criticalAltitudeM: 3_000,
+      propPitchRatio: 0.76,
     }),
   },
   {
@@ -403,6 +435,7 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       fuelFraction: 0.18,
       controlBias: 0.85,
       wingYOffsetM: -0.12,
+      criticalAltitudeM: 3_000,
     }),
   },
   {
@@ -422,7 +455,7 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       lengthM: 8.8,
       wingAreaM2: 23.6,
       loadedMassKg: 2600,
-      powerHp: 620,
+      powerHp: 600,
       bodyWidthM: 1.05,
       bodyHeightM: 1.25,
       canopyStyle: "greenhouse",
@@ -433,6 +466,8 @@ export const aircraftArchetypes: AircraftArchetype[] = [
       fuelFraction: 0.12,
       controlBias: 1.05,
       wingYOffsetM: -0.05,
+      criticalAltitudeM: 1_200,
+      propPitchRatio: 0.74,
     }),
   },
 ];
@@ -466,6 +501,9 @@ interface SingleEngineOptions {
   fuelFraction: number;
   controlBias?: number;
   wingYOffsetM?: number;
+  criticalAltitudeM?: number;
+  propPitchRatio?: number;
+  propRadiusM?: number;
 }
 
 function singleEngineArchetype(opts: SingleEngineOptions): Airframe {
@@ -521,6 +559,7 @@ function singleEngineArchetype(opts: SingleEngineOptions): Airframe {
       pose: { offset: vec3(0, 0, -opts.lengthM * 0.43), rotation: body },
       thrustN: hpToThrustN(opts.powerHp),
       maxPowerW: hpToPowerW(opts.powerHp),
+      criticalAltitudeM: opts.criticalAltitudeM ?? 0,
       idleRpm: opts.engineType === "radial" ? 620 : 700,
       maxRpm: opts.engineType === "radial" ? 2800 : 3000,
       massKg: Math.round(opts.loadedMassKg * 0.17),
@@ -530,8 +569,9 @@ function singleEngineArchetype(opts: SingleEngineOptions): Airframe {
       id: "prop",
       kind: "prop",
       pose: { offset: vec3(0, 0, -opts.lengthM * 0.55), rotation: body },
-      radius: Math.max(1.55, opts.spanM * 0.14),
-      pitchM: Math.max(1.85, Math.max(1.55, opts.spanM * 0.14) * 2 * (opts.engineType === "radial" ? 0.68 : 0.76)),
+      radius: opts.propRadiusM ?? Math.max(1.55, opts.spanM * 0.14),
+      pitchM:
+        Math.max(1.85, (opts.propRadiusM ?? Math.max(1.55, opts.spanM * 0.14)) * 2 * (opts.propPitchRatio ?? (opts.engineType === "radial" ? 0.68 : 0.76))),
       bladeCount: opts.propBlades,
       mode: opts.engineType === "radial" && opts.powerHp < 1100 ? "fixed-pitch" : "constant-speed",
       massKg: Math.round(opts.loadedMassKg * 0.018),
@@ -602,28 +642,28 @@ function twinBoomArchetype(): Airframe {
       kind: "fuselage",
       pose: { offset: vec3(0, 0, -0.25), rotation: body },
       dims: { length: 6.9, width: 0.95, height: 1.25 },
-      massKg: 1600,
+      massKg: 1450,
     },
     {
       id: "boom-left",
       kind: "fuselage",
       pose: { offset: vec3(-engineX, 0.03, 0.35), rotation: body },
       dims: { length: 9.5, width: 0.55, height: 0.62 },
-      massKg: 900,
+      massKg: 760,
     },
     {
       id: "boom-right",
       kind: "fuselage",
       pose: { offset: vec3(engineX, 0.03, 0.35), rotation: body },
       dims: { length: 9.5, width: 0.55, height: 0.62 },
-      massKg: 900,
+      massKg: 760,
     },
     {
       id: "main-wing",
       kind: "wing",
       pose: { offset: vec3(0, -0.04, 0.1), rotation: body },
       planform: { span: spanM, chord: chordM },
-      massKg: 1250,
+      massKg: 1120,
       control: { axis: "roll", area: wingAreaM2 * 0.12 },
     },
     {
@@ -631,7 +671,7 @@ function twinBoomArchetype(): Airframe {
       kind: "wing",
       pose: { offset: vec3(0, 0.36, lengthM * 0.42), rotation: body },
       planform: { span: engineX * 2.35, chord: 0.82 },
-      massKg: 360,
+      massKg: 320,
       control: { axis: "pitch", area: 2.4 },
     },
     {
@@ -639,7 +679,7 @@ function twinBoomArchetype(): Airframe {
       kind: "wing",
       pose: { offset: vec3(-engineX, 0.68, lengthM * 0.4), rotation: body },
       planform: { span: 1.75, chord: 0.95 },
-      massKg: 170,
+      massKg: 145,
       control: { axis: "yaw", area: 0.85 },
     },
     {
@@ -647,16 +687,16 @@ function twinBoomArchetype(): Airframe {
       kind: "wing",
       pose: { offset: vec3(engineX, 0.68, lengthM * 0.4), rotation: body },
       planform: { span: 1.75, chord: 0.95 },
-      massKg: 170,
+      massKg: 145,
       control: { axis: "yaw", area: 0.85 },
     },
-    ...twinEngines(engineX, -lengthM * 0.34, 1600, 1150, 0.48, 1.9, 1.65, 3),
+    ...twinEngines(engineX, -lengthM * 0.34, 1500, 950, 0.48, 1.9, 1.65, 3, 7_000),
     {
       id: "canopy",
       kind: "canopy",
       pose: { offset: vec3(0, 0.72, -1.0), rotation: body },
       dims: { length: 1.9, width: 0.72, height: 0.55 },
-      massKg: 95,
+      massKg: 85,
       style: "bubble",
     },
     {
@@ -666,7 +706,7 @@ function twinBoomArchetype(): Airframe {
       trackM: engineX * 2,
       heightM: 0.78,
       wheelRadiusM: 0.25,
-      massKg: 310,
+      massKg: 275,
       style: "tricycle",
     },
     {
@@ -675,7 +715,7 @@ function twinBoomArchetype(): Airframe {
       pose: { offset: vec3(0, -0.05, -2.75), rotation: body },
       count: 5,
       caliberMm: 20,
-      massKg: 260,
+      massKg: 230,
       dims: { length: 1.35, width: 0.07, height: 0.07 },
       role: "cannon",
     },
@@ -683,8 +723,8 @@ function twinBoomArchetype(): Airframe {
       id: "fuel-cells",
       kind: "tank",
       pose: { offset: vec3(0, -0.12, 0.35), rotation: body },
-      fuelKg: 980,
-      dryMassKg: 110,
+      fuelKg: 880,
+      dryMassKg: 95,
       dims: { radius: 0.45, length: 2.2 },
     },
     pilotStationAt(cockpitEye),
@@ -708,28 +748,28 @@ function twinNacelleArchetype(): Airframe {
       kind: "fuselage",
       pose: { offset: vec3(0, 0, 0), rotation: body },
       dims: { length: lengthM, width: 1.15, height: 1.35 },
-      massKg: 3300,
+      massKg: 3000,
     },
     {
       id: "nacelle-left",
       kind: "fuselage",
       pose: { offset: vec3(-engineX, -0.02, -0.65), rotation: body },
       dims: { length: 4.9, width: 0.72, height: 0.82 },
-      massKg: 560,
+      massKg: 470,
     },
     {
       id: "nacelle-right",
       kind: "fuselage",
       pose: { offset: vec3(engineX, -0.02, -0.65), rotation: body },
       dims: { length: 4.9, width: 0.72, height: 0.82 },
-      massKg: 560,
+      massKg: 470,
     },
     {
       id: "main-wing",
       kind: "wing",
       pose: { offset: vec3(0, -0.02, 0.1), rotation: body },
       planform: { span: spanM, chord: chordM },
-      massKg: 1680,
+      massKg: 1520,
       control: { axis: "roll", area: wingAreaM2 * 0.1 },
     },
     {
@@ -737,7 +777,7 @@ function twinNacelleArchetype(): Airframe {
       kind: "wing",
       pose: { offset: vec3(0, 0.32, lengthM * 0.42), rotation: body },
       planform: { span: 5.4, chord: 1.0 },
-      massKg: 480,
+      massKg: 430,
       control: { axis: "pitch", area: 2.8 },
     },
     {
@@ -745,16 +785,16 @@ function twinNacelleArchetype(): Airframe {
       kind: "wing",
       pose: { offset: vec3(0, 0.78, lengthM * 0.4), rotation: body },
       planform: { span: 2.05, chord: 1.1 },
-      massKg: 250,
+      massKg: 225,
       control: { axis: "yaw", area: 1.25 },
     },
-    ...twinEngines(engineX, -lengthM * 0.28, 1710, 980, 0.45, 2.1, 1.55, 3),
+    ...twinEngines(engineX, -lengthM * 0.28, 1710, 870, 0.45, 2.1, 1.55, 3, 7_500),
     {
       id: "canopy",
       kind: "canopy",
       pose: { offset: vec3(0, 0.78, -1.8), rotation: body },
       dims: { length: 3.1, width: 0.82, height: 0.58 },
-      massKg: 150,
+      massKg: 135,
       style: "greenhouse",
     },
     {
@@ -764,7 +804,7 @@ function twinNacelleArchetype(): Airframe {
       trackM: engineX * 2,
       heightM: 0.85,
       wheelRadiusM: 0.27,
-      massKg: 430,
+      massKg: 370,
       style: "taildragger",
     },
     {
@@ -773,7 +813,7 @@ function twinNacelleArchetype(): Airframe {
       pose: { offset: vec3(0, -0.16, -3.6), rotation: body },
       count: 4,
       caliberMm: 20,
-      massKg: 360,
+      massKg: 320,
       dims: { length: 1.35, width: 0.08, height: 0.08 },
       role: "cannon",
     },
@@ -781,8 +821,8 @@ function twinNacelleArchetype(): Airframe {
       id: "fuel-cells",
       kind: "tank",
       pose: { offset: vec3(0, -0.12, 0.2), rotation: body },
-      fuelKg: 1420,
-      dryMassKg: 180,
+      fuelKg: 1280,
+      dryMassKg: 155,
       dims: { radius: 0.52, length: 2.6 },
     },
     pilotStationAt(cockpitEye),
@@ -801,6 +841,8 @@ function twinEngines(
   length: number,
   propRadius: number,
   bladeCount: number,
+  criticalAltitudeM = 0,
+  propPitchRatio = 0.74,
 ): Part[] {
   const body = quatIdentity();
   return [
@@ -810,6 +852,7 @@ function twinEngines(
       pose: { offset: vec3(-x, 0, z), rotation: body },
       thrustN: hpToThrustN(hpEach),
       maxPowerW: hpToPowerW(hpEach),
+      criticalAltitudeM,
       idleRpm: 680,
       maxRpm: 3000,
       massKg: massEach,
@@ -821,6 +864,7 @@ function twinEngines(
       pose: { offset: vec3(x, 0, z), rotation: body },
       thrustN: hpToThrustN(hpEach),
       maxPowerW: hpToPowerW(hpEach),
+      criticalAltitudeM,
       idleRpm: 680,
       maxRpm: 3000,
       massKg: massEach,
@@ -831,7 +875,7 @@ function twinEngines(
       kind: "prop",
       pose: { offset: vec3(-x, 0, z - length * 0.62), rotation: body },
       radius: propRadius,
-      pitchM: Math.max(1.9, propRadius * 2 * 0.74),
+      pitchM: Math.max(1.9, propRadius * 2 * propPitchRatio),
       bladeCount,
       mode: "constant-speed",
       massKg: 105,
@@ -841,12 +885,155 @@ function twinEngines(
       kind: "prop",
       pose: { offset: vec3(x, 0, z - length * 0.62), rotation: body },
       radius: propRadius,
-      pitchM: Math.max(1.9, propRadius * 2 * 0.74),
+      pitchM: Math.max(1.9, propRadius * 2 * propPitchRatio),
       bladeCount,
       mode: "constant-speed",
       massKg: 105,
     },
   ];
+}
+
+function variableSweepTomcatArchetype(): Airframe {
+  const body = quatIdentity();
+  const lengthM = 19.1;
+  const spanM = 19.55;
+  const wingAreaM2 = 45.0;
+  const chordM = wingAreaM2 / spanM;
+  const engineX = 1.55;
+  const cockpitEye = vec3(0, 1.34, -4.15);
+  const dryThrustN = lbfToN(16_333);
+  const afterburnerThrustN = lbfToN(27_600);
+  const wingSweep = {
+    minSweepDeg: 20,
+    maxSweepDeg: 68,
+    machForward: 0.42,
+    machSwept: 1.35,
+  };
+  const parts: Part[] = [
+    {
+      id: "forward-fuselage",
+      kind: "fuselage",
+      pose: { offset: vec3(0, 0.05, -3.35), rotation: body },
+      dims: { length: 11.3, width: 2.25, height: 2.0 },
+      massKg: 7_600,
+    },
+    {
+      id: "aft-fuselage",
+      kind: "fuselage",
+      pose: { offset: vec3(0, -0.05, 3.25), rotation: body },
+      dims: { length: 7.8, width: 3.25, height: 1.72 },
+      massKg: 2_250,
+    },
+    {
+      id: "intake-left",
+      kind: "fuselage",
+      pose: { offset: vec3(-engineX, -0.12, 1.15), rotation: body },
+      dims: { length: 6.8, width: 0.88, height: 1.18 },
+      massKg: 1_250,
+    },
+    {
+      id: "intake-right",
+      kind: "fuselage",
+      pose: { offset: vec3(engineX, -0.12, 1.15), rotation: body },
+      dims: { length: 6.8, width: 0.88, height: 1.18 },
+      massKg: 1_250,
+    },
+    {
+      id: "variable-sweep-wing",
+      kind: "wing",
+      pose: { offset: vec3(0, -0.08, 0.15), rotation: body },
+      planform: { span: spanM, chord: chordM },
+      massKg: 2_400,
+      control: { axis: "roll", area: wingAreaM2 * 0.08 },
+      sweep: wingSweep,
+    },
+    {
+      id: "tailerons",
+      kind: "wing",
+      pose: { offset: vec3(0, 0.18, lengthM * 0.43), rotation: body },
+      planform: { span: 6.9, chord: 0.82 },
+      massKg: 760,
+      control: { axis: "pitch", area: 4.8 },
+    },
+    {
+      id: "fin-left",
+      kind: "wing",
+      pose: { offset: vec3(-1.85, 0.92, lengthM * 0.36), rotation: body },
+      planform: { span: 2.6, chord: 1.15 },
+      massKg: 500,
+      control: { axis: "yaw", area: 1.5 },
+    },
+    {
+      id: "fin-right",
+      kind: "wing",
+      pose: { offset: vec3(1.85, 0.92, lengthM * 0.36), rotation: body },
+      planform: { span: 2.6, chord: 1.15 },
+      massKg: 500,
+      control: { axis: "yaw", area: 1.5 },
+    },
+    {
+      id: "engine-left",
+      kind: "engine",
+      pose: { offset: vec3(-engineX, -0.12, lengthM * 0.28), rotation: body },
+      thrustN: dryThrustN,
+      afterburnerThrustN,
+      idleThrustFraction: 0.055,
+      afterburnerThrottle: 0.82,
+      massKg: 1_770,
+      dims: { radius: 0.62, length: 4.55 },
+    },
+    {
+      id: "engine-right",
+      kind: "engine",
+      pose: { offset: vec3(engineX, -0.12, lengthM * 0.28), rotation: body },
+      thrustN: dryThrustN,
+      afterburnerThrustN,
+      idleThrustFraction: 0.055,
+      afterburnerThrottle: 0.82,
+      massKg: 1_770,
+      dims: { radius: 0.62, length: 4.55 },
+    },
+    {
+      id: "canopy",
+      kind: "canopy",
+      pose: { offset: vec3(0, 1.12, -4.25), rotation: body },
+      dims: { length: 3.9, width: 0.95, height: 0.62 },
+      massKg: 420,
+      style: "bubble",
+    },
+    {
+      id: "carrier-gear",
+      kind: "gear",
+      pose: { offset: vec3(0, -1.04, -0.2), rotation: body },
+      trackM: 5.3,
+      heightM: 1.15,
+      wheelRadiusM: 0.34,
+      massKg: 1_550,
+      style: "tricycle",
+    },
+    {
+      id: "m61-and-missiles",
+      kind: "weapon",
+      pose: { offset: vec3(0, -0.45, -0.7), rotation: body },
+      count: 8,
+      caliberMm: 20,
+      massKg: 1_250,
+      dims: { length: 3.95, width: 0.22, height: 0.22 },
+      role: "rocket-rail",
+    },
+    {
+      id: "internal-fuel",
+      kind: "tank",
+      pose: { offset: vec3(0, -0.28, 0.35), rotation: body },
+      fuelKg: 7_200,
+      dryMassKg: 480,
+      dims: { radius: 0.92, length: 6.4 },
+    },
+    pilotStationAt(cockpitEye),
+    cockpitAt(cockpitEye, Math.PI / 2.55),
+    noseAt(vec3(0, 0.15, -lengthM * 0.55)),
+  ];
+  return { id: "variable-sweep-tomcat", parts };
 }
 
 function cockpitAt(offset: ReturnType<typeof vec3>, hFovRad: number): Part {
@@ -895,4 +1082,8 @@ function hpToThrustN(powerHp: number): number {
 
 function hpToPowerW(powerHp: number): number {
   return Math.round(powerHp * 745.7);
+}
+
+function lbfToN(lbf: number): number {
+  return Math.round(lbf * 4.4482216153);
 }
