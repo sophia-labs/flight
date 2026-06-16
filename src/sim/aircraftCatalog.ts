@@ -1,6 +1,6 @@
 import type { Airframe, Part } from "../protocol/schema";
 import { cockpitCamera, noseCamera } from "./airframe";
-import { quatIdentity, vec3 } from "./math";
+import { quatFromAxisAngle, quatIdentity, vec3 } from "./math";
 
 type CanopyStyle = Extract<Part, { kind: "canopy" }>["style"];
 type GearStyle = Extract<Part, { kind: "gear" }>["style"];
@@ -903,6 +903,7 @@ function variableSweepTomcatArchetype(): Airframe {
   const cockpitEye = vec3(0, 1.34, -4.15);
   const dryThrustN = lbfToN(16_333);
   const afterburnerThrustN = lbfToN(27_600);
+  const finCantRad = (10 * Math.PI) / 180;
   const wingSweep = {
     minSweepDeg: 20,
     maxSweepDeg: 68,
@@ -958,7 +959,7 @@ function variableSweepTomcatArchetype(): Airframe {
     {
       id: "fin-left",
       kind: "wing",
-      pose: { offset: vec3(-1.85, 0.92, lengthM * 0.36), rotation: body },
+      pose: { offset: vec3(-1.85, 0.92, lengthM * 0.36), rotation: quatFromAxisAngle(vec3(0, 0, 1), finCantRad) },
       planform: { span: 2.6, chord: 1.15 },
       massKg: 500,
       control: { axis: "yaw", area: 1.5 },
@@ -966,7 +967,7 @@ function variableSweepTomcatArchetype(): Airframe {
     {
       id: "fin-right",
       kind: "wing",
-      pose: { offset: vec3(1.85, 0.92, lengthM * 0.36), rotation: body },
+      pose: { offset: vec3(1.85, 0.92, lengthM * 0.36), rotation: quatFromAxisAngle(vec3(0, 0, 1), -finCantRad) },
       planform: { span: 2.6, chord: 1.15 },
       massKg: 500,
       control: { axis: "yaw", area: 1.5 },
@@ -999,7 +1000,7 @@ function variableSweepTomcatArchetype(): Airframe {
       pose: { offset: vec3(0, 1.12, -4.25), rotation: body },
       dims: { length: 3.9, width: 0.95, height: 0.62 },
       massKg: 420,
-      style: "bubble",
+      style: "framed",
     },
     {
       id: "carrier-gear",

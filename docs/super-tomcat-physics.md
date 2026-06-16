@@ -12,6 +12,7 @@ This pass adds the first credible jet-age envelope to the flight sim: an F-14D-s
 - Live overspeed consequences: over-q or over-Mach creates additional drag, health damage, and buffet/stall telemetry.
 - Replay telemetry for Mach, dynamic pressure, sweep angle, afterburner state, and engine spool.
 - Visual wing sweep in the Three.js aircraft mesh for sweep-tagged wings.
+- The visual model stays in the same aircraft-builder vocabulary as the rest of the catalog: swept `wing`, afterburning `engine`, framed `canopy`, canted fin `wing`, `weapon` stores, and ordinary fuselage/intake parts. The renderer reads those generic part semantics rather than switching to a Tomcat-only asset path.
 
 ## Super Tomcat Calibration
 
