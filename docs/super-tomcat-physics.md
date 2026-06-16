@@ -13,6 +13,7 @@ This pass adds the first credible jet-age envelope to the flight sim: an F-14D-s
 - Replay telemetry for Mach, dynamic pressure, sweep angle, afterburner state, and engine spool.
 - Visual wing sweep in the Three.js aircraft mesh for sweep-tagged wings.
 - The visual model stays in the same aircraft-builder vocabulary as the rest of the catalog: swept `wing`, afterburning `engine`, framed `canopy`, canted fin `wing`, `weapon` stores, and ordinary fuselage/intake parts. The renderer reads those generic part semantics rather than switching to a Tomcat-only asset path.
+- AIM-9M-style heat-seeking missiles on the Super Tomcat weapon station, with finite seeker lock, target heat scoring, aspect/range effects, bounded lateral acceleration, and proportional-navigation-style steering.
 
 ## Super Tomcat Calibration
 
@@ -37,6 +38,16 @@ Current generated audit:
 
 Builds the deterministic fleet envelope report. It samples altitude, speed, thrust, drag, excess power, climb, turn, Mach, sweep, and dynamic pressure.
 
+`npm run audit:missiles -- --out reports/missile-envelope.json`
+
+Builds the deterministic missile envelope report. It exercises AIM-9M-style launches against rear, beam, head-on, idle/cold, long-range, and jinking moving target cases. The public calibration anchor is NAVAIR's AIM-9M Sidewinder page: infrared homing, Mach 2.5, and 10-18 mile range.
+
+`npm run demo:heat-missile -- --out clips/heat-seeking-missile-demo-replay.json`
+
+Builds the replay used for the heat-seeking missile video. Render it with:
+
+`FILM_SENSOR_ID=nose-cam FILM_FPS=30 FILM_TURNS=8 FILM_LABEL='Super Tomcat' npm run film -- --scripted --cinema --replay-in clips/heat-seeking-missile-demo-replay.json --out clips/heat-seeking-missile-demo.mp4`
+
 `npm run audit:props -- --out reports/prop-performance-audit.md`
 
 Keeps the piston aircraft honest against historical-family prop benchmarks. The Super Tomcat is intentionally excluded from this prop-only audit.
@@ -44,9 +55,10 @@ Keeps the piston aircraft honest against historical-family prop benchmarks. The 
 ## Regression Coverage
 
 - `tests/performanceEnvelope.test.ts` verifies the Super Tomcat is an afterburning variable-sweep jet, reaches jet-class envelope numbers, and outclasses the prop fleet.
-- `tests/sim.test.ts` verifies live Super Tomcat sweep telemetry, delayed afterburner spool, and overspeed damage.
+- `tests/sim.test.ts` verifies live Super Tomcat sweep telemetry, delayed afterburner spool, overspeed damage, AIM-9M launch telemetry, and a moving off-boresight heat-seeker hit.
 - Full verification before merge:
   - `npm run audit:envelopes -- --json reports/flight-envelopes.json --md reports/flight-envelopes.md`
+  - `npm run audit:missiles -- --out reports/missile-envelope.json`
   - `npm run audit:props -- --out reports/prop-performance-audit.md`
   - `npm test`
   - `npm test -- --run tests/performanceEnvelope.test.ts`
@@ -55,4 +67,4 @@ Keeps the piston aircraft honest against historical-family prop benchmarks. The 
 
 ## Known First-Order Approximations
 
-The model now captures qualitative Tomcat behavior, but it is still deliberately compact. It does not model detailed inlet maps, trim drag, glove-vane history, stores-specific drag indexes, compressor-stall probability, hydraulic limits, structural damage modes beyond overspeed health damage, or detailed radar/weapon systems.
+The model now captures qualitative Tomcat behavior, but it is still deliberately compact. It does not model detailed inlet maps, trim drag, glove-vane history, stores-specific drag indexes, compressor-stall probability, hydraulic limits, structural damage modes beyond overspeed health damage, flare/countermeasure logic, seeker noise, or detailed radar/weapon systems.

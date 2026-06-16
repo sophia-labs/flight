@@ -14,6 +14,7 @@ import type {
   PropulsionPoint,
   ThrustPoint,
   VariableSweep,
+  WeaponStation,
 } from "./types";
 
 // The aircraft builder's keystone: a PURE fold from a parts list to the physical AircraftModel that
@@ -312,6 +313,25 @@ function propulsionPoint(
   };
 }
 
+function weaponKind(part: Extract<Part, { kind: "weapon" }>): WeaponStation["kind"] {
+  if (part.weaponType) return part.weaponType;
+  if (part.role === "machine-gun" || part.role === "cannon") return "gun";
+  if (part.role === "rocket-rail") return "rocket";
+  return "bomb";
+}
+
+function weaponStation(part: Extract<Part, { kind: "weapon" }>): WeaponStation {
+  return {
+    id: part.id,
+    kind: weaponKind(part),
+    guidance: part.guidance ?? "none",
+    count: part.count,
+    caliberMm: part.caliberMm,
+    localOffset: part.pose.offset,
+    localForward: rotateVec(part.pose.rotation, vec3(0, 0, -1)),
+  };
+}
+
 function pairPropulsions(parts: Part[]): {
   propulsions: PropulsionPoint[];
   jetPropulsions: JetPropulsionPoint[];
@@ -506,6 +526,7 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
   const propulsions: PropulsionPoint[] = [];
   const fixedMassElements: MassElement[] = [];
   const fuelTanks: FuelTankMass[] = [];
+  const weaponStations: WeaponStation[] = [];
 
   // Pass 1: scalar sums, lift geometry, and mass-element accumulation.
   for (const part of airframe.parts) {
@@ -553,6 +574,7 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
         break;
       case "weapon":
         massKg += part.massKg;
+        weaponStations.push(weaponStation(part));
         parasiteDragAreaM2 += part.dims.width * part.dims.height * Math.max(1, part.count) * 0.04;
         break;
       case "tank":
@@ -629,6 +651,7 @@ export function compileAirframe(airframe: Airframe): CompiledAirframe {
     thrustPoints,
     jetPropulsions,
     propulsions,
+    weaponStations,
     ...(variableSweep ? { variableSweep } : {}),
     ...(jetPropulsions.length > 0 || variableSweep
       ? {

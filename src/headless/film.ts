@@ -31,13 +31,15 @@ import { defensiveController, pursuitController, pursuitFallback } from "../agen
 import { perfectSensor } from "../agent/observation";
 import { senseAndEncode } from "../agent/perception";
 import { competenceEvaluator } from "../eval/outcome";
-import type { AircraftSnapshot, MatchReplay, Part, Quaternion } from "../protocol/schema";
+import type { AircraftSnapshot, MatchReplay, Part, ProjectileSnapshot, Quaternion, ReplayEvent } from "../protocol/schema";
 import type { MatchConfig } from "../runtime/config";
 import { runMatch } from "../runtime/match";
 import {
   FRAME_DT,
   TURN_DURATION,
   createBalloonScenarioAircraft,
+  createDuelDogfightStartAircraft,
+  createDuelGunStartAircraft,
   createInitialAircraft,
   staticController,
 } from "../runtime/scenario";
@@ -68,6 +70,7 @@ const PILOT_ASPECT = WL / H;
 const argv = process.argv.slice(2);
 const scripted = argv.includes("--scripted");
 const cinema = argv.includes("--cinema");
+const recordOnly = argv.includes("--record-only");
 const valueFlags = ["--out", "--replay-out", "--replay-in"] as const;
 const consumedArgIndices = new Set<number>();
 function flagValue(flag: (typeof valueFlags)[number]): string | undefined {
@@ -95,7 +98,7 @@ const bodyMaxTokens = Number(process.env.BODY_MAX_TOKENS ?? 96);
 const bodyMaxRetries = Number(process.env.BODY_MAX_RETRIES ?? 2);
 const bodyEmptyRetries = Number(process.env.BODY_EMPTY_RETRIES ?? 1);
 const sensorId = process.env.FILM_SENSOR_ID ?? "cockpit-cam";
-const scenario = process.env.FILM_SCENARIO ?? "duel"; // "duel" (default) | "balloon"
+const scenario = process.env.FILM_SCENARIO ?? "duel"; // "duel" | "balloon" | "duel-gun-start" | "duel-dogfight-start"
 // FILM_LABEL overrides the subtitle speaker name — useful with --replay-in, where the filmed model is
 // the one baked into the replay, not the (unused) positional model arg. Falls back to the model slug.
 const label = process.env.FILM_LABEL ?? (scripted ? "Pursuit" : (model.split("/").pop() ?? model));
@@ -124,16 +127,53 @@ function buildConfig(): MatchConfig {
   // FILM_SCENARIO=balloon: the founding challenge — the embodied Body hunts a single static red balloon
   // instead of dueling a maneuvering jet. Red becomes the hovering no-op balloon (staticController).
   const balloon = scenario === "balloon";
+  const gunStart = scenario === "duel-gun-start";
+  const dogfightStart = scenario === "duel-dogfight-start";
+  if (!balloon && !gunStart && !dogfightStart && scenario !== "duel") {
+    throw new Error(`unknown FILM_SCENARIO=${scenario}; expected duel, balloon, duel-gun-start, or duel-dogfight-start`);
+  }
+  // RED_BODY_MODEL=<slug>: make RED a second embodied Body too — a Body-vs-Body duel (e.g. deepseek vs
+  // deepseek). Both sides fly on the glyph-field, arm the held-action sear, and fire real rounds at each
+  // other. Dueling (non-balloon) pilot-intent path only.
+  const redBodyModel = !balloon && usesBody ? process.env.RED_BODY_MODEL : undefined;
+  const redBody = redBodyModel
+    ? createHeadlessBodyConfig({
+        modelSlug: redBodyModel,
+        maxTokens: bodyMaxTokens,
+        maxRetries: bodyMaxRetries,
+        emptyRetries: bodyEmptyRetries,
+        timeoutMs: bodyTimeoutMs,
+      })
+    : undefined;
   const redEntry = balloon
     ? { meta: { id: "balloon", kind: "scripted" as const, label: "balloon (static)" }, controller: staticController }
-    : { meta: { id: "red-1", kind: "scripted" as const, label: "defensive" }, controller: defensiveController(0.64) };
+    : redBody
+      ? {
+          meta: {
+            id: "red-1",
+            kind: "scripted" as const,
+            label: `red ${bodyModelLabel(redBodyModel!)}`,
+            config: { bodyId: redBody.manifest.bodyId, bodyModel: bodyModelLabel(redBodyModel!) },
+          },
+          controller: bodyPilotController(0.82),
+          body: redBody,
+        }
+      : { meta: { id: "red-1", kind: "scripted" as const, label: "defensive" }, controller: defensiveController(0.64) };
   return {
-    id: `film|${scripted ? "scripted" : model}|${mode}${usesBody ? `|body:${bodyModelLabel(bodyModel)}` : ""}${balloon ? "|balloon" : ""}`,
+    id:
+      `film|${scripted ? "scripted" : model}|${mode}${usesBody ? `|body:${bodyModelLabel(bodyModel)}` : ""}` +
+      `${balloon ? "|balloon" : ""}${gunStart ? "|duel-gun-start" : ""}${dogfightStart ? "|duel-dogfight-start" : ""}`,
     turnDuration: TURN_DURATION,
     frameDt: FRAME_DT,
     maxTurns: turns,
     decisionTimeoutMs: 30_000,
-    initialAircraft: balloon ? createBalloonScenarioAircraft() : createInitialAircraft(),
+    initialAircraft: balloon
+      ? createBalloonScenarioAircraft()
+      : gunStart
+        ? createDuelGunStartAircraft()
+        : dogfightStart
+          ? createDuelDogfightStartAircraft()
+        : createInitialAircraft(),
     sensor: perfectSensor,
     evaluator: competenceEvaluator,
     fallback: pursuitFallback,
@@ -215,6 +255,7 @@ interface ShipView {
 // A live bullet in flight, drawn as a bright tracer streak (a short segment along its velocity).
 interface TracerView {
   id: string;
+  kind: NonNullable<ProjectileSnapshot["kind"]>;
   team: "blue" | "red";
   x: number; y: number; z: number; // tracer head (current position)
   vx: number; vy: number; vz: number; // velocity (defines the streak direction)
@@ -250,6 +291,33 @@ interface FilmFrame {
   angle: number;
 }
 
+interface EventCue {
+  start: number;
+  end: number;
+  text: string;
+}
+
+function formatEventCue(event: ReplayEvent): string {
+  if (event.type === "shot" && /missile|aim-9/i.test(event.message)) return `MISSILE AWAY  ${event.message}`;
+  if (event.type === "hit") return `IMPACT  ${event.message}`;
+  return event.message;
+}
+
+function buildEventCues(replay: MatchReplay): EventCue[] {
+  const cues: EventCue[] = [];
+  for (const frame of replay.frames) {
+    for (const event of frame.events) {
+      const hold = event.type === "hit" ? 1.55 : 1.15;
+      cues.push({ start: frame.time, end: frame.time + hold, text: formatEventCue(event) });
+    }
+  }
+  return cues;
+}
+
+function activeEventCue(cues: EventCue[], time: number): string | undefined {
+  return cues.find((cue) => cue.start <= time && time < cue.end)?.text;
+}
+
 function buildFrames(replay: MatchReplay): FilmFrame[] {
   const frames = replay.frames;
   const duration = frames[frames.length - 1].time;
@@ -265,6 +333,7 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
   for (const d of replay.decisions ?? []) {
     if (d.agentId === PILOT_ID && d.rationale) rationaleByTurn.set(d.turn, d.rationale);
   }
+  const eventCues = buildEventCues(replay);
 
   const result: FilmFrame[] = [];
   let seg = 0;
@@ -298,7 +367,6 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
     result.push({
       cam: percept.text ?? "",
       fieldCells,
-      sub: rationaleByTurn.get(fa.turn) ?? "",
       hud: `${device.id.toUpperCase()}   turn ${fa.turn}/${turns}   t=${t.toFixed(1)}s`,
       selfId: self.id,
       aircraft: world.map((s) => ({
@@ -317,6 +385,7 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
         const dtLocal = t - fa.time;
         return {
           id: p.id,
+          kind: p.kind ?? "bullet",
           team: p.team,
           x: p.position.x + p.velocity.x * dtLocal,
           y: p.position.y + p.velocity.y * dtLocal,
@@ -328,6 +397,7 @@ function buildFrames(replay: MatchReplay): FilmFrame[] {
       fwd: pose.boresight,
       up: pose.basis.up,
       fovDeg: pose.vFovRad * RAD2DEG,
+      sub: activeEventCue(eventCues, t) ?? rationaleByTurn.get(fa.turn) ?? "",
       angle: t * 0.22, // slow orbit
     });
   }
@@ -464,16 +534,16 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
       return { group:g, glow, balloon:true };
     }
 
-    // Tracer pool: each live round is a short bright streak from its head back along -velocity. We keep
-    // a reusable pool of line meshes keyed by round id and hide the ones not present this frame.
+    // Tracer pool: each live round is a bright streak from its head back along -velocity. Missiles get a
+    // larger head and longer amber trail so they read as a weapon body rather than a bullet sparkle.
     const tracers = {};
-    const TRACER_LEN = 0.34; // streak length in scene units (S-scaled metres); a stubby bright dash
-    function tracerMesh(team){
-      const color = team === 'blue' ? '#bfe6ff' : '#ffd2a8';
+    function tracerMesh(team, kind){
+      const missile = kind === 'missile';
+      const color = missile ? '#ffb347' : (team === 'blue' ? '#bfe6ff' : '#ffd2a8');
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.05,8,8),
-        new THREE.MeshBasicMaterial({color:'#ffffff'}));
+      const head = new THREE.Mesh(new THREE.SphereGeometry(missile ? 0.10 : 0.05,12,10),
+        new THREE.MeshBasicMaterial({color: missile ? '#fff2cf' : '#ffffff'}));
       const line = new THREE.Line(geo, new THREE.LineBasicMaterial({color, transparent:true, opacity:0.95}));
       const g = new THREE.Group(); g.add(line); g.add(head); scene.add(g);
       return { group:g, line, head, geo };
@@ -482,13 +552,14 @@ const CINEMA_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
       const seen = new Set();
       for (const tr of list){
         seen.add(tr.id);
-        let t = tracers[tr.id]; if(!t){ t = tracerMesh(tr.team); tracers[tr.id] = t; }
+        let t = tracers[tr.id]; if(!t){ t = tracerMesh(tr.team, tr.kind); tracers[tr.id] = t; }
         const hx=tr.x*S, hy=tr.y*S, hz=tr.z*S;
         const vlen = Math.hypot(tr.vx, tr.vy, tr.vz) || 1;
         const ux=tr.vx/vlen, uy=tr.vy/vlen, uz=tr.vz/vlen; // unit velocity
+        const trailLen = tr.kind === 'missile' ? 1.25 : 0.34; // scene units (S-scaled metres)
         const pos = t.geo.attributes.position.array;
         pos[0]=hx; pos[1]=hy; pos[2]=hz;                                  // head
-        pos[3]=hx-ux*TRACER_LEN; pos[4]=hy-uy*TRACER_LEN; pos[5]=hz-uz*TRACER_LEN; // tail
+        pos[3]=hx-ux*trailLen; pos[4]=hy-uy*trailLen; pos[5]=hz-uz*trailLen; // tail
         t.geo.attributes.position.needsUpdate = true;
         t.head.position.set(hx, hy, hz);
         t.group.visible = true;
@@ -623,6 +694,10 @@ async function main(): Promise<void> {
   );
   if (mode === "pilot-intent") {
     console.error(formatReplayVerification(summarizeReplayVerification(replay, PILOT_ID)));
+  }
+  if (recordOnly) {
+    console.error("record-only: skipped frame rendering");
+    return;
   }
 
   const frames = buildFrames(replay);

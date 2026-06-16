@@ -8,8 +8,30 @@ import {
   type MatchReplay,
 } from "../protocol/schema";
 
-export const StudioModeSchema = z.enum(["hangar", "crew", "flight", "replay", "debug"]);
+export const StudioModeSchema = z.enum(["hangar", "crew", "scenario", "flight", "replay", "debug"]);
 export const StudioCameraModeSchema = z.enum(["orbit", "cabin", "pilot-cinema"]);
+export const ScenarioKindSchema = z.enum(["duel", "stern-gun", "balloon"]);
+export const LIVE_SCENARIO_MODEL = "deepseek/deepseek-v4-flash";
+export const ScenarioPilotModelSchema = z.enum(["scripted-body-pilot", LIVE_SCENARIO_MODEL]);
+export const ScenarioBodyModelSchema = z.enum(["scripted-fixed-wing-body", LIVE_SCENARIO_MODEL]);
+
+export const StudioScenarioConfigSchema = z.object({
+  schemaVersion: z.literal(1),
+  kind: ScenarioKindSchema,
+  pilotModel: ScenarioPilotModelSchema,
+  bodyModel: ScenarioBodyModelSchema,
+  turnCount: z.number().int().min(1).max(80),
+  cameraMode: StudioCameraModeSchema,
+});
+
+export const DEFAULT_STUDIO_SCENARIO_CONFIG = {
+  schemaVersion: 1,
+  kind: "duel",
+  pilotModel: "scripted-body-pilot",
+  bodyModel: "scripted-fixed-wing-body",
+  turnCount: 2,
+  cameraMode: "pilot-cinema",
+} as const satisfies z.infer<typeof StudioScenarioConfigSchema>;
 
 export const FitStatusSchema = z.enum(["ok", "warning", "blocked"]);
 
@@ -158,6 +180,7 @@ export const StudioSessionSchema = z.object({
   aircraftBuildId: z.string(),
   pilotProfileId: z.string(),
   crewAssignments: z.array(CrewAssignmentSchema),
+  scenario: StudioScenarioConfigSchema.optional(),
   activeReplayId: z.string().optional(),
   replayIds: z.array(z.string()),
   captureIds: z.array(z.string()),
@@ -183,6 +206,10 @@ export const StudioProjectSchema = z.object({
 
 export type StudioMode = z.infer<typeof StudioModeSchema>;
 export type StudioCameraMode = z.infer<typeof StudioCameraModeSchema>;
+export type ScenarioKind = z.infer<typeof ScenarioKindSchema>;
+export type ScenarioPilotModel = z.infer<typeof ScenarioPilotModelSchema>;
+export type ScenarioBodyModel = z.infer<typeof ScenarioBodyModelSchema>;
+export type StudioScenarioConfig = z.infer<typeof StudioScenarioConfigSchema>;
 export type FitStatus = z.infer<typeof FitStatusSchema>;
 export type FitCheck = z.infer<typeof FitCheckSchema>;
 export type CrewFitValidation = z.infer<typeof CrewFitValidationSchema>;

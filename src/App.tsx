@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { MatchReplay } from "./protocol/schema";
-import { generateAirframeMatch } from "./runtime/scenario";
+import { MatchReplaySchema, type Airframe, type MatchReplay } from "./protocol/schema";
+import { generateScenarioMatch } from "./runtime/scenario";
 import { aircraftArchetypes } from "./sim/aircraftCatalog";
 import {
   addReplayAsset,
@@ -11,9 +11,16 @@ import {
   getActiveSession,
   selectAircraftBuild,
   selectStudioMode,
+  updateScenarioConfig,
   updatePilotProfile,
 } from "./studio/project";
-import type { PilotProfile, StudioMode, StudioProject } from "./studio/schema";
+import {
+  DEFAULT_STUDIO_SCENARIO_CONFIG,
+  type PilotProfile,
+  type StudioMode,
+  type StudioProject,
+  type StudioScenarioConfig,
+} from "./studio/schema";
 import { loadStudioProject, saveStudioProject } from "./studio/store";
 import type { CameraMode } from "./viewer/FlightScene";
 import { HangarScreen } from "./viewer/HangarScreen";
@@ -46,6 +53,11 @@ declare global {
   }
 }
 
+export interface ScenarioLaunchProgress {
+  label: string;
+  percent: number;
+}
+
 export function App() {
   const [project, setProject] = useState<StudioProject>(() => loadStudioProject());
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => queryCameraMode());
@@ -55,11 +67,20 @@ export function App() {
   const [voiceOn, setVoiceOn] = useState(() => queryFlag("voice", false));
   const [builderOpen, setBuilderOpen] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [scenarioProgress, setScenarioProgress] = useState<ScenarioLaunchProgress | null>(null);
+  const [scenarioError, setScenarioError] = useState<string | null>(null);
 
   const activeSession = useMemo(() => getActiveSession(project), [project]);
   const activeAircraft = useMemo(() => getActiveAircraft(project, activeSession), [project, activeSession]);
   const activePilot = useMemo(() => getActivePilot(project, activeSession), [project, activeSession]);
   const activeReplay = useMemo(() => getActiveReplay(project, activeSession), [project, activeSession]);
+  const activeScenario = useMemo<StudioScenarioConfig>(
+    () => ({
+      ...DEFAULT_STUDIO_SCENARIO_CONFIG,
+      ...activeSession.scenario,
+    }),
+    [activeSession.scenario],
+  );
   const activeArchetype = useMemo(
     () => aircraftArchetypes.find((archetype) => archetype.id === activeAircraft.sourceArchetypeId),
     [activeAircraft.sourceArchetypeId],
@@ -133,6 +154,12 @@ export function App() {
     [updateProject],
   );
 
+  const handleUpdateScenario = useCallback(
+    (update: (scenario: StudioScenarioConfig) => StudioScenarioConfig) =>
+      updateProject((current) => updateScenarioConfig(current, update)),
+    [updateProject],
+  );
+
   const addReplayToProject = useCallback(
     (matchReplay: MatchReplay, title: string, aircraftBuildId = activeAircraft.id, sessionId = activeSession.id) => {
       const now = new Date();
@@ -152,15 +179,33 @@ export function App() {
     if (launching) return;
     const aircraft = activeAircraft;
     const session = activeSession;
+    const scenario = activeScenario;
     setLaunching(true);
+    setScenarioError(null);
     try {
-      const built = await generateAirframeMatch(aircraft.airframe);
-      addReplayToProject(built, `${aircraft.name} sortie`, aircraft.id, session.id);
-      setCameraMode("pilot-cinema");
+      setScenarioProgress({ label: "Compiling aircraft", percent: 0.14 });
+      await nextPaint();
+      setScenarioProgress({
+        label: scenarioRunsOnServer(scenario) ? "Calling live scenario" : "Running scenario",
+        percent: 0.5,
+      });
+      await nextPaint();
+      const built = scenarioRunsOnServer(scenario)
+        ? await generateServerScenarioMatch(aircraft.airframe, scenario)
+        : await generateScenarioMatch(aircraft.airframe, scenario);
+      setScenarioProgress({ label: "Saving replay", percent: 0.86 });
+      await nextPaint();
+      addReplayToProject(built, scenarioTitle(aircraft.name, scenario), aircraft.id, session.id);
+      setCameraMode(scenario.cameraMode);
+      setScenarioProgress({ label: "Opening replay", percent: 1 });
+      await nextPaint();
+    } catch (error) {
+      setScenarioError(error instanceof Error ? error.message : String(error));
     } finally {
       setLaunching(false);
+      setScenarioProgress(null);
     }
-  }, [activeAircraft, activeSession, addReplayToProject, launching]);
+  }, [activeAircraft, activeScenario, activeSession, addReplayToProject, launching]);
 
   const onFlyBuild = useCallback(
     (built: MatchReplay) => {
@@ -180,6 +225,7 @@ export function App() {
         activeAircraft={activeAircraft}
         activeArchetype={activeArchetype}
         activePilot={activePilot}
+        activeScenario={activeScenario}
         activeSession={activeSession}
         cameraMode={cameraMode}
         caption={caption}
@@ -196,6 +242,7 @@ export function App() {
         onOpenBuilder={() => setBuilderOpen(true)}
         onSelectAircraft={handleSelectAircraft}
         onSoundChange={setSoundOn}
+        onUpdateScenario={handleUpdateScenario}
         onUpdatePilot={handleUpdatePilot}
         onVoiceChange={setVoiceOn}
         pilotId={pilotId}
@@ -215,9 +262,49 @@ export function App() {
         }}
         project={project}
         replay={replay}
+        scenarioError={scenarioError}
+        scenarioProgress={scenarioProgress}
         soundOn={soundOn}
         voiceOn={voiceOn}
       />
     </>
   );
+}
+
+function scenarioTitle(aircraftName: string, scenario: StudioScenarioConfig): string {
+  const engine = scenarioRunsOnServer(scenario) ? "live" : "scripted";
+  return `${aircraftName} ${engine} ${SCENARIO_TITLE_BY_KIND[scenario.kind]}`;
+}
+
+function nextPaint(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  return new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+const SCENARIO_TITLE_BY_KIND: Record<StudioScenarioConfig["kind"], string> = {
+  balloon: "balloon hunt",
+  duel: "merge duel",
+  "stern-gun": "stern gun start",
+};
+
+function scenarioRunsOnServer(scenario: StudioScenarioConfig): boolean {
+  return scenario.pilotModel !== "scripted-body-pilot" || scenario.bodyModel !== "scripted-fixed-wing-body";
+}
+
+async function generateServerScenarioMatch(
+  airframe: Airframe,
+  scenario: StudioScenarioConfig,
+): Promise<MatchReplay> {
+  const response = await fetch("/api/scenario/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ airframe, scenario }),
+  });
+  const payload = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    const message =
+      payload && typeof payload.error === "string" ? payload.error : `scenario request failed (${response.status})`;
+    throw new Error(message);
+  }
+  return MatchReplaySchema.parse(payload.replay);
 }

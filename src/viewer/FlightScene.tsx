@@ -7,6 +7,7 @@ import type {
   ControlInput,
   MatchReplay,
   Part,
+  ProjectileSnapshot,
   ReplayFrame,
   SurfaceControlSnapshot,
   Vec3,
@@ -130,6 +131,10 @@ export function FlightScene({
         <PathLine key={`path-${ship.id}`} ship={ship} replay={replay} frameIndex={frame.index} />
       ))}
 
+      {(frame.projectiles ?? []).map((projectile) => (
+        <ProjectileMarker key={projectile.id} projectile={projectile} />
+      ))}
+
       {frame.events
         .filter((event) => event.origin && event.impact)
         .map((event, index) => (
@@ -143,6 +148,38 @@ export function FlightScene({
           />
         ))}
     </>
+  );
+}
+
+function ProjectileMarker({ projectile }: { projectile: ProjectileSnapshot }) {
+  const missile = projectile.kind === "missile";
+  const speed = Math.hypot(projectile.velocity.x, projectile.velocity.y, projectile.velocity.z);
+  const trailM = missile ? 95 : 38;
+  const inv = speed > 1e-6 ? 1 / speed : 0;
+  const tail = {
+    x: projectile.position.x - projectile.velocity.x * inv * trailM,
+    y: projectile.position.y - projectile.velocity.y * inv * trailM,
+    z: projectile.position.z - projectile.velocity.z * inv * trailM,
+  };
+  const color = missile ? "#ff8a24" : projectile.team === "blue" ? "#f2c94c" : "#ff8a8a";
+  const head = toScenePoint(projectile.position);
+
+  return (
+    <group>
+      <Line
+        points={[toScenePoint(tail), head]}
+        color={color}
+        lineWidth={missile ? 4 : 2}
+        transparent
+        opacity={missile ? 0.88 : 0.72}
+      />
+      {missile ? (
+        <mesh position={head}>
+          <sphereGeometry args={[0.075, 12, 8]} />
+          <meshBasicMaterial color="#ffd27a" />
+        </mesh>
+      ) : null}
+    </group>
   );
 }
 

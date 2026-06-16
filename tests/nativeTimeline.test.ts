@@ -162,4 +162,106 @@ describe("buildNativeRenderTimeline", () => {
     expect(timeline.frames[0].pilotDynamics?.seatSinkM).toBeGreaterThan(0.04);
     expect(timeline.frames[0].pilotDynamics?.rootRollDeg).toBeLessThan(-5);
   });
+
+  it("exports split-screen cameras, pilot FEEL subtitles, and projectiles", () => {
+    const balloon = ship(0, {
+      id: "balloon",
+      callsign: "Balloon",
+      team: "red",
+      color: "#ff5da3",
+      position: { x: 600, y: 980, z: -900 },
+      velocity: { x: 0, y: 0, z: 0 },
+      static: true,
+    });
+    const frames = [
+      frame(0, [ship(0), balloon]),
+      {
+        ...frame(1, [ship(1), balloon]),
+        projectiles: [
+          {
+            id: "bullet-1",
+            position: { x: 120, y: 1005, z: -220 },
+            velocity: { x: 700, y: 0, z: -700 },
+            team: "blue" as const,
+          },
+        ],
+      },
+    ];
+    const withBody = {
+      ...replay(frames),
+      bodyTicks: [
+        {
+          agentId: "blue-1",
+          time: 0,
+          parsed: { feel: "target centered and the air feels smooth" },
+        },
+      ] as any,
+    } as MatchReplay;
+    const timeline = buildNativeRenderTimeline(withBody, {
+      fps: 2,
+      seconds: 1,
+      cameraMode: "split-balloon",
+      avatarPath: "public/models/VRM1_Constraint_Twist_Sample.vrm",
+      loop: false,
+    });
+
+    expect(timeline.layout).toBe("split-screen");
+    expect(timeline.avatar?.pilotId).toBe("blue-1");
+    expect(timeline.subtitles?.[0].label).toBe("FEEL");
+    expect(timeline.subtitles?.[0].text).toContain("target centered");
+    expect(timeline.frames[0].camera.mode).toBe("pilot-hero");
+    expect(timeline.frames[0].externalCamera?.shot).toBe("split-balloon-orbit");
+    expect(timeline.frames[1].projectiles?.[0].id).toBe("bullet-1");
+  });
+
+  it("exports a split-screen dogfight camera for dynamic 1v1 replays", () => {
+    const rival = ship(0, {
+      id: "red-1",
+      callsign: "Red",
+      team: "red",
+      color: "#ff5d61",
+      position: { x: 520, y: 1040, z: -760 },
+      velocity: { x: -120, y: 0, z: 95 },
+    });
+    const frames = [
+      frame(0, [ship(0), rival]),
+      {
+        ...frame(1, [ship(1), { ...rival, position: { x: 470, y: 1036, z: -705 } }]),
+        projectiles: [
+          {
+            id: "red-round-1",
+            position: { x: 310, y: 1020, z: -460 },
+            velocity: { x: -620, y: -20, z: 510 },
+            team: "red" as const,
+          },
+        ],
+      },
+    ];
+    const withBody = {
+      ...replay(frames),
+      bodyTicks: [
+        {
+          agentId: "blue-1",
+          time: 0,
+          parsed: { feel: "bandit off the nose, holding pressure" },
+        },
+      ] as any,
+    } as MatchReplay;
+    const timeline = buildNativeRenderTimeline(withBody, {
+      fps: 2,
+      seconds: 1,
+      cameraMode: "split-dogfight",
+      avatarPath: "public/models/VRM1_Constraint_Twist_Sample.vrm",
+      loop: false,
+    });
+
+    expect(timeline.layout).toBe("split-screen");
+    expect(timeline.cameraMode).toBe("split-dogfight");
+    expect(timeline.frames[0].camera.mode).toBe("pilot-hero");
+    expect(timeline.frames[0].externalCamera?.shot).toBe("split-dogfight-orbit");
+    expect(timeline.frames[0].externalCamera?.target.x).toBeGreaterThan(0);
+    expect(timeline.frames[0].externalCamera?.target.z).toBeLessThan(0);
+    expect(timeline.frames[1].projectiles?.[0].team).toBe("red");
+    expect(timeline.subtitles?.[0].text).toContain("bandit");
+  });
 });

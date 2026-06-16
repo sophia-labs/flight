@@ -22,7 +22,19 @@ import { useMemo, type ComponentType } from "react";
 import type { AircraftSnapshot, MatchReplay, ReplayFrame } from "../protocol/schema";
 import { airframeReport, compileAirframe } from "../sim/airframe";
 import { aircraftArchetypes, type AircraftArchetype } from "../sim/aircraftCatalog";
-import type { AircraftBuild, PilotProfile, StudioMode, StudioProject, StudioSession } from "../studio/schema";
+import { buildPerformanceEnvelope } from "../sim/performanceEnvelope";
+import {
+  performancePresentation,
+  type PerformancePresentation,
+} from "../studio/performancePresentation";
+import type {
+  AircraftBuild,
+  PilotProfile,
+  StudioMode,
+  StudioProject,
+  StudioScenarioConfig,
+  StudioSession,
+} from "../studio/schema";
 import { normalizeVrmWearableIds, VRM_WEARABLE_CATALOG, type VrmWearableId } from "../studio/vrmWearables";
 import { BodyPanel } from "./BodyPanel";
 import { ControlsPanel } from "./ControlsPanel";
@@ -58,10 +70,16 @@ interface PlaybackControls {
   toggle: () => void;
 }
 
+interface ScenarioProgress {
+  label: string;
+  percent: number;
+}
+
 export function StudioScreen({
   activeAircraft,
   activeArchetype,
   activePilot,
+  activeScenario,
   activeSession,
   cameraMode,
   caption,
@@ -78,18 +96,22 @@ export function StudioScreen({
   onOpenBuilder,
   onSelectAircraft,
   onSoundChange,
+  onUpdateScenario,
   onUpdatePilot,
   onVoiceChange,
   pilotId,
   playback,
   project,
   replay,
+  scenarioError,
+  scenarioProgress,
   soundOn,
   voiceOn,
 }: {
   activeAircraft: AircraftBuild;
   activeArchetype?: AircraftArchetype;
   activePilot: PilotProfile;
+  activeScenario: StudioScenarioConfig;
   activeSession: StudioSession;
   cameraMode: CameraMode;
   caption?: string;
@@ -106,17 +128,30 @@ export function StudioScreen({
   onOpenBuilder: () => void;
   onSelectAircraft: (aircraftBuildId: string) => void;
   onSoundChange: (enabled: boolean) => void;
+  onUpdateScenario: (update: (scenario: StudioScenarioConfig) => StudioScenarioConfig) => void;
   onUpdatePilot: (pilotProfileId: string, update: (pilot: PilotProfile) => PilotProfile) => void;
   onVoiceChange: (enabled: boolean) => void;
   pilotId: string;
   playback: PlaybackControls;
   project: StudioProject;
   replay: MatchReplay | null;
+  scenarioError: string | null;
+  scenarioProgress: ScenarioProgress | null;
   soundOn: boolean;
   voiceOn: boolean;
 }) {
   const compiled = useMemo(() => compileAirframe(activeAircraft.airframe), [activeAircraft.airframe]);
   const report = useMemo(() => airframeReport(compiled.model), [compiled.model]);
+  const envelope = useMemo(
+    () =>
+      buildPerformanceEnvelope(compiled.model, {
+        aircraftId: activeAircraft.sourceArchetypeId ?? activeAircraft.id,
+        aircraftName: activeAircraft.name,
+        role: activeArchetype?.role,
+      }),
+    [activeAircraft.id, activeAircraft.name, activeAircraft.sourceArchetypeId, activeArchetype?.role, compiled.model],
+  );
+  const performance = useMemo(() => performancePresentation(envelope), [envelope]);
   const fit = useMemo(
     () => summarizeFit(activeAircraft, activePilot.id),
     [activeAircraft, activePilot.id],
@@ -217,7 +252,7 @@ export function StudioScreen({
             disabled={launching}
           >
             <Play size={16} />
-            {launching ? "Launching" : "Launch"}
+            {launching ? "Running" : mode === "scenario" ? "Run" : "Launch"}
           </button>
         </header>
 
@@ -228,43 +263,29 @@ export function StudioScreen({
             fit={fit}
             onUpdatePilot={onUpdatePilot}
           />
+        ) : mode === "scenario" ? (
+          <ScenarioPanel
+            activeAircraft={activeAircraft}
+            activeScenario={activeScenario}
+            launching={launching}
+            onLaunch={onLaunch}
+            onOpenBuilder={onOpenBuilder}
+            onSelectAircraft={onSelectAircraft}
+            onUpdateScenario={onUpdateScenario}
+            palette={palette}
+            project={project}
+            error={scenarioError}
+            progress={scenarioProgress}
+          />
         ) : (
           <>
-            <section className="studio-section">
-              <div className="studio-section-title">
-                <span>Aircraft</span>
-                <button type="button" className="studio-quiet-button" onClick={onOpenBuilder}>
-                  <Wrench size={15} />
-                  Edit build
-                </button>
-              </div>
-              <div className="studio-aircraft-list">
-                {project.library.aircraft.map((aircraft) => {
-                  const archetype = projectAircraftArchetype(aircraft);
-                  const selected = aircraft.id === activeAircraft.id;
-                  return (
-                    <button
-                      key={aircraft.id}
-                      type="button"
-                      className={`studio-aircraft-button${selected ? " active" : ""}`}
-                      onClick={() => onSelectAircraft(aircraft.id)}
-                    >
-                      <span
-                        className="studio-aircraft-swatch"
-                        style={{
-                          background: selected ? palette.base : (archetype?.palette.base ?? "#4da3ff"),
-                          borderColor: selected ? palette.trim : (archetype?.palette.trim ?? "rgba(255,255,255,0.34)"),
-                        }}
-                      />
-                      <span>
-                        <strong>{aircraft.name}</strong>
-                        <small>{archetype?.role ?? aircraft.source}</small>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </section>
+            <AircraftSelectorPanel
+              activeAircraft={activeAircraft}
+              onOpenBuilder={onOpenBuilder}
+              onSelectAircraft={onSelectAircraft}
+              palette={palette}
+              project={project}
+            />
 
             <section className="studio-section studio-stat-strip" aria-label="Aircraft stats">
               <StudioStat label="mass" value={`${Math.round(compiled.model.massKg)} kg`} />
@@ -273,6 +294,7 @@ export function StudioScreen({
               <StudioStat label="T:W" value={report.thrustToWeight.toFixed(2)} />
             </section>
 
+            <PerformanceEnvelopePanel performance={performance} />
             <PilotFitPanel activePilot={activePilot} fit={fit} />
           </>
         )}
@@ -453,6 +475,176 @@ function StationHotspot({ active, position }: { active: boolean; position: { x: 
         <meshStandardMaterial color={active ? "#58d38c" : "#f2c94c"} emissive="#14170a" />
       </mesh>
     </group>
+  );
+}
+
+function AircraftSelectorPanel({
+  activeAircraft,
+  onOpenBuilder,
+  onSelectAircraft,
+  palette,
+  project,
+}: {
+  activeAircraft: AircraftBuild;
+  onOpenBuilder: () => void;
+  onSelectAircraft: (aircraftBuildId: string) => void;
+  palette: { base: string; trim: string };
+  project: StudioProject;
+}) {
+  return (
+    <section className="studio-section">
+      <div className="studio-section-title">
+        <span>Aircraft</span>
+        <button type="button" className="studio-quiet-button" onClick={onOpenBuilder}>
+          <Wrench size={15} />
+          Edit build
+        </button>
+      </div>
+      <div className="studio-aircraft-list">
+        {project.library.aircraft.map((aircraft) => {
+          const archetype = projectAircraftArchetype(aircraft);
+          const selected = aircraft.id === activeAircraft.id;
+          return (
+            <button
+              key={aircraft.id}
+              type="button"
+              className={`studio-aircraft-button${selected ? " active" : ""}`}
+              onClick={() => onSelectAircraft(aircraft.id)}
+            >
+              <span
+                className="studio-aircraft-swatch"
+                style={{
+                  background: selected ? palette.base : (archetype?.palette.base ?? "#4da3ff"),
+                  borderColor: selected ? palette.trim : (archetype?.palette.trim ?? "rgba(255,255,255,0.34)"),
+                }}
+              />
+              <span>
+                <strong>{aircraft.name}</strong>
+                <small>{archetype?.role ?? aircraft.source}</small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ScenarioPanel({
+  activeAircraft,
+  activeScenario,
+  launching,
+  onLaunch,
+  onOpenBuilder,
+  onSelectAircraft,
+  onUpdateScenario,
+  palette,
+  project,
+  error,
+  progress,
+}: {
+  activeAircraft: AircraftBuild;
+  activeScenario: StudioScenarioConfig;
+  launching: boolean;
+  onLaunch: () => void;
+  onOpenBuilder: () => void;
+  onSelectAircraft: (aircraftBuildId: string) => void;
+  onUpdateScenario: (update: (scenario: StudioScenarioConfig) => StudioScenarioConfig) => void;
+  palette: { base: string; trim: string };
+  project: StudioProject;
+  error: string | null;
+  progress: ScenarioProgress | null;
+}) {
+  const patchScenario = <K extends keyof StudioScenarioConfig>(key: K, value: StudioScenarioConfig[K]) =>
+    onUpdateScenario((scenario) => ({ ...scenario, [key]: value }));
+
+  return (
+    <>
+      <AircraftSelectorPanel
+        activeAircraft={activeAircraft}
+        onOpenBuilder={onOpenBuilder}
+        onSelectAircraft={onSelectAircraft}
+        palette={palette}
+        project={project}
+      />
+
+      <section className="studio-section scenario-sheet">
+        <div className="studio-section-title">
+          <span>Scenario</span>
+          <span>{labelFor(activeScenario.kind)}</span>
+        </div>
+        <div className="scenario-summary-grid">
+          <ScenarioMetric label="Aircraft" value={activeAircraft.name} />
+          <ScenarioMetric label="Pilot" value={labelFor(activeScenario.pilotModel)} />
+          <ScenarioMetric label="Body" value={labelFor(activeScenario.bodyModel)} />
+          <ScenarioMetric label="Turns" value={String(activeScenario.turnCount)} />
+        </div>
+      </section>
+
+      <section className="studio-section">
+        <div className="studio-section-title">
+          <span>Setup</span>
+        </div>
+        <OptionRow
+          label="Start"
+          selected={activeScenario.kind}
+          options={SCENARIO_KIND_OPTIONS}
+          onSelect={(value) => patchScenario("kind", value)}
+        />
+        <OptionRow
+          label="Pilot"
+          selected={activeScenario.pilotModel}
+          options={SCENARIO_PILOT_OPTIONS}
+          onSelect={(value) => patchScenario("pilotModel", value)}
+        />
+        <OptionRow
+          label="Body"
+          selected={activeScenario.bodyModel}
+          options={SCENARIO_BODY_OPTIONS}
+          onSelect={(value) => patchScenario("bodyModel", value)}
+        />
+        <OptionRow
+          label="Turns"
+          selected={String(activeScenario.turnCount)}
+          options={SCENARIO_TURN_OPTIONS}
+          onSelect={(value) => patchScenario("turnCount", Number(value))}
+        />
+        <OptionRow
+          label="Camera"
+          selected={activeScenario.cameraMode}
+          options={SCENARIO_CAMERA_OPTIONS}
+          onSelect={(value) => patchScenario("cameraMode", value)}
+        />
+      </section>
+
+      <section className="studio-section">
+        <button type="button" className="scenario-run-button" onClick={onLaunch} disabled={launching}>
+          <Play size={17} />
+          {launching ? "Running" : "Run Scenario"}
+        </button>
+        {progress ? (
+          <div className="scenario-progress" aria-label="Scenario progress">
+            <div>
+              <span>{progress.label}</span>
+              <strong>{Math.round(progress.percent * 100)}%</strong>
+            </div>
+            <i>
+              <span style={{ width: `${Math.round(progress.percent * 100)}%` }} />
+            </i>
+          </div>
+        ) : null}
+        {error ? <p className="scenario-error">{error}</p> : null}
+      </section>
+    </>
+  );
+}
+
+function ScenarioMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -910,6 +1102,44 @@ function StudioStat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function PerformanceEnvelopePanel({ performance }: { performance: PerformancePresentation }) {
+  return (
+    <section className="studio-section performance-envelope" aria-label="Flight envelope">
+      <div className="studio-section-title">
+        <span>Flight Envelope</span>
+        <span>{performance.headline}</span>
+      </div>
+
+      <div className="performance-card-grid">
+        {performance.cards.map((card) => (
+          <div key={card.label} className="performance-card">
+            <span>{card.label}</span>
+            <strong>{card.value}</strong>
+            <small>{card.detail}</small>
+          </div>
+        ))}
+      </div>
+
+      <div className="performance-traits">
+        {performance.traits.map((trait) => (
+          <div key={trait.label} className={`performance-trait ${trait.tone}`}>
+            <div>
+              <span>{trait.label}</span>
+              <strong>{trait.value}</strong>
+            </div>
+            <div className="performance-meter" aria-hidden="true">
+              <i style={{ width: `${Math.round(trait.rating * 100)}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <p className="performance-note">{performance.operatingNote}</p>
+      <p className="performance-note muted">{performance.accelerationNote}</p>
+    </section>
+  );
+}
+
 function FitBadge({ status }: { status: FitStatusValue }) {
   return <span className={`studio-fit-badge ${status}`}>{status}</span>;
 }
@@ -1042,6 +1272,8 @@ function defaultLoadout(pilot: PilotProfile): PilotLoadout {
 }
 
 function labelFor(value: string): string {
+  const override = LABEL_OVERRIDES[value];
+  if (override) return override;
   return value
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -1051,9 +1283,10 @@ function labelFor(value: string): string {
 const MODE_ITEMS: Array<{ icon: ComponentType<{ size?: number }>; label: string; mode: StudioMode }> = [
   { icon: Plane, label: "Hangar", mode: "hangar" },
   { icon: UserRound, label: "Crew", mode: "crew" },
+  { icon: SlidersHorizontal, label: "Scene", mode: "scenario" },
   { icon: BadgeCheck, label: "Flight", mode: "flight" },
   { icon: Film, label: "Replay", mode: "replay" },
-  { icon: SlidersHorizontal, label: "Debug", mode: "debug" },
+  { icon: Gauge, label: "Debug", mode: "debug" },
 ];
 
 const HAIR_SWATCHES = ["#2f2530", "#d68a48", "#f2c94c", "#e77aa6", "#83d4ff"] as const;
@@ -1067,3 +1300,14 @@ const COMMS_OPTIONS = ["open-cockpit", "throat-mic", "broadcast-rig"] as const;
 const GLOVE_OPTIONS = ["none", "fingerless", "flight"] as const;
 const MATERIAL_OPTIONS = ["studio-safe", "vrm", "diagnostic"] as const;
 const EXPRESSION_OPTIONS = ["neutral", "focused", "excited", "strained"] as const;
+const SCENARIO_KIND_OPTIONS = ["duel", "stern-gun", "balloon"] as const satisfies readonly StudioScenarioConfig["kind"][];
+const SCENARIO_PILOT_OPTIONS = ["scripted-body-pilot", "deepseek/deepseek-v4-flash"] as const satisfies readonly StudioScenarioConfig["pilotModel"][];
+const SCENARIO_BODY_OPTIONS = ["scripted-fixed-wing-body", "deepseek/deepseek-v4-flash"] as const satisfies readonly StudioScenarioConfig["bodyModel"][];
+const SCENARIO_TURN_OPTIONS: readonly string[] = ["1", "2", "4", "8"];
+const SCENARIO_CAMERA_OPTIONS = ["orbit", "cabin", "pilot-cinema"] as const satisfies readonly StudioScenarioConfig["cameraMode"][];
+
+const LABEL_OVERRIDES: Record<string, string> = {
+  "scripted-body-pilot": "Scripted Pilot",
+  "scripted-fixed-wing-body": "Scripted Body",
+  "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+};

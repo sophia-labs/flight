@@ -2,8 +2,10 @@ import type {
   Airframe,
   AircraftSnapshot,
   MatchReplay,
+  ProjectileSnapshot,
   Quaternion,
   ReplayEvent,
+  ReplayFrame,
   SurfaceControlSnapshot,
   Vec3,
 } from "../protocol/schema";
@@ -13,7 +15,14 @@ import { mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
 import { sampleReplayFrame } from "../viewer/replaySample";
 import { deriveSurfaceControls } from "../viewer/surfaceTelemetry";
 
-export type NativeCameraMode = "cinematic" | "chase" | "cockpit" | "orbit" | "pilot-hero";
+export type NativeCameraMode =
+  | "cinematic"
+  | "chase"
+  | "cockpit"
+  | "orbit"
+  | "pilot-hero"
+  | "split-balloon"
+  | "split-dogfight";
 
 export interface NativeRenderTimelineOptions {
   fps?: number;
@@ -34,12 +43,14 @@ export interface NativeRenderTimeline {
   replayId: string;
   pilotId: string;
   cameraMode: NativeCameraMode;
+  layout?: "single" | "split-screen";
   fps: number;
   width: number;
   height: number;
   durationSeconds: number;
   airframes: Record<string, Airframe>;
   avatar?: NativeRenderAvatar;
+  subtitles?: NativeRenderSubtitle[];
   frames: NativeRenderFrame[];
 }
 
@@ -57,9 +68,18 @@ export interface NativeRenderFrame {
   time: number;
   replayPosition: number;
   camera: NativeRenderCamera;
+  externalCamera?: NativeRenderCamera;
   pilotDynamics?: NativePilotDynamics;
   aircraft: NativeRenderAircraft[];
   events: ReplayEvent[];
+  projectiles?: ProjectileSnapshot[];
+}
+
+export interface NativeRenderSubtitle {
+  start: number;
+  end: number;
+  label: "FEEL";
+  text: string;
 }
 
 export interface NativePilotDynamics {
@@ -121,9 +141,11 @@ export function buildNativeRenderTimeline(
   const height = positiveInteger(options.height ?? DEFAULT_HEIGHT, "height");
   const pilotId = options.pilotId ?? "blue-1";
   const cameraMode = options.cameraMode ?? "cinematic";
+  const splitScreen = isSplitScreenMode(cameraMode);
   const durationSeconds = positiveFinite(options.seconds ?? defaultDuration(replay), "seconds");
   const frameCount = Math.max(1, Math.round(durationSeconds * fps));
   const airframes = resolveAirframes(replay);
+  const subtitles = splitScreen ? buildFeelSubtitles(replay, pilotId, frameCount / fps) : [];
   const frames: NativeRenderFrame[] = [];
 
   for (let index = 0; index < frameCount; index += 1) {
@@ -131,6 +153,7 @@ export function buildNativeRenderTimeline(
     const replayPosition = replayPositionAt(replay, time, options.loop ?? true);
     const sampled = sampleReplayFrame(replay.frames, replayPosition);
     if (!sampled) throw new Error("cannot build a native render timeline from an empty replay");
+    const projectiles = sampleProjectiles(replay.frames, replayPosition);
 
     const aircraft = sampled.aircraft.map((ship) => {
       const airframe = airframes[ship.id] ?? fallbackAirframe(ship.id);
@@ -143,19 +166,23 @@ export function buildNativeRenderTimeline(
       index,
       time,
       replayPosition,
-      camera: computeCamera({
-        aircraft,
-        airframes,
-        pilotId,
-        pilotDynamics,
-        mode: cameraMode,
-        width,
-        height,
-        time,
-      }),
+      camera: splitScreen && pilot
+        ? pilotHeroCamera(pilot, pilotDynamics, time)
+        : computeCamera({
+            aircraft,
+            airframes,
+            pilotId,
+            pilotDynamics,
+            mode: cameraMode,
+            width,
+            height,
+            time,
+          }),
+      ...(splitScreen ? { externalCamera: splitExternalCamera(aircraft, pilotId, time, cameraMode) } : {}),
       ...(pilotDynamics ? { pilotDynamics } : {}),
       aircraft,
       events: sampled.events,
+      ...(projectiles.length ? { projectiles } : {}),
     });
   }
 
@@ -167,6 +194,7 @@ export function buildNativeRenderTimeline(
     replayId: replay.id,
     pilotId,
     cameraMode,
+    ...(splitScreen ? { layout: "split-screen" as const } : {}),
     fps,
     width,
     height,
@@ -184,8 +212,42 @@ export function buildNativeRenderTimeline(
           },
         }
       : {}),
+    ...(subtitles.length ? { subtitles } : {}),
     frames,
   };
+}
+
+function buildFeelSubtitles(replay: MatchReplay, pilotId: string, durationSeconds: number): NativeRenderSubtitle[] {
+  const ticks = (replay.bodyTicks ?? [])
+    .filter((tick) => tick.agentId === pilotId && tick.parsed.feel)
+    .map((tick) => ({
+      time: tick.time,
+      text: tick.parsed.feel?.trim() ?? "",
+    }))
+    .filter((tick) => Number.isFinite(tick.time) && tick.time >= 0 && tick.time < durationSeconds && tick.text.length > 0)
+    .sort((a, b) => a.time - b.time);
+  const selected: { time: number; text: string }[] = [];
+  let nextAllowed = -Infinity;
+  for (const tick of ticks) {
+    if (tick.time + 1e-6 < nextAllowed) continue;
+    if (selected.at(-1)?.text === tick.text) continue;
+    selected.push(tick);
+    nextAllowed = tick.time + 0.85;
+  }
+
+  return selected.map((tick, index) => {
+    const next = selected[index + 1]?.time ?? durationSeconds;
+    return {
+      start: tick.time,
+      end: Math.min(durationSeconds, Math.max(tick.time + 0.75, next)),
+      label: "FEEL" as const,
+      text: tick.text,
+    };
+  });
+}
+
+function isSplitScreenMode(mode: NativeCameraMode): boolean {
+  return mode === "split-balloon" || mode === "split-dogfight";
 }
 
 function defaultDuration(replay: MatchReplay): number {
@@ -198,6 +260,12 @@ function replayPositionAt(replay: MatchReplay, time: number, loop: boolean): num
   const maxIndex = Math.max(0, replay.frames.length - 1);
   if (maxIndex === 0) return 0;
   return loop ? position % maxIndex : Math.min(maxIndex, position);
+}
+
+function sampleProjectiles(frames: ReplayFrame[], position: number): ProjectileSnapshot[] {
+  if (frames.length === 0) return [];
+  const index = Math.max(0, Math.min(frames.length - 1, Math.round(position)));
+  return frames[index]?.projectiles ?? [];
 }
 
 function resolveAirframes(replay: MatchReplay): Record<string, Airframe> {
@@ -270,6 +338,7 @@ function computeCamera({
 
   if (mode === "cockpit") return cockpitCamera(pilot, airframes[pilot.id], width / height);
   if (mode === "pilot-hero") return pilotHeroCamera(pilot, pilotDynamics, time);
+  if (isSplitScreenMode(mode)) return pilotHeroCamera(pilot, pilotDynamics, time);
   if (mode === "chase") return chaseCamera(pilot, "chase");
   if (mode === "orbit") return orbitCamera(aircraft, time);
   return cinematicCamera(pilot, aircraft, airframes[pilot.id], width / height, time);
@@ -322,10 +391,10 @@ function pilotHeroCamera(
   return sanitizeCamera({
     mode: "pilot-hero",
     shot: "pilot-hero-canopy",
-    eye: localToWorld(ship, vec3(0.38 + driftX + shake.x, 0.74 + shake.y, -6.45 + shake.z)),
-    target: localToWorld(ship, vec3(0.01 + shake.x * 0.28, 0.34 - gFocus * 0.1 + shake.y * 0.18, -4.25)),
+    eye: localToWorld(ship, vec3(0.62 + driftX + shake.x, 1.24 + shake.y, -5.22 + shake.z)),
+    target: localToWorld(ship, vec3(0.05 + shake.x * 0.2, 0.16 - gFocus * 0.06 + shake.y * 0.14, -4.35)),
     up: basisFromQuat(ship.orientation).up,
-    verticalFovDeg: 54,
+    verticalFovDeg: 46,
   });
 }
 
@@ -368,6 +437,82 @@ function orbitCamera(aircraft: NativeRenderAircraft[], time: number): NativeRend
     up: WORLD_UP,
     verticalFovDeg: 36,
   });
+}
+
+function splitExternalCamera(
+  aircraft: NativeRenderAircraft[],
+  pilotId: string,
+  time: number,
+  mode: NativeCameraMode,
+): NativeRenderCamera {
+  const pilot = aircraft.find((ship) => ship.id === pilotId) ?? aircraft[0];
+  if (!pilot) {
+    return sanitizeCamera({
+      mode: "orbit",
+      shot: mode === "split-dogfight" ? "split-dogfight-empty" : "split-balloon-empty",
+      eye: vec3(0, 80, 160),
+      target: vec3(0, 0, 0),
+      up: WORLD_UP,
+      verticalFovDeg: 36,
+    });
+  }
+
+  const targetShip = splitTargetAircraft(aircraft, pilot, mode);
+  const basis = basisFromQuat(pilot.orientation);
+  const aim = targetShip ? normalize(sub(targetShip.position, pilot.position), basis.forward) : basis.forward;
+  const flatAim = normalize(vec3(aim.x, 0, aim.z), vec3(basis.forward.x, 0, basis.forward.z));
+  const lateral = normalize(vec3(-flatAim.z, 0, flatAim.x), basis.right);
+  const range = targetShip ? length(sub(targetShip.position, pilot.position)) : 900;
+  const side = 76 + Math.sin(time * 0.32) * 18;
+  const back = clamp(112 + range * 0.012, 120, 165);
+  const height = 38 + Math.sin(time * 0.27) * 10;
+  const lookAhead = mode === "split-dogfight" ? clamp(range * 0.55, 80, 460) : clamp(range * 0.16, 220, 430);
+
+  return sanitizeCamera({
+    mode: "orbit",
+    shot: mode === "split-dogfight" ? "split-dogfight-orbit" : "split-balloon-orbit",
+    eye: add(pilot.position, add(scale(aim, -back), add(scale(lateral, side), scale(WORLD_UP, height)))),
+    target: add(pilot.position, add(scale(aim, lookAhead), scale(WORLD_UP, 8))),
+    up: WORLD_UP,
+    verticalFovDeg: 49,
+  });
+}
+
+function splitTargetAircraft(
+  aircraft: NativeRenderAircraft[],
+  pilot: NativeRenderAircraft,
+  mode: NativeCameraMode,
+): NativeRenderAircraft | undefined {
+  const others = aircraft.filter((ship) => ship.id !== pilot.id);
+  if (mode === "split-balloon") {
+    return (
+      nearestAircraft(pilot, others.filter((ship) => ship.static)) ??
+      nearestAircraft(pilot, others.filter((ship) => ship.team !== pilot.team)) ??
+      nearestAircraft(pilot, others)
+    );
+  }
+  return (
+    nearestAircraft(pilot, others.filter((ship) => ship.team !== pilot.team && !ship.static)) ??
+    nearestAircraft(pilot, others.filter((ship) => ship.team !== pilot.team)) ??
+    nearestAircraft(pilot, others.filter((ship) => !ship.static)) ??
+    nearestAircraft(pilot, others)
+  );
+}
+
+function nearestAircraft(
+  origin: NativeRenderAircraft,
+  candidates: NativeRenderAircraft[],
+): NativeRenderAircraft | undefined {
+  let nearest: NativeRenderAircraft | undefined;
+  let nearestDistance = Infinity;
+  for (const ship of candidates) {
+    const distance = length(sub(ship.position, origin.position));
+    if (distance < nearestDistance) {
+      nearest = ship;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
 }
 
 function cinematicCamera(

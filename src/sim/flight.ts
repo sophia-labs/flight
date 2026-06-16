@@ -1,4 +1,4 @@
-import { clampControlInput, type ControlInput, type ReplayEvent } from "../protocol/schema";
+import { clampControlInput, type ControlInput, type ReplayEvent, type Vec3 } from "../protocol/schema";
 import {
   GRAVITY,
   GRAVITY_MPS2,
@@ -48,6 +48,7 @@ import type {
   Projectile,
   StepResult,
   SurfaceAerodynamicState,
+  WeaponStation,
 } from "./types";
 
 const TERRAIN_FLOOR_M = 55;
@@ -86,6 +87,30 @@ const MUZZLE_OFFSET_M = 18; // round spawns this far ahead of the ship origin (t
 const BALLOON_HIT_RADIUS_M = 42; // a fat balloon target's capture radius (its perceivedRadiusM)
 const AIRCRAFT_HIT_RADIUS_M = 8; // a small airframe's capture radius
 const PROJECTILE_DAMAGE = 26; // damage a connecting round deals (one good burst pops the 12-hp balloon)
+
+// v0.10.x heat-seeking missile profile. The F-14's first heat seeker is an AIM-9M-class Sidewinder:
+// IR homing, Mach-2.5-ish peak speed, and short-range WVR kinematics. Public headline numbers are
+// visible; seeker details are deliberately approximate and gameplay-facing, not a classified model.
+export const AIM9M_SIDEWINDER_PROFILE = {
+  id: "aim-9m" as const,
+  maxSpeedMach: 2.5,
+  speedMps: 850,
+  effectiveRangeM: 18_500,
+  lifetimeS: 24,
+  seekerHalfAngleRad: (38 * Math.PI) / 180,
+  trackHalfAngleRad: (48 * Math.PI) / 180,
+  maxLateralG: 30,
+  navigationConstant: 3.5,
+  minLockSignal: 0.2,
+  proximityRadiusM: 10,
+};
+
+const MISSILE_SPEED = AIM9M_SIDEWINDER_PROFILE.speedMps;
+const MISSILE_LIFETIME_S = AIM9M_SIDEWINDER_PROFILE.lifetimeS;
+const MISSILE_MAX_RANGE_M = AIM9M_SIDEWINDER_PROFILE.effectiveRangeM;
+const MISSILE_COOLDOWN_S = 6;
+const MISSILE_PROXIMITY_RADIUS_M = AIM9M_SIDEWINDER_PROFILE.proximityRadiusM;
+const MISSILE_DAMAGE = 72;
 
 // The capture radius a round must pass within to register a hit on a target. A balloon uses its big
 // perceived size; an aircraft is a small point target. Mirrored by the on-solution geometry in
@@ -132,7 +157,181 @@ export {
   WEAPON_COOLDOWN_S,
   MUZZLE_OFFSET_M,
   PROJECTILE_DAMAGE,
+  MISSILE_SPEED,
+  MISSILE_LIFETIME_S,
+  MISSILE_MAX_RANGE_M,
+  MISSILE_COOLDOWN_S,
+  MISSILE_DAMAGE,
 };
+
+function projectileProfile(kind: Projectile["kind"]) {
+  if (kind === "missile") {
+    return {
+      damage: MISSILE_DAMAGE,
+      lifetimeS: MISSILE_LIFETIME_S,
+      maxRangeM: MISSILE_MAX_RANGE_M,
+      proximityRadiusM: MISSILE_PROXIMITY_RADIUS_M,
+      label: "missile",
+    };
+  }
+
+  return {
+    damage: PROJECTILE_DAMAGE,
+    lifetimeS: PROJECTILE_LIFETIME_S,
+    maxRangeM: PROJECTILE_MAX_RANGE_M,
+    proximityRadiusM: 0,
+    label: "round",
+  };
+}
+
+function projectileHitRadiusM(round: Projectile, target: AircraftState): number {
+  return targetHitRadiusM(target) + projectileProfile(round.kind).proximityRadiusM;
+}
+
+function clampMagnitude(v: Vec3, maxMagnitude: number): Vec3 {
+  const magnitude = length(v);
+  if (magnitude <= maxMagnitude || magnitude < 1e-8) return v;
+  return scale(v, maxMagnitude / magnitude);
+}
+
+function clamp01(value: number): number {
+  return clamp(value, 0, 1);
+}
+
+function missileForward(round: Projectile): Vec3 {
+  return normalize(round.velocity, vec3(0, 0, -1));
+}
+
+// Deliberately compact IR model: hot jets and afterburner dominate, rear aspect is strongest, but
+// all-aspect AIM-9M behavior leaves a weaker nose/beam signature. Range attenuation then determines
+// whether the seeker can maintain a useful signal.
+export function targetHeatSignature(target: AircraftState, observerPosition: Vec3): number {
+  if (target.health <= 0) return 0;
+  const jetCount = target.model.jetPropulsions.length;
+  const propCount = target.model.propulsions.length;
+  const thrustPointCount = target.model.thrustPoints.length;
+  const throttle = clamp01(target.controls.throttle);
+  const spool = clamp01(target.metrics.engineSpool ?? target.engineSpool ?? throttle);
+  const engineHeat = jetCount > 0
+    ? jetCount * 8.5
+    : propCount > 0
+      ? propCount * 1.8
+      : thrustPointCount > 0
+        ? thrustPointCount * 2.4
+        : 0;
+  const afterburnerHeat = target.metrics.afterburner ? jetCount * 18 : 0;
+  const speedHeat = clamp01(length(target.velocity) / 360) * 1.4;
+  const baseHeat = (target.static ? 0.05 : 1.2) + engineHeat + throttle * 5 + spool * 5 + afterburnerHeat + speedHeat;
+
+  const targetForward = basisFromQuat(target.orientation).forward;
+  const toObserver = normalize(sub(observerPosition, target.position), scale(targetForward, -1));
+  const rearAspect = clamp01((dot(toObserver, scale(targetForward, -1)) + 1) / 2);
+  const aspectGain = 0.32 + rearAspect * 0.68;
+  return baseHeat * aspectGain;
+}
+
+interface HeatSeekerCandidate {
+  target: AircraftState;
+  angleRad: number;
+  heat: number;
+  signal: number;
+}
+
+function heatSeekerCandidate(
+  round: Projectile,
+  target: AircraftState,
+  maxAngleRad: number,
+  minSignal: number,
+): HeatSeekerCandidate | undefined {
+  if (target.team === round.team || target.health <= 0 || target.id === round.ownerId) return undefined;
+  const toTarget = sub(target.position, round.position);
+  const range = length(toTarget);
+  if (range < 1 || range > MISSILE_MAX_RANGE_M) return undefined;
+  const los = normalize(toTarget);
+  const angleRad = Math.acos(clamp(dot(missileForward(round), los), -1, 1));
+  if (angleRad > maxAngleRad) return undefined;
+  const heat = targetHeatSignature(target, round.position);
+  const rangeKm = Math.max(0.25, range / 1_000);
+  const signal = heat / (rangeKm * rangeKm);
+  if (signal < minSignal) return undefined;
+  return { target, angleRad, heat, signal };
+}
+
+function strongestHeatTarget(
+  round: Projectile,
+  aircraft: AircraftState[],
+  maxAngleRad: number,
+  minSignal: number,
+): HeatSeekerCandidate | undefined {
+  let best: HeatSeekerCandidate | undefined;
+  for (const target of aircraft) {
+    const candidate = heatSeekerCandidate(round, target, maxAngleRad, minSignal);
+    if (!candidate) continue;
+    if (!best || candidate.signal > best.signal) best = candidate;
+  }
+  return best;
+}
+
+function heatSeekingTarget(round: Projectile, aircraft: AircraftState[]): HeatSeekerCandidate | undefined {
+  const relaxedSignal = AIM9M_SIDEWINDER_PROFILE.minLockSignal * 0.55;
+  const lockedTarget = round.targetId
+    ? aircraft.find((target) => target.id === round.targetId && target.health > 0)
+    : undefined;
+  if (lockedTarget) {
+    const current = heatSeekerCandidate(
+      round,
+      lockedTarget,
+      AIM9M_SIDEWINDER_PROFILE.trackHalfAngleRad,
+      relaxedSignal,
+    );
+    if (current) return current;
+  }
+  return strongestHeatTarget(
+    round,
+    aircraft,
+    AIM9M_SIDEWINDER_PROFILE.seekerHalfAngleRad,
+    AIM9M_SIDEWINDER_PROFILE.minLockSignal,
+  );
+}
+
+function guideHeatSeekingMissile(round: Projectile, aircraft: AircraftState[], dt: number): Projectile {
+  if (round.kind !== "missile" || round.guidance !== "heat-seeking") return round;
+  const candidate = heatSeekingTarget(round, aircraft);
+  if (!candidate) {
+    return {
+      ...round,
+      lockState: round.lockState === "acquired" ? "lost" : (round.lockState ?? "none"),
+      seekerAngleRad: undefined,
+      targetHeat: undefined,
+      lockSignal: undefined,
+    };
+  }
+
+  const target = candidate.target;
+  const toTarget = sub(target.position, round.position);
+  const rangeSq = Math.max(dot(toTarget, toTarget), 1);
+  const los = normalize(toTarget);
+  const relativeVelocity = sub(target.velocity, round.velocity);
+  const closingSpeed = Math.max(0, -dot(relativeVelocity, los));
+  const losRate = scale(cross(toTarget, relativeVelocity), 1 / rangeSq);
+  const commandedAccel = scale(
+    cross(losRate, los),
+    AIM9M_SIDEWINDER_PROFILE.navigationConstant * Math.max(closingSpeed, 1),
+  );
+  const limitedAccel = clampMagnitude(commandedAccel, AIM9M_SIDEWINDER_PROFILE.maxLateralG * GRAVITY_MPS2);
+  const previousSpeed = Math.max(length(round.velocity), 1);
+  const nextDirection = normalize(add(round.velocity, scale(limitedAccel, dt)), missileForward(round));
+
+  return {
+    ...round,
+    velocity: scale(nextDirection, previousSpeed),
+    targetId: target.id,
+    lockState: "acquired",
+    seekerAngleRad: candidate.angleRad,
+    targetHeat: candidate.heat,
+    lockSignal: candidate.signal,
+  };
+}
 
 // Closest approach (squared) of the swept segment p0->p1 to a fixed point c. A fast bullet can step
 // past a small target in one frame, so we test the whole segment, not just the endpoints — no tunnelling.
@@ -307,16 +506,18 @@ function stepProjectiles(
 ): Projectile[] {
   const survivors: Projectile[] = [];
   for (const round of projectiles) {
-    const p0 = round.position;
-    const p1 = add(p0, scale(round.velocity, dt));
+    const guidedRound = guideHeatSeekingMissile(round, aircraft, dt);
+    const profile = projectileProfile(guidedRound.kind);
+    const p0 = guidedRound.position;
+    const p1 = add(p0, scale(guidedRound.velocity, dt));
     const stepLen = length(sub(p1, p0));
 
     // Swept hit test against every enemy target with health, keeping the closest intercept along the
     // segment so a round can't pass two contacts and credit the wrong one.
     let hit: { target: AircraftState; distSq: number } | undefined;
     for (const target of aircraft) {
-      if (target.team === round.team || target.health <= 0 || target.id === round.ownerId) continue;
-      const radius = targetHitRadiusM(target);
+      if (target.team === guidedRound.team || target.health <= 0 || target.id === guidedRound.ownerId) continue;
+      const radius = projectileHitRadiusM(guidedRound, target);
       const distSq = closestApproachSqToPoint(p0, p1, target.position);
       if (distSq <= radius * radius && (!hit || distSq < hit.distSq)) {
         hit = { target, distSq };
@@ -325,22 +526,22 @@ function stepProjectiles(
 
     if (hit) {
       const target = hit.target;
-      target.health = clamp(target.health - PROJECTILE_DAMAGE, 0, 100);
+      target.health = clamp(target.health - profile.damage, 0, 100);
       events.push({
         type: "hit",
-        actorId: round.ownerId,
+        actorId: guidedRound.ownerId,
         targetId: target.id,
-        message: `round from ${round.ownerId} hits ${target.callsign} for ${PROJECTILE_DAMAGE}`,
+        message: `${profile.label} from ${guidedRound.ownerId} hits ${target.callsign} for ${profile.damage}`,
         origin: p0,
         impact: target.position,
       });
       continue; // round is consumed
     }
 
-    const travelled = round.distanceTravelledM + stepLen;
-    const age = time + dt - round.spawnTime;
-    if (travelled > PROJECTILE_MAX_RANGE_M || age > PROJECTILE_LIFETIME_S) continue; // despawn
-    survivors.push({ ...round, position: p1, distanceTravelledM: travelled });
+    const travelled = guidedRound.distanceTravelledM + stepLen;
+    const age = time + dt - guidedRound.spawnTime;
+    if (travelled > profile.maxRangeM || age > profile.lifetimeS) continue; // despawn
+    survivors.push({ ...guidedRound, position: p1, distanceTravelledM: travelled });
   }
   return survivors;
 }
@@ -544,11 +745,123 @@ function stepJetSpool(aircraft: AircraftState, targetThrustSetting: number, dt: 
   return aircraft.engineSpool;
 }
 
-// Spawn a real round for any ship that pulls the trigger this step. The round is born at the muzzle
-// (nose) travelling MUZZLE_SPEED along the gun axis plus the shooter's own velocity — it goes where the
-// nose points, NOT toward the target, so aim now matters. Fires on a rising trigger edge gated by the
-// per-shot cooldown (held-true ⇒ one round per cooldown, not an auto-stream). Returns the new rounds;
-// the 'shot' event is emitted here, while 'hit'/'miss' are decided downstream when the round arrives.
+function ammoForStation(shooter: AircraftState, station: WeaponStation): number {
+  return shooter.weaponAmmo?.[station.id] ?? station.count;
+}
+
+function spendStationAmmo(shooter: AircraftState, station: WeaponStation): void {
+  const next = Math.max(0, ammoForStation(shooter, station) - 1);
+  shooter.weaponAmmo = { ...(shooter.weaponAmmo ?? {}), [station.id]: next };
+}
+
+function firstLoadedMissileStation(shooter: AircraftState): WeaponStation | undefined {
+  return shooter.model.weaponStations.find(
+    (station) => station.kind === "missile" && ammoForStation(shooter, station) > 0,
+  );
+}
+
+function spawnMissile(
+  shooter: AircraftState,
+  station: WeaponStation,
+  time: number,
+  aircraft: AircraftState[],
+  events: ReplayEvent[],
+): Projectile {
+  spendStationAmmo(shooter, station);
+  shooter.weaponCooldown = MISSILE_COOLDOWN_S;
+
+  const forward = normalize(rotateVec(shooter.orientation, station.localForward), basisFromQuat(shooter.orientation).forward);
+  const muzzle = add(shooter.position, rotateVec(shooter.orientation, station.localOffset));
+  const velocity = add(scale(forward, MISSILE_SPEED), shooter.velocity);
+  const initialRound: Projectile = {
+    id: `missile-${shooter.id}-${station.id}-${time.toFixed(4)}`,
+    kind: "missile",
+    guidance: station.guidance,
+    ...(station.guidance === "heat-seeking" ? { missileModel: AIM9M_SIDEWINDER_PROFILE.id } : {}),
+    position: muzzle,
+    velocity,
+    ownerId: shooter.id,
+    team: shooter.team,
+    spawnTime: time,
+    distanceTravelledM: 0,
+  };
+  const heatTarget = station.guidance === "heat-seeking"
+    ? strongestHeatTarget(
+        initialRound,
+        aircraft,
+        AIM9M_SIDEWINDER_PROFILE.seekerHalfAngleRad,
+        AIM9M_SIDEWINDER_PROFILE.minLockSignal,
+      )
+    : undefined;
+  const target = heatTarget?.target ?? (station.guidance === "none" ? nearestOpponent(shooter, aircraft) : undefined);
+  const round: Projectile = {
+    ...initialRound,
+    lockState: station.guidance === "heat-seeking" ? (heatTarget ? "acquired" : "none") : "none",
+    ...(target ? { targetId: target.id } : {}),
+    ...(heatTarget
+      ? {
+          seekerAngleRad: heatTarget.angleRad,
+          targetHeat: heatTarget.heat,
+          lockSignal: heatTarget.signal,
+        }
+      : {}),
+  };
+
+  events.push({
+    type: "shot",
+    actorId: shooter.id,
+    ...(target ? { targetId: target.id } : {}),
+    message: station.guidance === "heat-seeking"
+      ? `${shooter.callsign} launches AIM-9M`
+      : `${shooter.callsign} launches missile`,
+    origin: muzzle,
+    ...(target ? { impact: target.position } : {}),
+  });
+
+  return round;
+}
+
+function spawnBullet(
+  shooter: AircraftState,
+  time: number,
+  aircraft: AircraftState[],
+  events: ReplayEvent[],
+): Projectile {
+  shooter.weaponCooldown = WEAPON_COOLDOWN_S;
+  const forward = basisFromQuat(shooter.orientation).forward;
+  const muzzle = add(shooter.position, scale(forward, MUZZLE_OFFSET_M));
+  // Bullet velocity in the world frame: gun axis * muzzle speed + the platform's own velocity.
+  const velocity = add(scale(forward, MUZZLE_SPEED), shooter.velocity);
+  const target = nearestOpponent(shooter, aircraft);
+
+  events.push({
+    type: "shot",
+    actorId: shooter.id,
+    ...(target ? { targetId: target.id } : {}),
+    message: `${shooter.callsign} fires`,
+    origin: muzzle,
+    ...(target ? { impact: target.position } : {}),
+  });
+
+  // Deterministic id: a ship fires at most one round per step and each step has a unique time, so
+  // owner+time is unique across a match AND reproducible run-to-run (no module-level counter that
+  // would drift between matches and break replay-determinism).
+  return {
+    id: `bullet-${shooter.id}-${time.toFixed(4)}`,
+    kind: "bullet",
+    position: muzzle,
+    velocity,
+    ownerId: shooter.id,
+    team: shooter.team,
+    spawnTime: time,
+    distanceTravelledM: 0,
+    ...(target ? { targetId: target.id } : {}),
+  };
+}
+
+// Spawn a real weapon for any ship that pulls the trigger this step. Gun-only aircraft keep the legacy
+// bullet path. Missile stations spend one round and either fly dumb-fire or acquire an IR target,
+// depending on station guidance.
 function resolveWeapons(
   aircraft: AircraftState[],
   time: number,
@@ -566,34 +879,12 @@ function resolveWeapons(
       continue;
     }
 
-    shooter.weaponCooldown = WEAPON_COOLDOWN_S;
-    const forward = basisFromQuat(shooter.orientation).forward;
-    const muzzle = add(shooter.position, scale(forward, MUZZLE_OFFSET_M));
-    // Bullet velocity in the world frame: gun axis * muzzle speed + the platform's own velocity.
-    const velocity = add(scale(forward, MUZZLE_SPEED), shooter.velocity);
-
-    // Deterministic id: a ship fires at most one round per step and each step has a unique time, so
-    // owner+time is unique across a match AND reproducible run-to-run (no module-level counter that
-    // would drift between matches and break replay-determinism).
-    spawned.push({
-      id: `bullet-${shooter.id}-${time.toFixed(4)}`,
-      position: muzzle,
-      velocity,
-      ownerId: shooter.id,
-      team: shooter.team,
-      spawnTime: time,
-      distanceTravelledM: 0,
-    });
-
-    const target = nearestOpponent(shooter, aircraft);
-    events.push({
-      type: "shot",
-      actorId: shooter.id,
-      ...(target ? { targetId: target.id } : {}),
-      message: `${shooter.callsign} fires`,
-      origin: muzzle,
-      ...(target ? { impact: target.position } : {}),
-    });
+    const missileStation = firstLoadedMissileStation(shooter);
+    spawned.push(
+      missileStation
+        ? spawnMissile(shooter, missileStation, time, aircraft, events)
+        : spawnBullet(shooter, time, aircraft, events),
+    );
   }
 
   return spawned;
