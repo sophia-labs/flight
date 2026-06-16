@@ -11,7 +11,7 @@ import {
 } from "@pixiv/three-vrm";
 import type { AircraftSnapshot, Part } from "../protocol/schema";
 import type { PilotProfile } from "../studio/schema";
-import { normalizeVrmWearableIds, type VrmWearableId } from "../studio/vrmWearables";
+import { normalizeVrmWearableIds, VRM_WEARABLE_CATALOG, type VrmWearableId } from "../studio/vrmWearables";
 import { solveCcdIk } from "./contactIk";
 import {
   computeCockpitRig,
@@ -129,6 +129,8 @@ const CONTACT_SPECS = [
     weight: 0.42,
   },
 ] as const;
+
+const wearableAssetCache = new Map<string, Promise<THREE.Object3D>>();
 
 function prepareVrmScene(
   scene: THREE.Object3D,
@@ -402,20 +404,44 @@ function usePilotWearables(vrm: VRM | null, profile?: PilotProfile): VrmWearable
   useEffect(() => {
     if (!vrm) return;
 
-    const attached: THREE.Object3D[] = [];
+    let cancelled = false;
+    const attached: Array<{ dispose: boolean; object: THREE.Object3D }> = [];
     for (const id of wearableIds) {
-      for (const attachment of createWearableAttachments(id, appearance)) {
+      const catalogItem = VRM_WEARABLE_CATALOG.find((item) => item.id === id);
+      if (catalogItem && "asset" in catalogItem) {
+        const asset = catalogItem.asset;
+        loadWearableAsset(asset.url)
+          .then((template) => {
+            if (cancelled) return;
+            const bone = getNormalizedBone(vrm, catalogItem.bone) ?? getRawBone(vrm, catalogItem.bone);
+            if (!bone) return;
+            const object = template.clone(true);
+            object.name = `vrm-wearable-${id}`;
+            object.position.set(asset.position[0], asset.position[1], asset.position[2]);
+            object.rotation.set(asset.rotation[0], asset.rotation[1], asset.rotation[2]);
+            object.scale.setScalar(asset.scale);
+            bone.add(object);
+            attached.push({ dispose: false, object });
+          })
+          .catch((error: unknown) => {
+            console.error(`VRM wearable asset load failed: ${id}`, error);
+          });
+        continue;
+      }
+
+      for (const attachment of createPrimitiveWearableAttachments(id, appearance)) {
         const bone = getNormalizedBone(vrm, attachment.boneName) ?? getRawBone(vrm, attachment.boneName);
         if (!bone) continue;
         bone.add(attachment.object);
-        attached.push(attachment.object);
+        attached.push({ dispose: true, object: attachment.object });
       }
     }
 
     return () => {
-      for (const object of attached) {
+      cancelled = true;
+      for (const { dispose, object } of attached) {
         object.parent?.remove(object);
-        disposeObject(object);
+        if (dispose) disposeObject(object);
       }
     };
   }, [appearance, vrm, wearableIds]);
@@ -423,7 +449,7 @@ function usePilotWearables(vrm: VRM | null, profile?: PilotProfile): VrmWearable
   return wearableIds;
 }
 
-function createWearableAttachments(
+function createPrimitiveWearableAttachments(
   id: VrmWearableId,
   appearance?: PilotAppearanceConfig,
 ): Array<{ boneName: string; object: THREE.Object3D }> {
@@ -436,6 +462,43 @@ function createWearableAttachments(
     ];
   }
   return [];
+}
+
+function loadWearableAsset(url: string): Promise<THREE.Object3D> {
+  const cached = wearableAssetCache.get(url);
+  if (cached) return cached;
+
+  const loader = new GLTFLoader();
+  loader.crossOrigin = "anonymous";
+  const pending = loader.loadAsync(url).then((gltf: GLTF) => {
+    const scene = gltf.scene;
+    scene.name = "vrm-wearable-import-template";
+    prepareWearableAsset(scene);
+    fitWearableAssetToLocalOrigin(scene);
+    return scene;
+  });
+  wearableAssetCache.set(url, pending);
+  return pending;
+}
+
+function prepareWearableAsset(object: THREE.Object3D) {
+  object.traverse((child) => {
+    child.frustumCulled = false;
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+  });
+}
+
+function fitWearableAssetToLocalOrigin(object: THREE.Object3D) {
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(object);
+  const center = box.getCenter(new THREE.Vector3());
+  object.position.x -= center.x;
+  object.position.z -= center.z;
+  object.position.y -= box.min.y;
+  object.updateMatrixWorld(true);
 }
 
 function createFlightHeadset(appearance?: PilotAppearanceConfig): THREE.Group {

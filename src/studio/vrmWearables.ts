@@ -1,10 +1,27 @@
 export const VRM_WEARABLE_CATALOG = [
   {
+    id: "khronos-flight-helmet",
+    label: "Khronos Flight Helmet",
+    slot: "Helmet",
+    bone: "head",
+    source: "khronos-cc0",
+    excludes: ["flight-headset"],
+    asset: {
+      url: "/models/wearables/flight-helmet/FlightHelmet.runtime.gltf",
+      license: "CC0-1.0",
+      sourceUrl: "https://github.com/KhronosGroup/glTF-Sample-Assets/tree/main/Models/FlightHelmet",
+      position: [0, -0.23, 0.025],
+      rotation: [0, 0, 0],
+      scale: 0.72,
+    },
+  },
+  {
     id: "flight-headset",
     label: "Flight Headset",
     slot: "Comms",
     bone: "head",
     source: "renderer-poc",
+    excludes: ["khronos-flight-helmet"],
   },
   {
     id: "g-suit-harness",

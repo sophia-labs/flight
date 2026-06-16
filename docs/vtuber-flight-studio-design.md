@@ -457,3 +457,5 @@ The current Crew slice adds a small `VRM Gear` catalog as a renderer-level proof
 - `src/studio/vrmWearables.ts` defines the first catalog entries: headset, G-suit harness, and data gloves.
 - `PilotAvatar` and `LoadoutPilotAvatar` both attach selected gear to VRM humanoid bones, so the same profile shows up in the loadout scene and the cockpit/replay renderer.
 - The generated geometry is intentionally primitive. The important boundary is the manifest-to-bone attachment path; imported XWear/GLB outfit parts can replace those generated meshes later without changing the Crew UI or persistence shape.
+
+One real imported asset is now wired through that path: `Khronos Flight Helmet`, derived from the Khronos glTF Sample Assets `FlightHelmet` model. The runtime copy strips texture references and keeps the geometry plus simple PBR material colors under `public/models/wearables/flight-helmet`; upstream metadata and the CC0 license are kept beside it.

@@ -491,9 +491,16 @@ function CrewLoadoutPanel({
   const toggleWearable = (id: VrmWearableId) =>
     patchPilot((pilot) => {
       const current = normalizeVrmWearableIds(pilot.vrmWearables);
+      const item = VRM_WEARABLE_CATALOG.find((candidate) => candidate.id === id);
       const next = current.includes(id)
         ? current.filter((wearableId) => wearableId !== id)
-        : [...current, id];
+        : [
+            ...current.filter(
+              (wearableId) =>
+                !(item && "excludes" in item && (item.excludes as readonly string[]).includes(wearableId)),
+            ),
+            id,
+          ];
       return { ...pilot, vrmWearables: next };
     });
 

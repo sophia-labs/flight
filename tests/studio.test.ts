@@ -68,7 +68,7 @@ describe("studio project persistence", () => {
           flightSuit: "test-pilot",
           role: "instructor",
         },
-        vrmWearables: ["flight-headset", "data-gloves"],
+        vrmWearables: ["khronos-flight-helmet", "flight-headset", "data-gloves"],
       }),
       new Date("2026-06-16T00:03:00.000Z"),
     );
@@ -81,7 +81,7 @@ describe("studio project persistence", () => {
       flightSuit: "test-pilot",
       role: "instructor",
     });
-    expect(next.library.pilots[0]?.vrmWearables).toEqual(["flight-headset", "data-gloves"]);
+    expect(next.library.pilots[0]?.vrmWearables).toEqual(["khronos-flight-helmet", "flight-headset", "data-gloves"]);
     expect(StudioProjectSchema.parse(next)).toEqual(next);
   });
 
