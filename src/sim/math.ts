@@ -125,6 +125,17 @@ export function rotateAroundWorldAxis(q: Quaternion, axis: Vec3, angle: number):
   return quatNormalize(quatMultiply(quatFromAxisAngle(axis, angle), q));
 }
 
+export function integrateLocalAngularVelocity(q: Quaternion, localAngularVelocity: Vec3, dt: number): Quaternion {
+  const angularSpeed = length(localAngularVelocity);
+  if (angularSpeed < 1e-8 || dt <= 0) {
+    return quatNormalize(q);
+  }
+
+  return quatNormalize(
+    quatMultiply(q, quatFromAxisAngle(localAngularVelocity, angularSpeed * dt)),
+  );
+}
+
 export function quatLookRotation(forwardInput: Vec3, upInput: Vec3 = WORLD_UP): Quaternion {
   const forward = normalize(forwardInput, vec3(0, 0, -1));
   let right = normalize(cross(forward, upInput), vec3(1, 0, 0));
