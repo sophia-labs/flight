@@ -52,7 +52,8 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
   // generously when there is something worth shooting ahead, and let the Body own the precise call.
   const armedFire =
     enemy.bearingForward > 0 && // target somewhere ahead of the nose
-    enemy.range < (enemy.balloon ? 2_900 : 1_400); // within the round's reach for the target type
+    enemy.range < (enemy.balloon ? 2_900 : 1_400) && // within the round's reach for the target type
+    self.weaponCooldown <= 0.2; // only cue SOLUTION=now when the gun can actually fire
   // `trigger` is retained as the same coarse permission level (kept for back-compat + the non-Body
   // adapters that still read it). The Body path reads `armedFire`; the sear, not this flag, fires.
   const trigger = armedFire;
@@ -73,7 +74,7 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
   // to fly the reticle on and call it ("squeeze when the balloon sits on your + boresight"), instead of
   // the old "I will pull the trigger for you."
   const fireCue = armedFire
-    ? " WEAPONS FREE: you call the shot — keep flying the balloon onto your boresight + and squeeze (SOLUTION now) the instant it sits centred on the crosshair."
+    ? " WEAPONS FREE: you call the shot — keep the target glued to your boresight + and squeeze (SOLUTION now) the instant it sits centred on the crosshair."
     : "";
 
   return {
@@ -82,7 +83,7 @@ export function bodyPursuitIntent(observation: Observation, aggression = 0.72): 
       ? `Steady gun run on the balloon. ${vCue}; ${sideCue}. HOLD your altitude — you are already fast enough, do NOT trade altitude or dive. Keep the balloon glued to your boresight crosshair and fly straight onto it until it fills your sight.${fireCue}`
       : lowEnergy || self.stalled
         ? `recover energy, then turn ${side} toward the target`
-        : `turn ${side} toward the ${rangeBand} target and line up without losing the wing`,
+        : `turn ${side} toward the ${rangeBand} target and line up without losing the wing.${fireCue}`,
     urgency,
     riskTolerance,
     style: isBalloon

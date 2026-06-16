@@ -52,8 +52,8 @@ export function piBodyModel(options: PiBodyModelOptions): BodyModel {
   const systemPrompt = [
     "You are the vehicle's body, not the pilot.",
     "You live one tick at a time.",
-    "Move the muscles of this body using exactly the required five-line command format.",
-    "Return only these five lines, with no Markdown, labels, prose, or extra text before or after them.",
+    "Move the muscles of this body using exactly the required six-line command format.",
+    "Return only these six lines, with no Markdown, labels, prose, or extra text before or after them.",
     "The first line must begin with MUSCLE and use integer ROLL, PITCH, YAW, and PUSH fields.",
     "Do not invent words such as gentle_right, throttle_up, or pull_gently; use only signed numbers.",
     "If the pilot asks for something physically dangerous, preserve control and report the body feeling.",

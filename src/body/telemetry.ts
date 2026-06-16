@@ -267,10 +267,18 @@ const OUTPUT_CONTRACT = [
   "MEM right_turn stage",
   "Use integers only for MUSCLE and TONE. Never use word-values like gentle_right or throttle_up.",
   "Only use TONE reverse when you intentionally need an axis to cross through neutral immediately.",
+  "FIELD clock positions are screen positions in the forward camera, not tactical tail-clock: 6 o'clock means below the crosshair in front view, not behind you.",
+  "Screen correction: high means target above the crosshair, so use positive PITCH to pull the nose up; low means target below, so use negative PITCH to push down.",
+  "Near the pipper, avoid hard roll reversals; use small ROLL/YAW corrections and keep PUSH high.",
+  "GUN DISCIPLINE: only an aircraft contact line that says exactly 12 o'clock level is centered enough for SOLUTION now.",
+  "If the contact line says 1, 2, 3, 6, 9, 10, or 11 o'clock, it is not centered; output warming or hot, never now.",
+  "If the contact line says high or low, it is not centered; 12 o'clock high and 12 o'clock low are not SOLUTION now.",
   // The aiming loop lives in YOUR seat now: fly the reticle (the boresight + at field centre) onto the
   // target glyph and CALL YOUR OWN SHOT with SOLUTION. cold=no shot / target not near the reticle;
   // warming=closing on it; hot=almost there, steady; now=the target is ON the reticle — FIRE. Only say
   // SOLUTION now when the target glyph sits in the centre cell(s) over the + boresight. The gun has an",
+  "If FIELD says '(no contacts in view)', SOLUTION must be cold.",
+  "When weapons are FREE and an aircraft contact line says exactly 12 o'clock level with rng under 1000, SOLUTION now is mandatory, not optional; do not answer hot.",
   "assisted sear: it fires only when the Pilot has armed you (weapons free) AND you call SOLUTION now AND",
   "a round fired this instant would actually strike — so calling now at empty sky simply wastes nothing.",
 ];
@@ -331,6 +339,7 @@ export function buildBodyPrompt(
     // Weapons-free is the Pilot ARMING you (a held action): when armed, YOU own the firing decision —
     // fly the reticle on and call SOLUTION now. When safe, the sear is dead no matter what you call.
     `weapons: ${pilotIntent.armedFire ? "FREE — weapons free, call your own shot (SOLUTION now) when lined up" : "SAFE — hold fire"}`,
+    `fire_cue: ${pilotIntent.armedFire ? "MANDATORY: if FIELD shows a contact as exactly 12 o'clock level and rng <= 1000, return SOLUTION now, not hot. If it says high, low, or 1,2,3,6,9,10,11 o'clock, do not say now." : "weapons safe: return cold unless you are only tracking"}`,
     `constraints: ${pilotIntent.constraints.join("; ") || "none"}`,
     `attention: ${pilotIntent.attention.join("; ") || "none"}`,
     "",
