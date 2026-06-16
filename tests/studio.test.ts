@@ -33,6 +33,7 @@ describe("studio project persistence", () => {
       eyeTint: "#67a7ff",
       outfitTint: "#c9d4ef",
     });
+    expect(project.library.pilots[0]?.vrmWearables).toEqual(["flight-headset", "g-suit-harness"]);
     expect(project.library.pilots[0]?.loadout).toMatchObject({
       callsign: "Echo",
       comms: "broadcast-rig",
@@ -67,6 +68,7 @@ describe("studio project persistence", () => {
           flightSuit: "test-pilot",
           role: "instructor",
         },
+        vrmWearables: ["flight-headset", "data-gloves"],
       }),
       new Date("2026-06-16T00:03:00.000Z"),
     );
@@ -79,6 +81,7 @@ describe("studio project persistence", () => {
       flightSuit: "test-pilot",
       role: "instructor",
     });
+    expect(next.library.pilots[0]?.vrmWearables).toEqual(["flight-headset", "data-gloves"]);
     expect(StudioProjectSchema.parse(next)).toEqual(next);
   });
 

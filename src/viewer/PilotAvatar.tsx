@@ -11,6 +11,7 @@ import {
 } from "@pixiv/three-vrm";
 import type { AircraftSnapshot, Part } from "../protocol/schema";
 import type { PilotProfile } from "../studio/schema";
+import { normalizeVrmWearableIds, type VrmWearableId } from "../studio/vrmWearables";
 import { solveCcdIk } from "./contactIk";
 import {
   computeCockpitRig,
@@ -91,6 +92,7 @@ interface PilotRigDebug {
     source: string;
     stationId: string | null;
   } | null;
+  wearables?: string[];
 }
 
 const CONTACT_SPECS = [
@@ -253,6 +255,7 @@ export function PilotAvatar({ parts, profile, ship }: CockpitPilotAvatarProps) {
   const avatarRootRef = useRef<THREE.Group>(null);
   const elapsedRef = useRef(0);
   const { lookTarget, probeConfig, probeStats, runtimeRig, vrm } = usePilotAvatarRuntime(profile);
+  const wearableIds = usePilotWearables(vrm, profile);
   const avatarScale = profile?.scale ?? PILOT_AVATAR_SCALE;
   const avatarYaw = profile?.yawRad ?? PILOT_AVATAR_YAW_RAD;
   const expressionPreset = profile?.expressionPreset ?? "focused";
@@ -272,7 +275,7 @@ export function PilotAvatar({ parts, profile, ship }: CockpitPilotAvatarProps) {
     const avatarRoot = avatarRootRef.current;
     const rig = runtimeRig.current;
     if (!avatarRoot || !rig || !vrm) {
-      publishPilotDebug(null, null, false);
+      publishPilotDebug(null, null, false, undefined, undefined, undefined, undefined, wearableIds);
       return;
     }
 
@@ -314,7 +317,7 @@ export function PilotAvatar({ parts, profile, ship }: CockpitPilotAvatarProps) {
     }
     avatarRoot.updateMatrixWorld(true);
     vrm.scene.updateMatrixWorld(true);
-    publishPilotDebug(vrm, avatarRoot, true, forces, anchors, probeStats.current, cockpit.station);
+    publishPilotDebug(vrm, avatarRoot, true, forces, anchors, probeStats.current, cockpit.station, wearableIds);
   });
 
   return (
@@ -332,13 +335,14 @@ export function LoadoutPilotAvatar({ profile }: LoadoutPilotAvatarProps) {
   const elapsedRef = useRef(0);
   const lookAnchor = useMemo(() => new THREE.Vector3(0, 0.95, 0), []);
   const { lookTarget, probeConfig, probeStats, runtimeRig, vrm } = usePilotAvatarRuntime(profile);
+  const wearableIds = usePilotWearables(vrm, profile);
   const expressionPreset = profile.expressionPreset ?? "focused";
 
   useFrame((_, delta) => {
     const avatarRoot = avatarRootRef.current;
     const rig = runtimeRig.current;
     if (!avatarRoot || !rig || !vrm) {
-      publishPilotDebug(null, null, false);
+      publishPilotDebug(null, null, false, undefined, undefined, undefined, undefined, wearableIds);
       return;
     }
 
@@ -360,7 +364,7 @@ export function LoadoutPilotAvatar({ profile }: LoadoutPilotAvatarProps) {
     if (probeConfig.vrmUpdate) vrm.update(delta);
     avatarRoot.updateMatrixWorld(true);
     vrm.scene.updateMatrixWorld(true);
-    publishPilotDebug(vrm, avatarRoot, true, forces, undefined, probeStats.current, undefined);
+    publishPilotDebug(vrm, avatarRoot, true, forces, undefined, probeStats.current, undefined, wearableIds);
   });
 
   return <PilotAvatarObjects avatarRootRef={avatarRootRef} lookTarget={lookTarget} vrm={vrm} />;
@@ -386,6 +390,134 @@ function PilotAvatarObjects({
       <group ref={avatarRootRef}>{vrm ? <primitive object={vrm.scene} /> : null}</group>
     </>
   );
+}
+
+function usePilotWearables(vrm: VRM | null, profile?: PilotProfile): VrmWearableId[] {
+  const wearableIds = useMemo(
+    () => normalizeVrmWearableIds(profile?.vrmWearables),
+    [profile?.vrmWearables],
+  );
+  const appearance = useMemo(() => profile?.appearance, [profile?.appearance]);
+
+  useEffect(() => {
+    if (!vrm) return;
+
+    const attached: THREE.Object3D[] = [];
+    for (const id of wearableIds) {
+      for (const attachment of createWearableAttachments(id, appearance)) {
+        const bone = getNormalizedBone(vrm, attachment.boneName) ?? getRawBone(vrm, attachment.boneName);
+        if (!bone) continue;
+        bone.add(attachment.object);
+        attached.push(attachment.object);
+      }
+    }
+
+    return () => {
+      for (const object of attached) {
+        object.parent?.remove(object);
+        disposeObject(object);
+      }
+    };
+  }, [appearance, vrm, wearableIds]);
+
+  return wearableIds;
+}
+
+function createWearableAttachments(
+  id: VrmWearableId,
+  appearance?: PilotAppearanceConfig,
+): Array<{ boneName: string; object: THREE.Object3D }> {
+  if (id === "flight-headset") return [{ boneName: "head", object: createFlightHeadset(appearance) }];
+  if (id === "g-suit-harness") return [{ boneName: "chest", object: createSuitHarness(appearance) }];
+  if (id === "data-gloves") {
+    return [
+      { boneName: "leftHand", object: createDataGlove("left", appearance) },
+      { boneName: "rightHand", object: createDataGlove("right", appearance) },
+    ];
+  }
+  return [];
+}
+
+function createFlightHeadset(appearance?: PilotAppearanceConfig): THREE.Group {
+  const colors = wearableColors(appearance);
+  const group = new THREE.Group();
+  group.name = "vrm-wearable-flight-headset";
+  group.position.set(0, 0.055, -0.005);
+
+  group.add(wearableBox([0.22, 0.018, 0.022], colors.dark, [0, 0.095, 0]));
+  group.add(wearableBox([0.048, 0.084, 0.052], colors.dark, [-0.118, 0.018, 0]));
+  group.add(wearableBox([0.048, 0.084, 0.052], colors.dark, [0.118, 0.018, 0]));
+  group.add(wearableBox([0.028, 0.052, 0.058], colors.accent, [-0.119, 0.015, -0.002]));
+  group.add(wearableBox([0.028, 0.052, 0.058], colors.accent, [0.119, 0.015, -0.002]));
+  group.add(wearableBox([0.012, 0.012, 0.13], colors.accent, [-0.13, -0.034, -0.05], [0.42, 0, 0.18]));
+  group.add(wearableBox([0.026, 0.018, 0.018], colors.light, [-0.102, -0.074, -0.102]));
+  return group;
+}
+
+function createSuitHarness(appearance?: PilotAppearanceConfig): THREE.Group {
+  const colors = wearableColors(appearance);
+  const group = new THREE.Group();
+  group.name = "vrm-wearable-g-suit-harness";
+  group.position.set(0, -0.055, -0.078);
+
+  group.add(wearableBox([0.036, 0.38, 0.018], colors.dark, [-0.048, 0, 0], [0, 0, -0.42]));
+  group.add(wearableBox([0.036, 0.38, 0.018], colors.dark, [0.048, 0, 0], [0, 0, 0.42]));
+  group.add(wearableBox([0.18, 0.036, 0.02], colors.accent, [0, -0.086, -0.006]));
+  group.add(wearableBox([0.082, 0.052, 0.026], colors.light, [0, -0.087, -0.023]));
+  return group;
+}
+
+function createDataGlove(side: "left" | "right", appearance?: PilotAppearanceConfig): THREE.Group {
+  const colors = wearableColors(appearance);
+  const group = new THREE.Group();
+  group.name = `vrm-wearable-${side}-data-glove`;
+  group.position.set(0, -0.012, 0);
+
+  group.add(wearableBox([0.076, 0.044, 0.064], colors.dark, [0, 0, 0]));
+  group.add(wearableBox([0.044, 0.012, 0.068], colors.accent, [side === "left" ? -0.018 : 0.018, -0.016, -0.006]));
+  return group;
+}
+
+function wearableColors(appearance?: PilotAppearanceConfig) {
+  return {
+    accent: colorFromHex(appearance?.accentTint) ?? new THREE.Color("#f2c94c"),
+    dark: colorFromHex(appearance?.outfitTint)?.multiplyScalar(0.28) ?? new THREE.Color("#1a2430"),
+    light: colorFromHex(appearance?.eyeTint) ?? new THREE.Color("#67a7ff"),
+  };
+}
+
+function wearableBox(
+  size: [number, number, number],
+  color: THREE.Color,
+  position: [number, number, number],
+  rotation: [number, number, number] = [0, 0, 0],
+): THREE.Mesh {
+  const mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(...size),
+    new THREE.MeshStandardMaterial({
+      color,
+      emissive: color.clone().multiplyScalar(0.18),
+      emissiveIntensity: 0.22,
+      roughness: 0.46,
+      metalness: 0.18,
+    }),
+  );
+  mesh.name = "vrm-wearable-primitive";
+  mesh.position.set(...position);
+  mesh.rotation.set(...rotation);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function disposeObject(object: THREE.Object3D) {
+  object.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.geometry?.dispose();
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const material of materials) material?.dispose();
+  });
 }
 
 function replaceMaterial(
@@ -681,10 +813,11 @@ function publishPilotDebug(
   anchors?: Record<string, THREE.Object3D>,
   probe?: PilotRenderProbeStats,
   station?: ReturnType<typeof computeCockpitRig>["station"],
+  wearables: readonly string[] = [],
 ) {
   if (typeof window === "undefined") return;
   if (!vrm || !avatarRoot) {
-    window.__flightPilotRig = { contactErrors: {}, forces, loaded, probe, root: null, station: null };
+    window.__flightPilotRig = { contactErrors: {}, forces, loaded, probe, root: null, station: null, wearables: [...wearables] };
     return;
   }
 
@@ -708,6 +841,7 @@ function publishPilotDebug(
     station: station
       ? { canopyId: station.canopy?.id ?? null, source: station.source, stationId: station.stationId }
       : null,
+    wearables: [...wearables],
   };
 }
 

@@ -1,6 +1,7 @@
 import { aircraftArchetypes } from "../sim/aircraftCatalog";
 import { PILOT_AVATAR_SCALE, PILOT_AVATAR_YAW_RAD, PILOT_MODEL_URL } from "./pilotDefaults";
 import { StudioProjectSchema, type AircraftBuild, type CrewAssignment, type StudioProject } from "./schema";
+import { DEFAULT_VRM_WEARABLE_IDS } from "./vrmWearables";
 
 export function createDefaultStudioProject(now = new Date()): StudioProject {
   const updatedAt = now.toISOString();
@@ -44,6 +45,7 @@ export function createDefaultStudioProject(now = new Date()): StudioProject {
           materialPreset: "studio-safe",
           scale: PILOT_AVATAR_SCALE,
           yawRad: PILOT_AVATAR_YAW_RAD,
+          vrmWearables: [...DEFAULT_VRM_WEARABLE_IDS],
           appearance: {
             accentTint: "#f2c94c",
             eyeTint: "#67a7ff",

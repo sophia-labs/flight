@@ -70,14 +70,18 @@ test("opens Crew as a pilot loadout and customization screen with a VRM preview"
   await expect(page.getByText("Appearance")).toBeVisible();
   await expect(page.getByText("Profile")).toBeVisible();
   await expect(page.getByText("Model Core")).toBeVisible();
+  await expect(page.getByLabel("VTuber Flight Studio").getByText("VRM Gear").first()).toBeVisible();
   await expect(page.getByLabel("VTuber Flight Studio").getByText("Echo").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Flight Headset/ })).toHaveClass(/active/);
   await expect(page.getByRole("button", { name: "Hair #83d4ff" })).toBeVisible();
   await page.getByRole("button", { name: "Hair #83d4ff" }).click();
   await page.getByRole("button", { name: "Eyes #59d894" }).click();
   await page.getByRole("button", { name: "Test Pilot" }).click();
   await page.getByRole("button", { name: "Instructor" }).click();
+  await page.getByRole("button", { name: /Data Gloves/ }).click();
   await expect(page.getByRole("button", { name: "Test Pilot" })).toHaveClass(/active/);
   await expect(page.getByRole("button", { name: "Instructor" })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: /Data Gloves/ })).toHaveClass(/active/);
 
   await page.waitForFunction(
     () => {
@@ -86,9 +90,10 @@ test("opens Crew as a pilot loadout and customization screen with a VRM preview"
           loaded: boolean;
           root: [number, number, number] | null;
           station: { source: string } | null;
+          wearables?: string[];
         };
       }).__flightPilotRig;
-      return Boolean(rig?.loaded && rig.root && rig.station === null);
+      return Boolean(rig?.loaded && rig.root && rig.station === null && rig.wearables?.includes("data-gloves"));
     },
     undefined,
     { timeout: 30_000 },

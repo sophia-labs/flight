@@ -948,6 +948,73 @@ h2 {
   white-space: nowrap;
 }
 
+.wearable-list {
+  display: grid;
+  gap: 8px;
+}
+
+.wearable-card {
+  display: grid;
+  width: 100%;
+  height: auto;
+  min-height: 58px;
+  grid-template-columns: 74px minmax(0, 1fr);
+  grid-template-areas:
+    "slot name"
+    "slot meta";
+  align-items: center;
+  gap: 2px 10px;
+  padding: 9px 10px;
+  border-color: rgba(255, 255, 255, 0.1);
+  color: #d7e5ea;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.wearable-card.active {
+  border-color: rgba(88, 211, 140, 0.42);
+  background:
+    linear-gradient(135deg, rgba(88, 211, 140, 0.14), rgba(77, 163, 255, 0.08)),
+    rgba(255, 255, 255, 0.045);
+}
+
+.wearable-card span {
+  grid-area: slot;
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: #9fb2bd;
+  font-size: 0.66rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.wearable-card.active span {
+  color: #d8ffe7;
+  background: rgba(88, 211, 140, 0.16);
+}
+
+.wearable-card strong {
+  grid-area: name;
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wearable-card small {
+  grid-area: meta;
+  overflow: hidden;
+  color: #8fa0a6;
+  font-size: 0.69rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
 @media (max-width: 920px) {
   .studio-shell {
     grid-template-columns: 1fr;

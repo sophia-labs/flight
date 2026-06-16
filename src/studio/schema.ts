@@ -60,6 +60,7 @@ export const PilotProfileSchema = z.object({
   scale: z.number(),
   yawRad: z.number(),
   restPoseId: z.string().optional(),
+  vrmWearables: z.array(z.string()).optional(),
   appearance: z
     .object({
       accentTint: z.string().optional(),

@@ -23,6 +23,7 @@ import type { AircraftSnapshot, MatchReplay, ReplayFrame } from "../protocol/sch
 import { airframeReport, compileAirframe } from "../sim/airframe";
 import { aircraftArchetypes, type AircraftArchetype } from "../sim/aircraftCatalog";
 import type { AircraftBuild, PilotProfile, StudioMode, StudioProject, StudioSession } from "../studio/schema";
+import { normalizeVrmWearableIds, VRM_WEARABLE_CATALOG, type VrmWearableId } from "../studio/vrmWearables";
 import { BodyPanel } from "./BodyPanel";
 import { ControlsPanel } from "./ControlsPanel";
 import { FlightScene, type CameraMode } from "./FlightScene";
@@ -170,6 +171,7 @@ export function StudioScreen({
               clock={playback.clock}
               onIndex={playback.reportIndex}
               onSample={playback.reportSample}
+              pilotProfile={activePilot}
             />
           ) : mode === "crew" ? (
             <PilotLoadoutScene pilot={activePilot} />
@@ -178,6 +180,7 @@ export function StudioScreen({
               aircraft={activeAircraft}
               color={palette.base}
               accentColor={palette.trim}
+              pilot={activePilot}
               showCrew={mode === "debug"}
             />
           )}
@@ -313,11 +316,13 @@ function StudioHangarScene({
   accentColor,
   aircraft,
   color,
+  pilot,
   showCrew,
 }: {
   accentColor: string;
   aircraft: AircraftBuild;
   color: string;
+  pilot: PilotProfile;
   showCrew: boolean;
 }) {
   const cockpit = computeCockpitRig(neutralControls(), aircraft.airframe.parts);
@@ -339,7 +344,7 @@ function StudioHangarScene({
           propSpin={0.2}
         />
         {showCrew ? <PilotStationDebug parts={aircraft.airframe.parts} pointScale={1.7} /> : null}
-        {showCrew ? <PilotAvatar parts={aircraft.airframe.parts} ship={previewShip} /> : null}
+        {showCrew ? <PilotAvatar parts={aircraft.airframe.parts} profile={pilot} ship={previewShip} /> : null}
         <StationHotspot position={cockpit.station.seatHip} active={showCrew} />
       </group>
       <OrbitControls enableDamping dampingFactor={0.1} target={showCrew ? [0, 0.18, -0.72] : [0, 0, 0]} />
@@ -464,6 +469,7 @@ function CrewLoadoutPanel({
 }) {
   const appearance = defaultAppearance(activePilot);
   const loadout = defaultLoadout(activePilot);
+  const wearableIds = normalizeVrmWearableIds(activePilot.vrmWearables);
 
   const patchPilot = (update: (pilot: PilotProfile) => PilotProfile) => onUpdatePilot(activePilot.id, update);
   const setAppearance = (key: keyof PilotAppearance, value: string | number) =>
@@ -482,6 +488,14 @@ function CrewLoadoutPanel({
         [key]: value,
       },
     }));
+  const toggleWearable = (id: VrmWearableId) =>
+    patchPilot((pilot) => {
+      const current = normalizeVrmWearableIds(pilot.vrmWearables);
+      const next = current.includes(id)
+        ? current.filter((wearableId) => wearableId !== id)
+        : [...current, id];
+      return { ...pilot, vrmWearables: next };
+    });
 
   return (
     <>
@@ -504,7 +518,7 @@ function CrewLoadoutPanel({
           <LoadoutStat label="Suit" value={labelFor(loadout.flightSuit)} />
           <LoadoutStat label="Comms" value={labelFor(loadout.comms)} />
           <LoadoutStat label="Gloves" value={labelFor(loadout.gloves)} />
-          <LoadoutStat label="Model" value={activePilot.modelKind.toUpperCase()} />
+          <LoadoutStat label="VRM Gear" value={`${wearableIds.length} equipped`} />
         </div>
       </section>
 
@@ -597,6 +611,28 @@ function CrewLoadoutPanel({
         />
         <div className="model-source">
           <span>{activePilot.modelUrl}</span>
+        </div>
+      </section>
+
+      <section className="studio-section">
+        <div className="studio-section-title">
+          <span>VRM Gear</span>
+          <span>{wearableIds.length} active</span>
+        </div>
+        <div className="wearable-list">
+          {VRM_WEARABLE_CATALOG.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`wearable-card${wearableIds.includes(item.id) ? " active" : ""}`}
+              aria-pressed={wearableIds.includes(item.id)}
+              onClick={() => toggleWearable(item.id)}
+            >
+              <span>{item.slot}</span>
+              <strong>{item.label}</strong>
+              <small>{labelFor(item.source)} / {labelFor(item.bone)}</small>
+            </button>
+          ))}
         </div>
       </section>
 

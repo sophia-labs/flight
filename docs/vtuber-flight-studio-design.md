@@ -446,3 +446,14 @@ Crew mode now starts becoming the pilot customization surface:
 - Appearance controls currently tint conservative material buckets: hair, iris, outfit, accent, and skin warmth. Cosmetic updates retint the loaded VRM in place; only model-source/render-preset changes reload the asset.
 
 This is intentionally still a first pass. The controls are live and persistent, but the material bucketing is heuristic until we inspect richer VRM/material metadata and decide how much authoring support we want.
+
+### VRM Wearable Proof Of Concept
+
+VRM gives us a portable humanoid avatar package, including standardized bones, expressions, gaze, materials, and metadata. Interchangeable clothing is more of an ecosystem/tooling layer than a universal VRM runtime contract.
+
+The current Crew slice adds a small `VRM Gear` catalog as a renderer-level proof of concept:
+
+- `PilotProfile.vrmWearables` stores selected wearable ids.
+- `src/studio/vrmWearables.ts` defines the first catalog entries: headset, G-suit harness, and data gloves.
+- `PilotAvatar` and `LoadoutPilotAvatar` both attach selected gear to VRM humanoid bones, so the same profile shows up in the loadout scene and the cockpit/replay renderer.
+- The generated geometry is intentionally primitive. The important boundary is the manifest-to-bone attachment path; imported XWear/GLB outfit parts can replace those generated meshes later without changing the Crew UI or persistence shape.

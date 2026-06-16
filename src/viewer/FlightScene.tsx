@@ -14,6 +14,7 @@ import type {
 import { defaultAirframe } from "../sim/airframe";
 import { mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
 import type { SensorDevice } from "../sim/parts";
+import type { PilotProfile } from "../studio/schema";
 import { PART_VISUAL_SCALE, PartMeshes } from "./airframeMesh";
 import { PilotAvatar } from "./PilotAvatar";
 import { computePilotCinemaShot } from "./pilotCinema";
@@ -40,6 +41,7 @@ interface FlightSceneProps {
   replay: MatchReplay;
   cameraMode: CameraMode;
   pilotId?: string;
+  pilotProfile?: PilotProfile;
   clock: PlaybackClock;
   onIndex: (index: number) => void;
   onSample: (position: number) => void;
@@ -50,6 +52,7 @@ export function FlightScene({
   replay,
   cameraMode,
   pilotId = "blue-1",
+  pilotProfile,
   clock,
   onIndex,
   onSample,
@@ -117,6 +120,7 @@ export function FlightScene({
             showCockpit={entry.id === pilotId}
             showPilotDebug={entry.id === pilotId && showPilotDebug}
             showPilotAvatar={entry.id === pilotId && cameraMode !== "cabin"}
+            pilotProfile={entry.id === pilotId ? pilotProfile : undefined}
             refMap={shipRefs}
           />
         );
@@ -356,6 +360,7 @@ function AircraftMesh({
   ship,
   shipId,
   parts,
+  pilotProfile,
   showCockpit,
   showPilotDebug,
   showPilotAvatar,
@@ -364,6 +369,7 @@ function AircraftMesh({
   ship: AircraftSnapshot;
   shipId: string;
   parts: Part[];
+  pilotProfile?: PilotProfile;
   showCockpit: boolean;
   showPilotDebug: boolean;
   showPilotAvatar: boolean;
@@ -398,7 +404,7 @@ function AircraftMesh({
             surfaceControls={ship.surfaceControls ?? deriveSurfaceControls(parts, ship.controls)}
           />
           {showPilotDebug ? <PilotStationDebug controls={ship.controls} parts={parts} /> : null}
-          {showPilotAvatar ? <PilotAvatar parts={parts} ship={ship} /> : null}
+          {showPilotAvatar ? <PilotAvatar parts={parts} profile={pilotProfile} ship={ship} /> : null}
         </>
       ) : null}
     </group>
