@@ -595,8 +595,8 @@ export function createBvrInterceptAircraft(
 
   const propPosition = vec3(0, 2_500, 0);
   const propVelocity = vec3(55, 0, 0);
-  const f14Position = vec3(0, 2_500, -42_400);
-  const f14Velocity = vec3(0, 0, 420);
+  const f14Position = vec3(-30_000, 6_000, -84_000);
+  const f14Velocity = vec3(420, 0, 0);
   const prop: AircraftState = {
     id: "prop-1",
     callsign: "Day Tripper",
@@ -629,7 +629,7 @@ export function createBvrInterceptAircraft(
     health: 100,
     weaponCooldown: 0.2,
     model: f14Compiled.model,
-    metrics: { ...INITIAL_METRICS, airspeed: length(f14Velocity), altitude: 2_500 },
+    metrics: { ...INITIAL_METRICS, airspeed: length(f14Velocity), altitude: f14Position.y },
     angularVelocity: vec3(0, 0, 0),
     fuelKg: f14Compiled.model.fuelCapacityKg,
     fuelByTankKg: fullFuelByTank(f14Compiled.model),

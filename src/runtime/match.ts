@@ -1,11 +1,12 @@
 import { adapterFor } from "../agent/action";
-import { toObservation } from "../agent/observation";
+import { toObservation, withObservationMessages } from "../agent/observation";
 import { cameraSensor, senseAndEncode } from "../agent/perception";
 import { cameraAsciiEncoderV2 } from "../agent/encoders/cameraAscii";
 import type { ControllerContext } from "../agent/controller";
 import {
   MatchReplaySchema,
   type Action,
+  type AgentMessage,
   type AgentMeta,
   type AgentPhaseTrace,
   type Airframe,
@@ -27,6 +28,8 @@ import {
   type BodyRuntimeState,
   type PendingBodyTick,
 } from "../body/runtime";
+import { collectAgentMessages } from "./comms";
+import { navigationFixForAgent } from "./navigation";
 import { selectCameraDevice } from "../sim/mountedSensor";
 import {
   activeRadarLockAvailable,
@@ -82,7 +85,12 @@ interface DecisionOutcome {
   source: TurnDecision["source"];
 }
 
-function replaySchemaVersion(input: { bodyTicks: BodyTickTrace[]; agentPhases: AgentPhaseTrace[] }) {
+function replaySchemaVersion(input: {
+  bodyTicks: BodyTickTrace[];
+  agentPhases: AgentPhaseTrace[];
+  comms: AgentMessage[];
+}) {
+  if (input.comms.length > 0) return 6;
   if (input.agentPhases.length > 0) return 5;
   if (input.bodyTicks.length > 0) return 4;
   return 3;
@@ -226,15 +234,33 @@ async function decide(
   }
 }
 
-// The generalized match runner: config is reusable data, so the mutable physics state is cloned before
-// the first frame. This matters for sweeps/evals that may intentionally replay the same config.
-export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
+export interface MatchRoundResult {
+  turn: number;
+  time: number;
+  complete: boolean;
+  progress: MatchProgress[];
+  replay: MatchReplay;
+}
+
+export interface MatchRoundStepper {
+  readonly complete: boolean;
+  readonly turn: number;
+  readonly time: number;
+  nextRound(): Promise<MatchRoundResult>;
+  replay(): MatchReplay;
+}
+
+// Stateful "planning frame" runner. One nextRound() call prompts every living agent for the next turn,
+// then simulates the held actions through that turn's physics frames. runMatch below is just autoplay
+// over this same primitive.
+export function createMatchRoundStepper(config: MatchConfig): MatchRoundStepper {
   const aircraft = structuredClone(config.initialAircraft) as AircraftState[];
   const stepsPerTurn = Math.round(config.turnDuration / config.frameDt);
   const frames: ReplayFrame[] = [];
   const decisions: TurnDecision[] = [];
   const bodyTicks: BodyTickTrace[] = [];
   const agentPhases: AgentPhaseTrace[] = [];
+  const comms: AgentMessage[] = [];
   const activeTwitchPhases: Record<string, AgentPhaseTrace | undefined> = {};
   const bodyStates: Record<string, BodyRuntimeState> = {};
   const reflexStates: Record<string, BodyRuntimeState> = {};
@@ -242,19 +268,66 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
   let frameIndex = 0;
   let turnsRun = 0;
   let projectiles: Projectile[] = []; // live rounds, carried across steps by the physics loop
+  let complete = false;
 
   frames.push(snapshot(frameIndex, time, 0, aircraft, []));
   frameIndex += 1;
 
-  for (let turn = 1; turn <= config.maxTurns; turn += 1) {
+  function emit(progress: MatchProgress, roundProgress: MatchProgress[]): void {
+    roundProgress.push(progress);
+    config.onProgress?.(progress);
+  }
+
+  function closeActiveTwitchPhases(): void {
+    for (const phase of Object.values(activeTwitchPhases)) {
+      if (phase) phase.endTime = Math.max(phase.endTime, time);
+    }
+  }
+
+  function buildReplay(): MatchReplay {
+    const agents: AgentMeta[] = Object.values(config.agents).map((entry) => entry.meta);
+
+    // Record the airframe each aircraft flew (config metadata, not per-frame state) so the viewer can
+    // render the plane that was built. Omitted entirely when no aircraft carries one.
+    const airframes: Record<string, Airframe> = {};
+    for (const ship of aircraft) {
+      if (ship.airframe) airframes[ship.id] = ship.airframe;
+    }
+
+    return MatchReplaySchema.parse({
+      id: config.id,
+      schemaVersion: replaySchemaVersion({ bodyTicks, agentPhases, comms }),
+      turnDuration: config.turnDuration,
+      frameDt: config.frameDt,
+      frames,
+      agents,
+      decisions,
+      ...(comms.length > 0 ? { comms } : {}),
+      ...(bodyTicks.length > 0 ? { bodyTicks } : {}),
+      ...(agentPhases.length > 0 ? { agentPhases } : {}),
+      ...(complete ? { outcome: config.evaluator.evaluate(aircraft, frames, decisions, turnsRun) } : {}),
+      ...(Object.keys(airframes).length > 0 ? { airframes } : {}),
+    });
+  }
+
+  async function nextRound(): Promise<MatchRoundResult> {
+    const roundProgress: MatchProgress[] = [];
+    if (complete) {
+      return { turn: turnsRun, time, complete, progress: roundProgress, replay: buildReplay() };
+    }
+
+    const turn = turnsRun + 1;
     turnsRun = turn;
-    config.onProgress?.({
+    emit({
       phase: "turn_start",
       turn,
       maxTurns: config.maxTurns,
       time,
-    });
+    }, roundProgress);
     const actionsById: Record<string, Action> = {};
+    const activeAgentIds = aircraft
+      .filter((ship) => ship.health > 0 && Boolean(config.agents[ship.id]))
+      .map((ship) => ship.id);
 
     // Decide once per turn, per living agent.
     for (const ship of aircraft) {
@@ -263,7 +336,38 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       if (!entry) continue;
 
       const sensor = entry.sensor ?? config.sensor;
-      const baseObservation = toObservation(ship, aircraft, turn, time, sensor, entry.messages ?? []);
+      const sensedObservation = toObservation(ship, aircraft, turn, time, sensor);
+      const navigation = navigationFixForAgent(ship, aircraft, sensedObservation.contacts);
+      const deliveredMessages = await collectAgentMessages(config.comms, {
+        turn,
+        time,
+        agentId: ship.id,
+        allAgentIds: activeAgentIds,
+        self: ship,
+        world: aircraft,
+        observation: sensedObservation,
+        contacts: sensedObservation.contacts,
+        navigation,
+        history: {
+          frames,
+          decisions,
+          comms,
+        },
+      });
+      for (const message of deliveredMessages) {
+        comms.push(message);
+        emit({
+          phase: "message",
+          turn,
+          maxTurns: config.maxTurns,
+          time,
+          agentId: ship.id,
+          agentLabel: entry.meta.label,
+          message,
+          navigation,
+        }, roundProgress);
+      }
+      const baseObservation = withObservationMessages(sensedObservation, entry.messages ?? [], deliveredMessages);
       const observation =
         entry.body || entry.reflexBody || entry.feedField
           ? withCockpitObservationText(baseObservation, ship, aircraft)
@@ -294,7 +398,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       if (percepts.length > 0) decision.percepts = percepts;
 
       decisions.push(decision);
-      config.onProgress?.({
+      emit({
         phase: "decision",
         turn,
         maxTurns: config.maxTurns,
@@ -304,8 +408,10 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
         actionKind: outcome.action.kind,
         self: observation.self,
         contacts: observation.contacts,
+        messages: deliveredMessages,
+        navigation,
         ...(outcome.rationale !== undefined ? { rationale: outcome.rationale } : {}),
-      });
+      }, roundProgress);
 
       if (entry.reflexBody && isMotorProgramAction(outcome.action)) {
         agentPhases.push({
@@ -432,7 +538,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
         if (ship && state) {
           const tick = finishBodyTick(pending, state, ship);
           bodyTicks.push(tick);
-          config.onProgress?.({
+          emit({
             phase: "body_tick",
             turn,
             maxTurns: config.maxTurns,
@@ -444,62 +550,63 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
               tick: tick.tick,
               feel: tick.parsed.feel,
             },
-          });
+          }, roundProgress);
         }
       }
       frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events, projectiles));
       frameIndex += 1;
       // Emit frame progress every Nth frame (every 5th by default) so we don't spam.
       if (frameIndex % 5 === 0) {
-        config.onProgress?.({
+        emit({
           phase: "frame",
           turn,
           maxTurns: config.maxTurns,
           time,
           frameIndex,
-        });
+        }, roundProgress);
       }
     }
 
-    if (aircraft.some((ship) => ship.health <= 0)) break;
+    if (aircraft.some((ship) => ship.health <= 0) || turn >= config.maxTurns) {
+      complete = true;
+      closeActiveTwitchPhases();
+      const replay = buildReplay();
+      emit({
+        phase: "complete",
+        turn: turnsRun,
+        maxTurns: config.maxTurns,
+        time,
+        replay,
+      }, roundProgress);
+      return { turn: turnsRun, time, complete, progress: roundProgress, replay };
+    }
+
+    return { turn: turnsRun, time, complete, progress: roundProgress, replay: buildReplay() };
   }
 
-  for (const phase of Object.values(activeTwitchPhases)) {
-    if (phase) phase.endTime = Math.max(phase.endTime, time);
+  return {
+    get complete() {
+      return complete;
+    },
+    get turn() {
+      return turnsRun;
+    },
+    get time() {
+      return time;
+    },
+    nextRound,
+    replay: buildReplay,
+  };
+}
+
+// The generalized match runner: config is reusable data, so the mutable physics state is cloned before
+// the first frame. This matters for sweeps/evals that may intentionally replay the same config.
+export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
+  const stepper = createMatchRoundStepper(config);
+  while (!stepper.complete) {
+    await stepper.nextRound();
   }
-
-  const outcome = config.evaluator.evaluate(aircraft, frames, decisions, turnsRun);
-  const agents: AgentMeta[] = Object.values(config.agents).map((entry) => entry.meta);
-
-  // Record the airframe each aircraft flew (config metadata, not per-frame state) so the viewer can
-  // render the plane that was built. Omitted entirely when no aircraft carries one (keeps legacy-shaped
-  // replays clean and the field optional).
-  const airframes: Record<string, Airframe> = {};
-  for (const ship of aircraft) {
-    if (ship.airframe) airframes[ship.id] = ship.airframe;
-  }
-
-  const replay = MatchReplaySchema.parse({
-    id: config.id,
-    schemaVersion: replaySchemaVersion({ bodyTicks, agentPhases }),
-    turnDuration: config.turnDuration,
-    frameDt: config.frameDt,
-    frames,
-    agents,
-    decisions,
-    ...(bodyTicks.length > 0 ? { bodyTicks } : {}),
-    ...(agentPhases.length > 0 ? { agentPhases } : {}),
-    outcome,
-    ...(Object.keys(airframes).length > 0 ? { airframes } : {}),
-  });
-  config.onProgress?.({
-    phase: "complete",
-    turn: turnsRun,
-    maxTurns: config.maxTurns,
-    time,
-    replay,
-  });
-  return replay;
+  return stepper.replay();
 }
 
 function clampPlaybackTimeScale(value: number): number {

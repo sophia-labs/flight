@@ -111,6 +111,8 @@ export function StudioScreen({
   onOpenBuilder,
   onSelectAircraft,
   onSoundChange,
+  onStepAgentRound,
+  onToggleRoundAutoplay,
   onUpdateScenario,
   onUpdatePilot,
   onVoiceChange,
@@ -118,6 +120,8 @@ export function StudioScreen({
   playback,
   project,
   replay,
+  roundAutoplay,
+  roundBusy,
   scenarioError,
   scenarioProgress,
   soundOn,
@@ -143,6 +147,8 @@ export function StudioScreen({
   onOpenBuilder: () => void;
   onSelectAircraft: (aircraftBuildId: string) => void;
   onSoundChange: (enabled: boolean) => void;
+  onStepAgentRound: (message?: string) => void;
+  onToggleRoundAutoplay: () => void;
   onUpdateScenario: (update: (scenario: StudioScenarioConfig) => StudioScenarioConfig) => void;
   onUpdatePilot: (pilotProfileId: string, update: (pilot: PilotProfile) => PilotProfile) => void;
   onVoiceChange: (enabled: boolean) => void;
@@ -150,6 +156,8 @@ export function StudioScreen({
   playback: PlaybackControls;
   project: StudioProject;
   replay: MatchReplay | null;
+  roundAutoplay: boolean;
+  roundBusy: boolean;
   scenarioError: string | null;
   scenarioProgress: ScenarioProgress | null;
   soundOn: boolean;
@@ -171,7 +179,7 @@ export function StudioScreen({
     () => summarizeFit(activeAircraft, activePilot.id),
     [activeAircraft, activePilot.id],
   );
-  const showFlight = Boolean((mode === "flight" || mode === "replay") && replay && frame);
+  const showFlight = Boolean((mode === "flight" || mode === "replay" || mode === "scenario") && replay && frame);
   const activePhase = useMemo(
     () => (replay && frame ? activeAgentPhase(replay, pilotId, frame.time) : undefined),
     [frame, pilotId, replay],
@@ -292,9 +300,13 @@ export function StudioScreen({
             onLaunch={onLaunch}
             onOpenBuilder={onOpenBuilder}
             onSelectAircraft={onSelectAircraft}
+            onStepAgentRound={onStepAgentRound}
+            onToggleRoundAutoplay={onToggleRoundAutoplay}
             onUpdateScenario={onUpdateScenario}
             palette={palette}
             project={project}
+            roundAutoplay={roundAutoplay}
+            roundBusy={roundBusy}
             error={scenarioError}
             progress={scenarioProgress}
           />
@@ -559,9 +571,13 @@ function ScenarioPanel({
   onLaunch,
   onOpenBuilder,
   onSelectAircraft,
+  onStepAgentRound,
+  onToggleRoundAutoplay,
   onUpdateScenario,
   palette,
   project,
+  roundAutoplay,
+  roundBusy,
   error,
   progress,
 }: {
@@ -571,12 +587,17 @@ function ScenarioPanel({
   onLaunch: () => void;
   onOpenBuilder: () => void;
   onSelectAircraft: (aircraftBuildId: string) => void;
+  onStepAgentRound: (message?: string) => void;
+  onToggleRoundAutoplay: () => void;
   onUpdateScenario: (update: (scenario: StudioScenarioConfig) => StudioScenarioConfig) => void;
   palette: { base: string; trim: string };
   project: StudioProject;
+  roundAutoplay: boolean;
+  roundBusy: boolean;
   error: string | null;
   progress: ScenarioProgress | null;
 }) {
+  const [operatorMessage, setOperatorMessage] = useState("");
   const patchScenario = <K extends keyof StudioScenarioConfig>(key: K, value: StudioScenarioConfig[K]) =>
     onUpdateScenario((scenario) => ({ ...scenario, [key]: value }));
   const motorProgram = activeScenario.controlMode === "motor-program";
@@ -733,6 +754,46 @@ function ScenarioPanel({
       </section>
 
       <section className="studio-section">
+        <div className="round-compose" aria-label="Operator message for next agent round">
+          <input
+            type="text"
+            value={operatorMessage}
+            placeholder="Broadcast message for the next agent round"
+            onChange={(event) => setOperatorMessage(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                onStepAgentRound(operatorMessage);
+                setOperatorMessage("");
+              }
+            }}
+            disabled={launching || roundBusy || roundAutoplay}
+          />
+        </div>
+        <div className="round-controls" aria-label="Agent round controls">
+          <button
+            type="button"
+            className="scenario-step-button"
+            onClick={() => {
+              onStepAgentRound(operatorMessage);
+              setOperatorMessage("");
+            }}
+            disabled={launching || roundBusy || roundAutoplay}
+          >
+            <StepForward size={17} />
+            {roundBusy ? "Thinking" : "Next Agent Round"}
+          </button>
+          <button
+            type="button"
+            className="scenario-auto-button"
+            onClick={onToggleRoundAutoplay}
+            disabled={launching || roundBusy}
+            aria-pressed={roundAutoplay}
+          >
+            {roundAutoplay ? <Pause size={17} /> : <Play size={17} />}
+            {roundAutoplay ? "Pause Auto" : "Auto Rounds"}
+          </button>
+        </div>
         <button type="button" className="scenario-run-button" onClick={onLaunch} disabled={launching}>
           <Play size={17} />
           {launching ? "Running" : "Run Scenario"}
@@ -1661,7 +1722,7 @@ const LABEL_OVERRIDES: Record<string, string> = {
   body: "Body",
   twitch: "Twitch",
   "balloon-hard": "Hard Balloon",
-  "bvr-intercept": "BVR Intercept",
+  "bvr-intercept": "BVR GPS Intercept",
   "scripted-body-pilot": "Scripted Pilot",
   "scripted-fixed-wing-body": "Scripted Body",
   "deepseek-v4-pro": "DeepSeek V4 Pro",

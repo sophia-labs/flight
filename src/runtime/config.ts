@@ -2,8 +2,18 @@ import type { Controller } from "../agent/controller";
 import type { SensorModel } from "../agent/observation";
 import type { BodyRuntimeConfig } from "../body/runtime";
 import type { Evaluator } from "../eval/outcome";
-import type { Action, AgentMeta, ContactPercept, MatchReplay, Observation, SelfPercept } from "../protocol/schema";
+import type {
+  Action,
+  AgentMessage,
+  AgentMeta,
+  AgentNavigationFix,
+  ContactPercept,
+  MatchReplay,
+  Observation,
+  SelfPercept,
+} from "../protocol/schema";
 import type { AircraftState } from "../sim/types";
+import type { AgentComms } from "./comms";
 export interface AgentEntry {
   meta: AgentMeta;
   controller: Controller;
@@ -21,7 +31,8 @@ export interface AgentEntry {
   reflexPlaybackTimeScale?: number;
   // Per-agent sensor model override. Defaults to MatchConfig.sensor.
   sensor?: SensorModel;
-  // Actor-to-actor prompt-stream messages delivered to this agent each turn (GCI, data-link, wingman).
+  // Legacy actor-to-agent prompt-stream messages delivered to this agent each turn. Prefer MatchConfig.comms
+  // for typed, schedulable messages that are also recorded in progress/replays.
   messages?: string[];
 }
 export interface MatchConfig {
@@ -37,6 +48,9 @@ export interface MatchConfig {
   // Used when a controller throws, times out, or is aborted. Receives the same observation the
   // controller saw, so a maneuvering fallback (e.g. scripted pursuit) keeps the match watchable.
   fallback: (observation: Observation) => Action;
+  // Typed communications delivered before each agent decision. This is the operator/GCI/data-link seam:
+  // callers can schedule scenario traffic, attach a live message bus, and optionally include nav fixes.
+  comms?: AgentComms;
   // Optional progress callback — called for turn start, decisions, frames, and completion.
   // When set, the caller receives live match progress instead of waiting for the full replay.
   onProgress?: (progress: MatchProgress) => void;
@@ -44,7 +58,7 @@ export interface MatchConfig {
 
 // Emitted by runMatch as the match executes. Turn 0 is the initial snapshot.
 export interface MatchProgress {
-  phase: "turn_start" | "decision" | "body_tick" | "simulating" | "frame" | "complete" | "error";
+  phase: "turn_start" | "message" | "decision" | "body_tick" | "simulating" | "frame" | "complete" | "error";
   turn: number;
   maxTurns: number;
   time: number;
@@ -52,6 +66,9 @@ export interface MatchProgress {
   agentLabel?: string;
   actionKind?: string;
   rationale?: string;
+  message?: AgentMessage;
+  messages?: AgentMessage[];
+  navigation?: AgentNavigationFix;
   contacts?: ContactPercept[];
   self?: SelfPercept;
   frameIndex?: number;

@@ -2,7 +2,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadEnv, type Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import { runScenarioApiRequest, runScenarioStreaming } from "./src/server/scenarioRun";
+import {
+  runScenarioApiRequest,
+  runScenarioStreaming,
+  stepScenarioRoundApiRequest,
+} from "./src/server/scenarioRun";
 import { inspectScenarioApiRequest } from "./src/server/scenarioAgent";
 import { debriefScenarioApiRequest } from "./src/server/scenarioDebrief";
 export default defineConfig(({ mode }) => {
@@ -92,6 +96,20 @@ function scenarioApiPlugin(): Plugin {
         try {
           const body = await readJson(req);
           const result = inspectScenarioApiRequest(body);
+          sendJson(res, 200, result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendJson(res, 500, { error: message });
+        }
+      });
+      server.middlewares.use("/api/scenario/round", async (req, res, next) => {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: "POST required" });
+          return;
+        }
+        try {
+          const body = await readJson(req);
+          const result = await stepScenarioRoundApiRequest(body);
           sendJson(res, 200, result);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

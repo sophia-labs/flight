@@ -1,4 +1,10 @@
-import { ObservationSchema, type ContactPercept, type Observation } from "../protocol/schema";
+import {
+  ObservationSchema,
+  type AgentMessage,
+  type ContactPercept,
+  type Observation,
+} from "../protocol/schema";
+import { promptTextForAgentMessage } from "./prompt";
 import {
   activeRadarLockAvailable,
   hasLoadedActiveRadarMissile,
@@ -64,6 +70,7 @@ export function toObservation(
   time: number,
   sensor: SensorModel = perfectSensor,
   messages: string[] = [],
+  comms: AgentMessage[] = [],
 ): Observation {
   const basis = basisFromQuat(self.orientation);
   const missileLoaded = hasLoadedHeatSeeker(self);
@@ -88,23 +95,39 @@ export function toObservation(
     };
   });
 
+  return withObservationMessages(
+    ObservationSchema.parse({
+      schemaVersion: 1,
+      selfId: self.id,
+      turn,
+      time,
+      self: {
+        airspeed: self.metrics.airspeed,
+        altitude: self.metrics.altitude,
+        aoaDeg: self.metrics.aoaDeg,
+        gLoad: self.metrics.gLoad,
+        health: self.health,
+        weaponCooldown: self.weaponCooldown,
+        stalled: self.metrics.stalled,
+        ...(missileLoaded ? { missileLoaded: true } : {}),
+        ...(radarMissileLoaded ? { radarMissileLoaded: true } : {}),
+      },
+      contacts,
+    }),
+    messages,
+    comms,
+  );
+}
+
+export function withObservationMessages(
+  observation: Observation,
+  messages: string[] = [],
+  comms: AgentMessage[] = [],
+): Observation {
+  const promptMessages = [...messages, ...comms.map(promptTextForAgentMessage)];
   return ObservationSchema.parse({
-    schemaVersion: 1,
-    selfId: self.id,
-    turn,
-    time,
-    self: {
-      airspeed: self.metrics.airspeed,
-      altitude: self.metrics.altitude,
-      aoaDeg: self.metrics.aoaDeg,
-      gLoad: self.metrics.gLoad,
-      health: self.health,
-      weaponCooldown: self.weaponCooldown,
-      stalled: self.metrics.stalled,
-      ...(missileLoaded ? { missileLoaded: true } : {}),
-      ...(radarMissileLoaded ? { radarMissileLoaded: true } : {}),
-    },
-    contacts,
-    ...(messages.length > 0 ? { messages } : {}),
+    ...observation,
+    ...(promptMessages.length > 0 ? { messages: promptMessages } : {}),
+    ...(comms.length > 0 ? { comms } : {}),
   });
 }

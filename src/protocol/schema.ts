@@ -246,6 +246,78 @@ export const ContactPerceptSchema = z.object({
   radarLock: z.boolean().optional(),
 });
 
+export const GpsCoordinateSchema = z.object({
+  lat: finiteNumber,
+  lon: finiteNumber,
+});
+
+export const NavigationSelfSchema = z.object({
+  position: Vec3Schema.optional(),
+  gps: GpsCoordinateSchema.optional(),
+  altitudeM: finiteNumber,
+  airspeedMps: finiteNumber.optional(),
+  headingDeg: finiteNumber.optional(),
+  compass: z.string().optional(),
+});
+
+export const NavigationContactSchema = z.object({
+  id: z.string(),
+  gps: GpsCoordinateSchema.optional(),
+  rangeM: finiteNumber,
+  bearingDeg: finiteNumber.optional(),
+  compass: z.string().optional(),
+  altitudeM: finiteNumber.optional(),
+  altitudeDeltaM: finiteNumber.optional(),
+  closureRateMps: finiteNumber.optional(),
+  relative: z
+    .object({
+      forwardM: finiteNumber,
+      rightM: finiteNumber,
+      upM: finiteNumber,
+    })
+    .optional(),
+});
+
+export const NavigationWaypointSchema = z.object({
+  id: z.string(),
+  label: z.string().optional(),
+  gps: GpsCoordinateSchema,
+  altitudeM: finiteNumber.optional(),
+  rangeM: finiteNumber.optional(),
+  bearingDeg: finiteNumber.optional(),
+  compass: z.string().optional(),
+  note: z.string().optional(),
+});
+
+export const AgentNavigationFixSchema = z.object({
+  self: NavigationSelfSchema,
+  contacts: z.array(NavigationContactSchema),
+  waypoints: z.array(NavigationWaypointSchema).optional(),
+});
+
+export const AgentMessageChannelSchema = z.enum([
+  "gci",
+  "datalink",
+  "wingman",
+  "operator",
+  "coach",
+  "system",
+]);
+
+export const AgentMessagePrioritySchema = z.enum(["routine", "priority", "flash"]);
+
+export const AgentMessageSchema = z.object({
+  id: z.string(),
+  to: z.string(),
+  from: z.string().optional(),
+  channel: AgentMessageChannelSchema,
+  priority: AgentMessagePrioritySchema.optional(),
+  turn: z.number().int().nonnegative(),
+  time: finiteNumber,
+  content: z.string().min(1),
+  navigation: AgentNavigationFixSchema.optional(),
+});
+
 export const ObservationSchema = z.object({
   schemaVersion: z.literal(1),
   selfId: z.string(),
@@ -254,6 +326,7 @@ export const ObservationSchema = z.object({
   self: SelfPerceptSchema,
   contacts: z.array(ContactPerceptSchema),
   messages: z.array(z.string()).optional(), // actor-to-actor prompt-stream comms (GCI, data-link, wingman)
+  comms: z.array(AgentMessageSchema).optional(), // structured comms; messages remains the prompt-readable mirror
   text: z.string().optional(), // natural-language framing — reserved for 0.3.0
 });
 
@@ -618,9 +691,10 @@ export const MatchReplaySchema = z.object({
   frameDt: z.number(),
   frames: z.array(ReplayFrameSchema).min(1),
   // All optional ⇒ v0.1.0 replays still validate and the viewer (reads only `frames`) is unchanged.
-  schemaVersion: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(),
+  schemaVersion: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5), z.literal(6)]).optional(),
   agents: z.array(AgentMetaSchema).optional(),
   decisions: z.array(TurnDecisionSchema).optional(),
+  comms: z.array(AgentMessageSchema).optional(),
   bodyTicks: z.array(BodyTickTraceSchema).optional(),
   agentPhases: z.array(AgentPhaseTraceSchema).optional(),
   outcome: MatchOutcomeSchema.optional(),
@@ -664,6 +738,14 @@ export type MotorProgramAction = z.infer<typeof MotorProgramActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
 export type ContactPercept = z.infer<typeof ContactPerceptSchema>;
+export type GpsCoordinate = z.infer<typeof GpsCoordinateSchema>;
+export type NavigationSelf = z.infer<typeof NavigationSelfSchema>;
+export type NavigationContact = z.infer<typeof NavigationContactSchema>;
+export type NavigationWaypoint = z.infer<typeof NavigationWaypointSchema>;
+export type AgentNavigationFix = z.infer<typeof AgentNavigationFixSchema>;
+export type AgentMessageChannel = z.infer<typeof AgentMessageChannelSchema>;
+export type AgentMessagePriority = z.infer<typeof AgentMessagePrioritySchema>;
+export type AgentMessage = z.infer<typeof AgentMessageSchema>;
 export type Observation = z.infer<typeof ObservationSchema>;
 export type AgentMeta = z.infer<typeof AgentMetaSchema>;
 export type Score = z.infer<typeof ScoreSchema>;

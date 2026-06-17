@@ -32,7 +32,8 @@ body,
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -960,6 +961,64 @@ h2 {
   color: #06120b;
   font-weight: 900;
   background: #58d38c;
+}
+
+.round-compose input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #eef3f5;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.round-compose input:disabled {
+  opacity: 0.64;
+}
+
+.round-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.scenario-step-button,
+.scenario-auto-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  min-height: 38px;
+  padding: 8px 10px;
+  color: #d7e5ea;
+  font-size: 0.78rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.scenario-step-button {
+  border-color: rgba(77, 163, 255, 0.32);
+  background: rgba(77, 163, 255, 0.12);
+}
+
+.scenario-auto-button {
+  border-color: rgba(242, 201, 76, 0.28);
+  background: rgba(242, 201, 76, 0.09);
+}
+
+.scenario-auto-button[aria-pressed="true"] {
+  color: #06120b;
+  background: #f2c94c;
+}
+
+.scenario-step-button:disabled,
+.scenario-auto-button:disabled {
+  cursor: wait;
+  opacity: 0.62;
 }
 
 .scenario-run-button:hover {
@@ -2023,8 +2082,10 @@ h2 {
 .mission-radar-area {
   flex: 0 0 55%;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 14px;
   padding: 20px;
 }
 
@@ -2203,6 +2264,83 @@ h2 {
   font-size: 0.45em;
   font-weight: 400;
   color: #6f8296;
+}
+
+.nav-readout {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  max-width: min(520px, 48vw);
+  color: #d7e5ea;
+  font-family: "IBM Plex Mono", "SF Mono", "Fira Code", monospace;
+  font-size: 0.72em;
+}
+
+.nav-readout span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 4px 8px;
+  border: 1px solid rgba(77, 163, 255, 0.14);
+  border-radius: 6px;
+  background: rgba(77, 163, 255, 0.07);
+  white-space: nowrap;
+}
+
+.comms-feed {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(6, 10, 16, 0.68);
+  flex-shrink: 0;
+}
+
+.comms-chip {
+  display: grid;
+  grid-template-columns: auto auto minmax(120px, 340px);
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  color: #d7e5ea;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 0.72em;
+  flex: 0 0 auto;
+}
+
+.comms-chip.priority-priority {
+  border-color: rgba(242, 201, 76, 0.22);
+  background: rgba(242, 201, 76, 0.08);
+}
+
+.comms-chip.priority-flash {
+  border-color: rgba(255, 107, 97, 0.28);
+  background: rgba(255, 107, 97, 0.1);
+}
+
+.comms-channel,
+.comms-to {
+  color: #83d4ff;
+  font-family: "IBM Plex Mono", "SF Mono", "Fira Code", monospace;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.comms-to {
+  color: #8fa0a6;
+}
+
+.comms-content {
+  overflow: hidden;
+  color: #d7e5ea;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Decision Log ───────────────────────────────────────────────── */

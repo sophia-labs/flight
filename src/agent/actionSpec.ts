@@ -103,7 +103,12 @@ function normalizeMotorProgramSamples(raw: unknown, durationMs: number, sampleDt
   return resampleMotorProgramSamples(samples, durationMs, sampleDtMs);
 }
 
-function normalizeHeldActions(raw: unknown): MotorProgramHeldAction[] {
+export type DefaultWeaponsFreeGuard = "gun" | "radar-lock" | "none";
+
+function normalizeHeldActions(
+  raw: unknown,
+  defaultWeaponsFree: DefaultWeaponsFreeGuard = "gun",
+): MotorProgramHeldAction[] {
   const source = Array.isArray(raw) ? raw : [];
   const actions: MotorProgramHeldAction[] = [];
   for (const value of source.slice(0, 8)) {
@@ -123,13 +128,22 @@ function normalizeHeldActions(raw: unknown): MotorProgramHeldAction[] {
     });
   }
 
-  if (!actions.some((action) => action.kind === "weapons_free")) {
+  if (!actions.some((action) => action.kind === "weapons_free") && defaultWeaponsFree !== "none") {
     actions.push({
       kind: "weapons_free",
-      condition: "target_in_forward_gun_cone",
-      coneDeg: 12,
-      rangeM: 2_350,
-      note: "handoff to twitch Body for final aim and shot call",
+      ...(defaultWeaponsFree === "radar-lock"
+        ? {
+            condition: "radar_lock",
+            coneDeg: 30,
+            rangeM: 80_000,
+            note: "FOX-3 release only on a real radar lock",
+          }
+        : {
+            condition: "target_in_forward_gun_cone",
+            coneDeg: 12,
+            rangeM: 2_350,
+            note: "handoff to twitch Body for final aim and shot call",
+          }),
     });
   }
 
@@ -308,6 +322,23 @@ export const motorProgramSpec: ActionSpec = {
     };
   },
 };
+
+export function motorProgramSpecWithDefaultWeaponsFree(defaultWeaponsFree: DefaultWeaponsFreeGuard): ActionSpec {
+  return {
+    ...motorProgramSpec,
+    toAction: (a) => {
+      const durationMs = clamp(num(a.durationMs, "durationMs"), 500, 5_000);
+      const sampleDtMs = clamp(num(a.sampleDtMs, "sampleDtMs"), 25, 250);
+      return {
+        kind: "motor-program",
+        durationMs,
+        sampleDtMs,
+        samples: normalizeMotorProgramSamples(a.samples, durationMs, sampleDtMs),
+        heldActions: normalizeHeldActions(a.heldActions, defaultWeaponsFree),
+      };
+    },
+  };
+}
 
 export const actionSpecs = {
   "raw-stick": rawStickSpec,

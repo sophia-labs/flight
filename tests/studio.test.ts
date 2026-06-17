@@ -163,6 +163,45 @@ describe("studio project persistence", () => {
     expect(asset.summary).toEqual({ durationSeconds: 0.16, eventCount: 1, frameCount: 2 });
   });
 
+  it("can update a round-by-round scenario replay while staying in scenario mode", () => {
+    const project = selectStudioMode(
+      createDefaultStudioProject(new Date("2026-06-16T00:00:00.000Z")),
+      "scenario",
+      new Date("2026-06-16T00:01:00.000Z"),
+    );
+    const session = getActiveSession(project);
+    const aircraft = getActiveAircraft(project, session);
+    const first = createReplayAsset({
+      id: "scenario-round-test",
+      aircraftBuildId: aircraft.id,
+      matchReplay: replay(),
+      now: new Date("2026-06-16T00:10:00.000Z"),
+      sessionId: session.id,
+      title: "Round test",
+    });
+    const next = addReplayAsset(project, first, new Date("2026-06-16T00:10:00.000Z"), "scenario");
+
+    expect(getActiveSession(next).ui.mode).toBe("scenario");
+    expect(getActiveReplay(next)?.id).toBe("scenario-round-test");
+
+    const updated = createReplayAsset({
+      id: "scenario-round-test",
+      aircraftBuildId: aircraft.id,
+      matchReplay: {
+        ...replay(),
+        frames: [...replay().frames, { index: 2, time: 0.32, turn: 1, aircraft: [], events: [] }],
+      },
+      now: new Date("2026-06-16T00:11:00.000Z"),
+      sessionId: session.id,
+      title: "Round test",
+    });
+    const afterUpdate = addReplayAsset(next, updated, new Date("2026-06-16T00:11:00.000Z"), "scenario");
+
+    expect(getActiveSession(afterUpdate).ui.mode).toBe("scenario");
+    expect(getActiveReplay(afterUpdate)?.summary?.frameCount).toBe(3);
+    expect(afterUpdate.library.replays.filter((asset) => asset.id === "scenario-round-test")).toHaveLength(1);
+  });
+
   it("round-trips through the local storage boundary and clears invalid stored payloads", () => {
     const storage = memoryStorage();
     const project = selectStudioMode(

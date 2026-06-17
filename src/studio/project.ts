@@ -128,12 +128,14 @@ export function updatePilotProfile(
 
 export function createReplayAsset({
   aircraftBuildId,
+  id,
   matchReplay,
   sessionId,
   title,
   now = new Date(),
 }: {
   aircraftBuildId: string;
+  id?: string;
   matchReplay: MatchReplay;
   sessionId: string;
   title: string;
@@ -141,7 +143,7 @@ export function createReplayAsset({
 }): ReplayAsset {
   const createdAt = now.toISOString();
   return {
-    id: `replay-${now.getTime()}`,
+    id: id ?? `replay-${now.getTime()}`,
     title,
     createdAt,
     aircraftBuildId,
@@ -155,7 +157,12 @@ export function createReplayAsset({
   };
 }
 
-export function addReplayAsset(project: StudioProject, replay: ReplayAsset, now = new Date()): StudioProject {
+export function addReplayAsset(
+  project: StudioProject,
+  replay: ReplayAsset,
+  now = new Date(),
+  mode: StudioMode = "replay",
+): StudioProject {
   return updateActiveSession(
     {
       ...project,
@@ -170,7 +177,7 @@ export function addReplayAsset(project: StudioProject, replay: ReplayAsset, now 
       replayIds: [...session.replayIds.filter((id) => id !== replay.id), replay.id],
       ui: {
         ...session.ui,
-        mode: "replay",
+        mode,
         replayPosition: 0,
       },
     }),

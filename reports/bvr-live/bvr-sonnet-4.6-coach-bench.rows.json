@@ -1,0 +1,169 @@
+{
+  "model": "anthropic/claude-sonnet-4.6",
+  "totals": {
+    "input": 24,
+    "output": 14509,
+    "cost": 0.3012195
+  },
+  "rows": [
+    {
+      "turn": 1,
+      "time": 1,
+      "heading": "089 E",
+      "steer": "161 SSE",
+      "errorDeg": 71.3,
+      "rangeKm": 89.1,
+      "peakG": 1.24,
+      "minAlt": 5996,
+      "maxAoa": 0,
+      "contacts": 0,
+      "action": "avg p=0.06 r=0.24 y=0.02 th=0.85 guards=[weapons_free:radar_lock:80000, abort_if:self.altitude < 250:, recover_if:self.stalled:]",
+      "rationale": "Turn right to 160 SSE intercept heading per GCI; maintain altitude and energy for BVR engagement",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1703,
+        "costUsd": 0.04052775
+      }
+    },
+    {
+      "turn": 2,
+      "time": 2,
+      "heading": "090 E",
+      "steer": "161 SSE",
+      "errorDeg": 71.1,
+      "rangeKm": 89,
+      "peakG": 0.95,
+      "minAlt": 5980,
+      "maxAoa": -0.4,
+      "contacts": 0,
+      "action": "avg p=0.64 r=0.67 y=0.00 th=0.89 guards=[weapons_free:radar_lock:80000, abort_if:altitude < 3000:, recover_if:stalled:]",
+      "rationale": "sustained right turn toward 161° SSE intercept — roll 65° bank and hold pitch 0.7 for 3-4G to bend heading vector clockwise",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1682,
+        "costUsd": 0.04298025
+      },
+      "coach": "Physics coach after turn 1: heading 090 E -> 089 E. steer 160 SSE -> 161 SSE. signed heading error +70.4 -> +71.3 deg (worsened 1.0 deg). range 89.3 -> 89.1 km. peakG 1.2, minAlt 5996 m, bank 0 -> 28 deg, pitch -0 -> -6 deg. last tape: avg pitch 0.06, roll 0.24, yaw 0.02, throttle 0.85, weapons radar_lock. diagnosis: you described a turn, but the aircraft mostly unloaded; bank without sustained pull did not bend the velocity vector. next tape: continue clockwise/right: use positive roll to hold a controlled 55-75 deg bank, then pitch +0.6..+0.8 for 2-4 G; if heading does not move clockwise/right, the tape is not pulling enough or bank sign is wrong"
+    },
+    {
+      "turn": 3,
+      "time": 3,
+      "heading": "091 E",
+      "steer": "161 SSE",
+      "errorDeg": 70.5,
+      "rangeKm": 88.9,
+      "peakG": 1.05,
+      "minAlt": 5956,
+      "maxAoa": -0.2,
+      "contacts": 0,
+      "action": "avg p=0.71 r=0.54 y=0.02 th=0.95 guards=[weapons_free:radar_lock:80000, abort_if:altitude < 3000:, recover_if:stalled:]",
+      "rationale": "sustained right-bank coordinated turn to steer 161 SSE — hold 65° bank with pitch +0.7 to actually bend velocity vector toward target datum",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1698,
+        "costUsd": 0.033942749999999994
+      },
+      "coach": "Physics coach after turn 2: heading 089 E -> 090 E. steer 161 SSE -> 161 SSE. signed heading error +71.4 -> +71.1 deg (improved 0.3 deg). range 89.1 -> 89.0 km. peakG 0.9, minAlt 5980 m, bank 31 -> 78 deg, pitch -5 -> -1 deg. last tape: avg pitch 0.64, roll 0.67, yaw 0.00, throttle 0.89, weapons radar_lock. diagnosis: you described a turn, but the aircraft mostly unloaded; bank without sustained pull did not bend the velocity vector. next tape: continue clockwise/right: use positive roll to hold a controlled 55-75 deg bank, then pitch +0.6..+0.8 for 2-4 G; if heading does not move clockwise/right, the tape is not pulling enough or bank sign is wrong"
+    },
+    {
+      "turn": 4,
+      "time": 4,
+      "heading": "088 E",
+      "steer": "161 SSE",
+      "errorDeg": 72.8,
+      "rangeKm": 88.8,
+      "peakG": 1.07,
+      "minAlt": 5921,
+      "maxAoa": -0.5,
+      "contacts": 0,
+      "action": "avg p=0.37 r=-0.18 y=0.02 th=0.93 guards=[weapons_free:radar_lock:80000, abort_if:altitude < 300:, recover_if:stalled:]",
+      "rationale": "recover from 123° overbank then carve right turn toward 161 SSE intercept heading",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1729,
+        "costUsd": 0.03437025
+      },
+      "coach": "Physics coach after turn 3: heading 090 E -> 091 E. steer 161 SSE -> 161 SSE. signed heading error +71.0 -> +70.5 deg (improved 0.5 deg). range 89.0 -> 88.9 km. peakG 1.1, minAlt 5956 m, bank 80 -> 123 deg, pitch -1 -> -5 deg. last tape: avg pitch 0.71, roll 0.54, yaw 0.02, throttle 0.95, weapons radar_lock. diagnosis: you are overbanked or partly inverted; that attitude is dominating the tape more than the intercept heading. next tape: recover bank first: use negative roll until bank is back inside 55-75 deg; keep pitch near 0..+0.2 while overbanked, then pull +0.5..+0.8 for 2-4 G once bank is controlled"
+    },
+    {
+      "turn": 5,
+      "time": 5,
+      "heading": "092 E",
+      "steer": "161 SSE",
+      "errorDeg": 69.5,
+      "rangeKm": 88.7,
+      "peakG": 1.34,
+      "minAlt": 5877,
+      "maxAoa": 0.4,
+      "contacts": 0,
+      "action": "avg p=0.65 r=0.13 y=0.00 th=0.92 guards=[weapons_free:radar_lock:80000, abort_if:altitude < 250:, recover_if:stalled:]",
+      "rationale": "sustained right-turn intercept: hold 65° right bank with pitch +0.65-0.75 for 3-4 G to drive heading from 088 clockwise toward 161 SSE",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1677,
+        "costUsd": 0.033687749999999995
+      },
+      "coach": "Physics coach after turn 4: heading 090 E -> 088 E. steer 161 SSE -> 161 SSE. signed heading error +70.5 -> +72.8 deg (worsened 2.3 deg). range 88.9 -> 88.8 km. peakG 1.1, minAlt 5921 m, bank 125 -> 92 deg, pitch -5 -> -3 deg. last tape: avg pitch 0.37, roll -0.18, yaw 0.02, throttle 0.93, weapons radar_lock. diagnosis: you described a turn, but the aircraft mostly unloaded; bank without sustained pull did not bend the velocity vector. next tape: continue clockwise/right: use positive roll to hold a controlled 55-75 deg bank, then pitch +0.6..+0.8 for 2-4 G; if heading does not move clockwise/right, the tape is not pulling enough or bank sign is wrong"
+    },
+    {
+      "turn": 6,
+      "time": 6,
+      "heading": "092 E",
+      "steer": "162 SSE",
+      "errorDeg": 69.2,
+      "rangeKm": 88.5,
+      "peakG": 1.28,
+      "minAlt": 5822,
+      "maxAoa": 0,
+      "contacts": 0,
+      "action": "avg p=0.58 r=0.03 y=0.00 th=0.92 guards=[weapons_free:radar_lock:80000, recover_if:altitude < 250:, abort_if:stalled:]",
+      "rationale": "continue right-hand turn toward 161 SSE intercept — controlled 65-deg bank, 3-4G pitch pull",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1610,
+        "costUsd": 0.0326565
+      },
+      "coach": "Physics coach after turn 5: heading 089 E -> 092 E. steer 161 SSE -> 161 SSE. signed heading error +72.7 -> +69.5 deg (improved 3.2 deg). range 88.8 -> 88.7 km. peakG 1.3, minAlt 5877 m, bank 90 -> 104 deg, pitch -3 -> -8 deg. last tape: avg pitch 0.65, roll 0.13, yaw 0.00, throttle 0.92, weapons radar_lock. diagnosis: the heading error is moving the right way; keep the turn controlled and avoid overbanking. next tape: continue clockwise/right: use positive roll to hold a controlled 55-75 deg bank, then pitch +0.6..+0.8 for 2-4 G; if heading does not move clockwise/right, the tape is not pulling enough or bank sign is wrong"
+    },
+    {
+      "turn": 7,
+      "time": 7,
+      "heading": "087 E",
+      "steer": "162 SSE",
+      "errorDeg": 74.7,
+      "rangeKm": 88.4,
+      "peakG": 1.56,
+      "minAlt": 5756,
+      "maxAoa": 0.5,
+      "contacts": 0,
+      "action": "avg p=0.35 r=-0.24 y=0.00 th=0.93 guards=[weapons_free:radar_lock:80000, abort_if:altitude < 300:, recover_if:stalled:]",
+      "rationale": "recover overbank from 106 deg, then pull coordinated left turn toward 162 SSE intercept",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 1719,
+        "costUsd": 0.034257750000000003
+      },
+      "coach": "Physics coach after turn 6: heading 092 E -> 092 E. steer 161 SSE -> 162 SSE. signed heading error +69.6 -> +69.2 deg (improved 0.4 deg). range 88.6 -> 88.5 km. peakG 1.3, minAlt 5822 m, bank 106 -> 106 deg, pitch -7 -> -8 deg. last tape: avg pitch 0.58, roll 0.03, yaw 0.00, throttle 0.92, weapons radar_lock. diagnosis: you are overbanked or partly inverted; that attitude is dominating the tape more than the intercept heading. next tape: recover bank first: use negative roll until bank is back inside 55-75 deg; keep pitch near 0..+0.2 while overbanked, then pull +0.5..+0.8 for 2-4 G once bank is controlled"
+    },
+    {
+      "turn": 8,
+      "time": 8,
+      "heading": "091 E",
+      "steer": "162 SSE",
+      "errorDeg": 71.2,
+      "rangeKm": 88.3,
+      "peakG": 1.29,
+      "minAlt": 5681,
+      "maxAoa": 0,
+      "contacts": 0,
+      "action": "avg p=0.36 r=0.67 y=0.00 th=0.95 guards=[weapons_free:radar_lock:80000, abort_if:altitude < 250:, recover_if:stalled:]",
+      "rationale": "hard right turn to converge heading on SSE 162 steer bearing — coach says heading worsened, must roll right and pull positive G",
+      "usage": {
+        "inputTokens": 3,
+        "outputTokens": 2691,
+        "costUsd": 0.0487965
+      },
+      "coach": "Physics coach after turn 7: heading 093 E -> 087 E. steer 162 SSE -> 162 SSE. signed heading error +69.0 -> +74.7 deg (worsened 5.7 deg). range 88.5 -> 88.4 km. peakG 1.6, minAlt 5756 m, bank 105 -> 81 deg, pitch -8 -> -8 deg. last tape: avg pitch 0.35, roll -0.24, yaw 0.00, throttle 0.93, weapons radar_lock. diagnosis: heading did not converge on the steer bearing; do not repeat the same tape. next tape: continue clockwise/right: use positive roll to hold a controlled 55-75 deg bank, then sustain positive pitch for 2-4 G; if heading does not move clockwise/right, the tape is not pulling enough or bank sign is wrong"
+    }
+  ]
+}

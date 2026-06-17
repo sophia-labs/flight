@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Airframe, type ContactPercept, type MatchReplay } from "./protocol/schema";
+import {
+  type AgentMessage,
+  type AgentNavigationFix,
+  type Airframe,
+  type ContactPercept,
+  type MatchReplay,
+} from "./protocol/schema";
 import { generateScenarioMatch } from "./runtime/scenario";
 import { aircraftArchetypes } from "./sim/aircraftCatalog";
 import {
@@ -29,6 +35,7 @@ import { sampleReplayFrame } from "./viewer/replaySample";
 import { StudioScreen } from "./viewer/StudioScreen";
 import { usePlayback } from "./viewer/usePlayback";
 import { useReplayAudio } from "./viewer/useReplayAudio";
+import type { MatchProgress } from "./runtime/config";
 
 function queryValue(name: string): string | null {
   if (typeof window === "undefined") return null;
@@ -64,6 +71,15 @@ export interface ScenarioLaunchProgress {
   rationale?: string;
 }
 
+interface ScenarioRoundResponse {
+  sessionId: string;
+  turn: number;
+  maxTurns: number;
+  complete: boolean;
+  replay: MatchReplay;
+  progress: MatchProgress[];
+}
+
 function missionRadarTracks(contacts: ContactPercept[] | undefined): MissionRadarTrack[] {
   return (contacts ?? []).map((contact) => ({
     id: contact.id,
@@ -87,10 +103,15 @@ export function App() {
   const [voiceOn, setVoiceOn] = useState(() => queryFlag("voice", false));
   const [builderOpen, setBuilderOpen] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [roundBusy, setRoundBusy] = useState(false);
+  const [roundAutoplay, setRoundAutoplay] = useState(false);
+  const [roundSessionId, setRoundSessionId] = useState<string | null>(null);
   const [scenarioProgress, setScenarioProgress] = useState<ScenarioLaunchProgress | null>(null);
   const [missionState, setMissionState] = useState<MissionState | null>(null);
   const missionIdRef = useRef(0);
   const tickIdRef = useRef(0);
+  const roundBusyRef = useRef(false);
+  const pendingReplayEndFrameRef = useRef<number | null>(null);
   const [scenarioError, setScenarioError] = useState<string | null>(null);
 
   const activeSession = useMemo(() => getActiveSession(project), [project]);
@@ -120,6 +141,13 @@ export function App() {
 
   const playback = usePlayback(replay);
   const frame = replay ? sampleReplayFrame(replay.frames, playback.samplePosition) : undefined;
+
+  useEffect(() => {
+    const target = pendingReplayEndFrameRef.current;
+    if (target === null || !replay || replay.frames.length - 1 < target) return;
+    pendingReplayEndFrameRef.current = null;
+    playback.setPosition(target, false);
+  }, [playback, replay]);
 
   useEffect(() => {
     window.__flightSetReplayPosition = (position: number) => {
@@ -198,6 +226,107 @@ export function App() {
     [activeAircraft.id, activeSession.id, updateProject],
   );
 
+  const stepAgentRound = useCallback(
+    async (message?: string) => {
+      if (roundBusyRef.current || launching) return;
+      roundBusyRef.current = true;
+      setRoundBusy(true);
+      setScenarioError(null);
+
+      const aircraft = activeAircraft;
+      const session = activeSession;
+      const scenario = activeScenario;
+      const text = message?.trim();
+
+      try {
+        setScenarioProgress({
+          label: roundSessionId ? "Advancing agent round" : "Starting round session",
+          percent: 0.05,
+          turn: roundSessionId ? undefined : 0,
+          maxTurns: scenario.turnCount,
+        });
+        const response = await fetch("/api/scenario/round", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            airframe: aircraft.airframe,
+            scenario,
+            ...(roundSessionId ? { sessionId: roundSessionId } : { reset: true }),
+            ...(text ? { message: { content: text, to: "all" } } : {}),
+          }),
+        });
+        const payload = (await response.json().catch(() => undefined)) as
+          | (ScenarioRoundResponse & { error?: string })
+          | undefined;
+        if (!response.ok || !payload || !payload.replay) {
+          const reason =
+            payload && typeof payload.error === "string"
+              ? payload.error
+              : `scenario round failed (${response.status})`;
+          throw new Error(reason);
+        }
+
+        setRoundSessionId(payload.sessionId);
+        pendingReplayEndFrameRef.current = payload.replay.frames.length - 1;
+        const now = new Date();
+        const asset = createReplayAsset({
+          id: `scenario-round-${payload.sessionId}`,
+          aircraftBuildId: aircraft.id,
+          matchReplay: payload.replay,
+          now,
+          sessionId: session.id,
+          title: `${scenarioTitle(aircraft.name, scenario)} round-by-round`,
+        });
+        updateProject((current) => addReplayAsset(current, asset, now, "scenario"));
+        setCameraMode(scenario.cameraMode);
+
+        const decision = [...payload.progress].reverse().find((event) => event.phase === "decision");
+        setScenarioProgress({
+          label: payload.complete ? "Round session complete" : "Agent round complete",
+          percent: payload.complete ? 1 : Math.min(0.95, payload.turn / Math.max(1, payload.maxTurns)),
+          turn: payload.turn,
+          maxTurns: payload.maxTurns,
+          actionKind: decision?.actionKind,
+          agentLabel: decision?.agentLabel,
+          rationale: decision?.rationale,
+        });
+        if (payload.complete) setRoundAutoplay(false);
+      } catch (error) {
+        setScenarioError(error instanceof Error ? error.message : String(error));
+        setRoundAutoplay(false);
+      } finally {
+        roundBusyRef.current = false;
+        setRoundBusy(false);
+      }
+    },
+    [activeAircraft, activeScenario, activeSession, launching, roundSessionId, updateProject],
+  );
+
+  useEffect(() => {
+    if (!roundAutoplay || roundBusy || launching) return;
+    const id = window.setTimeout(() => {
+      void stepAgentRound();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [launching, roundAutoplay, roundBusy, stepAgentRound]);
+
+  useEffect(() => {
+    setRoundSessionId(null);
+    setRoundAutoplay(false);
+  }, [
+    activeAircraft.id,
+    activeScenario.bodyModel,
+    activeScenario.cameraMode,
+    activeScenario.controlMode,
+    activeScenario.kind,
+    activeScenario.motorProgramSampleMs,
+    activeScenario.motorProgramTurnMs,
+    activeScenario.pilotModel,
+    activeScenario.turnCount,
+    activeScenario.twitchBodyModel,
+    activeScenario.twitchTimeScale,
+  ]);
+
   const launchFlight = useCallback(async () => {
     if (launching) return;
     const aircraft = activeAircraft;
@@ -223,6 +352,7 @@ export function App() {
       percent: 0,
       decisions: [],
       bodyTicks: [],
+      messages: [],
       radarTracks: [],
       complete: false,
     });
@@ -243,6 +373,19 @@ export function App() {
           ...prev,
           decisions: [...prev.decisions, { id, turn, agentId, agentLabel, actionKind, rationale }],
           ...(agentId === "blue-1" ? { radarTracks: missionRadarTracks(contacts) } : {}),
+        };
+      });
+    };
+
+    const pushMessage = (message: AgentMessage, navigation?: AgentNavigationFix) => {
+      setMissionState((prev) => {
+        if (!prev) return prev;
+        const messages = [...prev.messages, message];
+        if (messages.length > 40) messages.splice(0, messages.length - 40);
+        return {
+          ...prev,
+          messages,
+          ...(navigation ? { navigation } : {}),
         };
       });
     };
@@ -311,6 +454,12 @@ export function App() {
                 updateProgress(turn, pct);
                 if (event.phase === "decision" && event.agentId && event.agentLabel && event.actionKind) {
                   pushDecision(turn, event.agentId, event.agentLabel, event.actionKind, event.rationale, event.contacts);
+                  if (event.navigation) {
+                    setMissionState((prev) => (prev ? { ...prev, navigation: event.navigation } : prev));
+                  }
+                }
+                if (event.phase === "message" && event.message) {
+                  pushMessage(event.message, event.navigation);
                 }
                 if (event.phase === "body_tick" && event.bodyTick) {
                   pushBodyTick(
@@ -348,6 +497,12 @@ export function App() {
               progress.rationale,
               progress.contacts,
             );
+            if (progress.navigation) {
+              setMissionState((prev) => (prev ? { ...prev, navigation: progress.navigation } : prev));
+            }
+          }
+          if (progress.phase === "message" && progress.message) {
+            pushMessage(progress.message, progress.navigation);
           }
           if (progress.phase === "body_tick" && progress.bodyTick) {
             pushBodyTick(
@@ -411,6 +566,8 @@ export function App() {
           onOpenBuilder={() => setBuilderOpen(true)}
           onSelectAircraft={handleSelectAircraft}
           onSoundChange={setSoundOn}
+          onStepAgentRound={stepAgentRound}
+          onToggleRoundAutoplay={() => setRoundAutoplay((current) => !current)}
           onUpdateScenario={handleUpdateScenario}
           onUpdatePilot={handleUpdatePilot}
           onVoiceChange={setVoiceOn}
@@ -431,6 +588,8 @@ export function App() {
           }}
           project={project}
           replay={replay}
+          roundAutoplay={roundAutoplay}
+          roundBusy={roundBusy}
           scenarioError={scenarioError}
           scenarioProgress={scenarioProgress}
           soundOn={soundOn}
@@ -454,7 +613,7 @@ function nextPaint(): Promise<void> {
 const SCENARIO_TITLE_BY_KIND: Record<StudioScenarioConfig["kind"], string> = {
   balloon: "balloon hunt",
   "balloon-hard": "hard balloon intercept",
-  "bvr-intercept": "BVR intercept",
+  "bvr-intercept": "BVR GPS intercept",
   duel: "merge duel",
   "stern-gun": "stern gun start",
 };

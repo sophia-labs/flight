@@ -1,21 +1,11 @@
 import { complete, getModels, type TextContent, type ToolCall } from "@earendil-works/pi-ai";
 import type { ActionSpec } from "../actionSpec";
 import type { Controller } from "../controller";
+import { buildPilotSystemPrompt } from "../prompt";
 
 // Shared briefing describing the observation and the objective; the ActionSpec appends the
 // action-vocabulary specifics.
 export const FLIGHT_RULES = `You are an autonomous fighter pilot flying one aircraft in a turn-based dogfight. Each turn you receive a JSON observation and choose ONE action, which is held for roughly one turn of flight (~2.4s normally, 2.5s in motor-program mode).
-
-Observation fields:
-- self: airspeed (m/s), altitude (m), aoaDeg (angle of attack; the wing stalls past ~24 deg), gLoad, health (0-100), weaponCooldown (seconds; 0 means you can fire), stalled (bool).
-- self.missileLoaded means a heat-seeking FOX-2 is loaded. self.radarMissileLoaded means an active-radar BVR missile is loaded.
-- contacts[0] is the enemy, ego-relative: range (m); bearingForward (1 = dead ahead, 0 = abeam, negative = behind); bearingRight (+ = to your right); bearingUp (+ = above you); closureRate (+ = opening, - = closing); health. contact.missileLock means a FOX-2 fired now has IR lock; contact.radarLock means an active-radar missile fired now has a radar weapon solution.
-- text, when present, is a cockpit camera-ascii@2 view. The + at grid center is the gun boresight/pipper; use the grid and legend as visual input for line-up and aiming geometry.
-
-Sign discipline:
-- bearingRight > 0 means target right; bearingRight < 0 means target left.
-- bearingUp > 0 means target above the nose/pipper; bearingUp < 0 means target below the nose/pipper.
-- In the ASCII legend, "high" means above the pipper and "low" means below it. Keep the target near 12 o'clock level for guns; do not overfly it vertically.
 
 Fly competently and defeat the enemy. Keep your energy up — don't get slow, stalled, or mush into the ground (the floor is 55 m). Point your nose at the enemy; fire only with a clean shot (bearingForward near 1, small bearingRight/bearingUp, range < ~1050 m, weaponCooldown 0).`;
 
@@ -55,7 +45,10 @@ function extractJsonObject(text: string): Record<string, unknown> {
 export function piController(options: PiControllerOptions): Controller {
   const model = resolveOpenRouterModel(options.slug);
   const maxTokens = options.maxTokens ?? 512;
-  const systemPrompt = `${options.rules ?? FLIGHT_RULES}\n\n${options.spec.rules}`;
+  const systemPrompt = buildPilotSystemPrompt({
+    roleRules: options.rules ?? FLIGHT_RULES,
+    actionSpec: options.spec,
+  });
 
   return async (observation, context) => {
     const response = await complete(

@@ -2,12 +2,14 @@ import { useEffect, useRef, type ComponentType } from "react";
 import {
   Activity,
   Bot,
+  Compass,
   Crosshair,
   Gauge,
   Plane,
   Radio,
   Zap,
 } from "lucide-react";
+import type { AgentMessage, AgentNavigationFix } from "../protocol/schema";
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -50,7 +52,9 @@ export interface MissionState {
   percent: number;
   decisions: MissionDecision[];
   bodyTicks: MissionBodyTick[];
+  messages: AgentMessage[];
   radarTracks: MissionRadarTrack[];
+  navigation?: AgentNavigationFix;
   complete: boolean;
 }
 
@@ -181,6 +185,71 @@ function RadarScope({
           <small>/{maxTurns}</small>
         </span>
       </div>
+    </div>
+  );
+}
+
+function NavReadout({ navigation }: { navigation?: AgentNavigationFix }) {
+  if (!navigation) return null;
+  const contact = navigation.contacts[0];
+  const waypoint = navigation.waypoints?.[0];
+  const heading =
+    navigation.self.headingDeg !== undefined
+      ? `${Math.round(navigation.self.headingDeg).toString().padStart(3, "0")} ${navigation.self.compass ?? ""}`
+      : "--";
+  return (
+    <div className="nav-readout" aria-label="Navigation readout">
+      <span>
+        <Compass size={13} />
+        HDG {heading}
+      </span>
+      <span>ALT {Math.round(navigation.self.altitudeM)}M</span>
+      {contact ? (
+        <span>
+          {contact.id}{" "}
+          {contact.bearingDeg !== undefined
+            ? Math.round(contact.bearingDeg).toString().padStart(3, "0")
+            : "--"}{" "}
+          {contact.compass ?? ""} {Math.round(contact.rangeM / 1000)}K
+        </span>
+      ) : waypoint ? (
+        <span>
+          {waypoint.label ?? waypoint.id}{" "}
+          {waypoint.bearingDeg !== undefined
+            ? Math.round(waypoint.bearingDeg).toString().padStart(3, "0")
+            : "--"}{" "}
+          {waypoint.compass ?? ""} {waypoint.rangeM !== undefined ? `${Math.round(waypoint.rangeM / 1000)}K` : ""}
+        </span>
+      ) : (
+        <span>NO TRACK</span>
+      )}
+      {waypoint ? <span>GPS {waypoint.gps.lat.toFixed(4)}, {waypoint.gps.lon.toFixed(4)}</span> : null}
+    </div>
+  );
+}
+
+function CommsFeed({ messages }: { messages: AgentMessage[] }) {
+  const feedRef = useRef<HTMLDivElement | null>(null);
+  const prevLenRef = useRef(0);
+
+  useEffect(() => {
+    if (messages.length > prevLenRef.current && feedRef.current) {
+      feedRef.current.scrollLeft = feedRef.current.scrollWidth;
+    }
+    prevLenRef.current = messages.length;
+  }, [messages.length]);
+
+  if (messages.length === 0) return null;
+
+  return (
+    <div className="comms-feed" ref={feedRef} aria-label="Agent communications feed">
+      {messages.slice(-12).map((message) => (
+        <div key={message.id} className={`comms-chip priority-${message.priority ?? "routine"}`}>
+          <span className="comms-channel">{message.channel}</span>
+          <span className="comms-to">{message.to}</span>
+          <span className="comms-content">{message.content}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -334,6 +403,7 @@ export function MissionControl({ state }: { state: MissionState }) {
             active={!state.complete}
             tracks={state.radarTracks}
           />
+          <NavReadout navigation={state.navigation} />
         </div>
 
         {/* Decision log — right column */}
@@ -341,6 +411,8 @@ export function MissionControl({ state }: { state: MissionState }) {
           <DecisionLog decisions={state.decisions} />
         </div>
       </div>
+
+      <CommsFeed messages={state.messages} />
 
       {/* Timeline — spans full width */}
       <TimelineBar turn={state.turn} maxTurns={state.maxTurns} percent={state.percent} />

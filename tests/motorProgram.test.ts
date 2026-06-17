@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionSpecs } from "../src/agent/actionSpec";
+import { actionSpecs, motorProgramSpecWithDefaultWeaponsFree } from "../src/agent/actionSpec";
 import { controlForMotorProgram } from "../src/agent/action";
 import { fixedWingBodyManifest } from "../src/body/manifest";
 import type { BodyModel } from "../src/body/model";
@@ -123,6 +123,27 @@ describe("motor-program action", () => {
     expect(action.samples).toHaveLength(51);
     expect(action.samples[1].tMs).toBe(50);
     expect(action.heldActions.some((held) => held.kind === "weapons_free")).toBe(true);
+  });
+
+  it("can default omitted BVR weapons-free guards to radar lock instead of guns", () => {
+    const action = motorProgramSpecWithDefaultWeaponsFree("radar-lock").toAction({
+      durationMs: 1_000,
+      sampleDtMs: 50,
+      samples: [{ tMs: 0, pitch: 0.2, roll: 0.6, yaw: 0, throttle: 0.9, trigger: false }],
+      heldActions: [],
+    });
+
+    expect(action.kind).toBe("motor-program");
+    if (action.kind !== "motor-program") throw new Error("expected motor-program");
+    expect(action.heldActions).toContainEqual(
+      expect.objectContaining({
+        kind: "weapons_free",
+        condition: "radar_lock",
+        coneDeg: 30,
+        rangeM: 80_000,
+      }),
+    );
+    expect(action.heldActions.some((held) => held.condition === "target_in_forward_gun_cone")).toBe(false);
   });
 
   it("wakes the twitch Body only when a held weapons-free cone is active", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildServerScenarioMatchConfig } from "../src/server/scenarioRun";
+import { buildServerScenarioMatchConfig, stepScenarioRoundApiRequest } from "../src/server/scenarioRun";
 import { inspectScenarioReplay } from "../src/server/scenarioAgent";
 import {
   ScenarioDebriefRequestSchema,
@@ -8,6 +8,8 @@ import {
 import { buildDebriefGrounding } from "../src/server/debriefContext";
 import { aircraftArchetypes } from "../src/sim/aircraftCatalog";
 import type { AircraftSnapshot, MatchReplay } from "../src/protocol/schema";
+import { toObservation } from "../src/agent/observation";
+import { navigationFixForAgent } from "../src/runtime/navigation";
 
 describe("scenario API config builder", () => {
   it("builds a selected-aircraft live pilot/body match without exposing browser secrets", () => {
@@ -81,7 +83,7 @@ describe("scenario API config builder", () => {
     }
   });
 
-  it("builds BVR intercept as a live radar-limited pilot scenario", () => {
+  it("builds BVR intercept as a live radar-limited GPS pilot scenario", async () => {
     const originalDeepSeek = process.env.DEEPSEEK_API_KEY;
     const tomcat = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat")!;
     process.env.DEEPSEEK_API_KEY = "test-key";
@@ -104,11 +106,44 @@ describe("scenario API config builder", () => {
         kind: "llm",
         label: "deepseek-v4-pro/pilot-intent",
       });
-      expect(config.agents["blue-1"]?.messages?.[0]).toContain("GCI to INTERCEPTOR-1");
-
       const blue = config.initialAircraft[0]!;
+      const observation = toObservation(
+        blue,
+        config.initialAircraft,
+        1,
+        0,
+        config.agents["blue-1"]?.sensor ?? config.sensor,
+      );
+      const navigation = navigationFixForAgent(blue, config.initialAircraft, observation.contacts);
+      const messages = await Promise.resolve(config.comms?.providers?.[0]?.({
+        turn: 1,
+        time: 0,
+        agentId: "blue-1",
+        allAgentIds: ["blue-1", "prop-1"],
+        self: blue,
+        world: config.initialAircraft,
+        observation,
+        contacts: observation.contacts,
+        navigation,
+      }) ?? []);
+      expect(messages[0]).toMatchObject({
+        from: "GCI",
+        to: "blue-1",
+        channel: "gci",
+        content: expect.stringContaining("last GPS"),
+        navigation: {
+          waypoints: [
+            expect.objectContaining({
+              id: "bvr-target-datum",
+              gps: expect.objectContaining({ lat: expect.any(Number), lon: expect.any(Number) }),
+              bearingDeg: expect.any(Number),
+            }),
+          ],
+        },
+      });
+
       const radarContacts = config.agents["blue-1"]?.sensor?.detect(config.initialAircraft, blue) ?? [];
-      expect(radarContacts.map((contact) => contact.target.id)).toEqual(["prop-1"]);
+      expect(radarContacts.map((contact) => contact.target.id)).toEqual([]);
 
       // The match-level default sensor must not leak perfect omniscience into BVR agents.
       expect(config.sensor.detect(config.initialAircraft, blue)).toEqual([]);
@@ -116,6 +151,47 @@ describe("scenario API config builder", () => {
       if (originalDeepSeek === undefined) delete process.env.DEEPSEEK_API_KEY;
       else process.env.DEEPSEEK_API_KEY = originalDeepSeek;
     }
+  });
+
+  it("steps a scenario one agent round at a time and records operator messages", async () => {
+    const tomcat = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat")!;
+    const request = {
+      airframe: tomcat.airframe,
+      scenario: {
+        schemaVersion: 1 as const,
+        kind: "stern-gun" as const,
+        controlMode: "body-pilot" as const,
+        pilotModel: "scripted-body-pilot",
+        bodyModel: "scripted-fixed-wing-body",
+        turnCount: 2,
+        cameraMode: "pilot-cinema" as const,
+      },
+    };
+
+    const first = await stepScenarioRoundApiRequest({
+      ...request,
+      message: { content: "Hold the tally and wait for a clean shot.", to: "blue-1" },
+    });
+
+    expect(first.turn).toBe(1);
+    expect(first.complete).toBe(false);
+    expect(first.replay.frames.length).toBeGreaterThan(1);
+    expect(first.replay.comms?.[0]).toMatchObject({
+      to: "blue-1",
+      channel: "operator",
+      content: "Hold the tally and wait for a clean shot.",
+    });
+
+    const second = await stepScenarioRoundApiRequest({
+      ...request,
+      sessionId: first.sessionId,
+    });
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(second.turn).toBe(2);
+    expect(second.complete).toBe(true);
+    expect(second.replay.outcome).toBeDefined();
+    expect(second.replay.frames.length).toBeGreaterThan(first.replay.frames.length);
   });
 
   it("summarizes replay phase state for agent monitoring", () => {
