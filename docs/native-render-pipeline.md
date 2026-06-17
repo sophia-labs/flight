@@ -59,6 +59,64 @@ You can also set `BLENDER=/path/to/blender`.
   - Animates aircraft transforms, cockpit controls, moving control surfaces, tracers, and cameras.
   - Renders PNG frames and shells out to ffmpeg for the MP4.
 
+## Remote GPU Render Box
+
+Use the EC2 render box when local Blender turnaround is too slow:
+
+```bash
+tools/render-remote.sh clips/full-render/timeline.json clips/remote-render.mp4
+```
+
+The script packages the repo-side Blender payload, uploads it as a Terraform-managed S3 object, creates a tagged `g5.xlarge` render instance, waits for the exact result object, downloads the MP4, and leaves S3 artifacts under a 7-day lifecycle rule. Defaults:
+
+- AWS profile/region: `terraform-user` / `us-east-1`
+- instance: `g5.xlarge`
+- SSH key: `flight-render-vera`
+- SSH ingress: caller IP `/32`, autodetected with `checkip.amazonaws.com`
+- render samples: `RENDER_SAMPLES=48`
+- root volume: `100` GiB for GPU AMIs
+
+Useful overrides:
+
+```bash
+INSTANCE_TYPE=g5.2xlarge RENDER_SAMPLES=64 \
+  tools/render-remote.sh clips/full-render/timeline.json clips/remote-render.mp4
+
+KEY_NAME= SSH_CIDR= \
+  tools/render-remote.sh clips/full-render/timeline.json clips/remote-render.mp4
+```
+
+During a run, the script prints direct SSH, SSM Session Manager, and one-shot SSM log commands. Direct log tail:
+
+```bash
+ssh ubuntu@<public-ip> 'tail -f /var/log/render.log'
+```
+
+### Baked render AMI
+
+The first GPU loop proved that per-run apt, Blender, and ffmpeg setup dominates short renders. Bake those dependencies once:
+
+```bash
+tools/bake-render-ami.sh
+```
+
+The bake runner launches a temporary `g5.xlarge`, verifies SSH and SSM, runs `terraform/render-host-setup.sh`, stops the box, creates an AMI, terminates the bake box, and writes ignored local config:
+
+```hcl
+# terraform/render-ami.auto.tfvars
+ami_id = "ami-..."
+root_volume_size_gb = 100
+```
+
+`terraform/user-data.sh` still embeds the same setup script as an idempotent guard. On a baked AMI it exits after seeing `/opt/flight-render-setup-<blender-version>.stamp`; on a fresh base AMI it installs the missing dependencies before rendering.
+
+Benchmark evidence from the first baked `g5.xlarge` run (`RENDER_SAMPLES=48`, 24 frames):
+
+- output: `1280x720`, `24 fps`, `24 frames`
+- first frame: about `44s`
+- post-warm frames: about `0.41s/frame`
+- end-to-end: about `221s`
+
 ## Why This Exists
 
 The old clip path records the React viewer through Chromium screenshots or canvas capture. That is useful for visual smoke tests, but it couples final video output to browser GPU behavior.

@@ -14,3 +14,10 @@ clips/
 stills-tuning/
 
 bench/replays/
+
+# Terraform state (sensitive — never commit)
+terraform/.terraform/
+terraform/*.auto.tfvars
+terraform/*.tfvars
+terraform/terraform.tfstate*
+terraform/.terraform.lock.hcl
