@@ -1,15 +1,19 @@
 import { adapterFor } from "../agent/action";
 import { toObservation } from "../agent/observation";
-import { senseAndEncode } from "../agent/perception";
+import { cameraSensor, senseAndEncode } from "../agent/perception";
+import { cameraAsciiEncoderV2 } from "../agent/encoders/cameraAscii";
 import type { ControllerContext } from "../agent/controller";
 import {
   MatchReplaySchema,
   type Action,
   type AgentMeta,
+  type AgentPhaseTrace,
   type Airframe,
   type BodyTickTrace,
   type ControlInput,
   type MatchReplay,
+  type MotorProgramAction,
+  type MotorProgramHeldAction,
   type Observation,
   type PilotIntentAction,
   type ReplayEvent,
@@ -24,9 +28,10 @@ import {
   type PendingBodyTick,
 } from "../body/runtime";
 import { selectCameraDevice } from "../sim/mountedSensor";
-import { stepSimulation } from "../sim/flight";
+import { hasLoadedHeatSeeker, irLockAvailable, stepSimulation } from "../sim/flight";
+import { basisFromQuat, dot, length, normalize, sub } from "../sim/math";
 import { toSnapshot, type AircraftState, type Projectile } from "../sim/types";
-import type { AgentEntry, MatchConfig } from "./config";
+import type { AgentEntry, MatchConfig, MatchProgress } from "./config";
 
 function projectileSnapshot(round: Projectile) {
   return {
@@ -71,8 +76,88 @@ interface DecisionOutcome {
   source: TurnDecision["source"];
 }
 
+function replaySchemaVersion(input: { bodyTicks: BodyTickTrace[]; agentPhases: AgentPhaseTrace[] }) {
+  if (input.agentPhases.length > 0) return 5;
+  if (input.bodyTicks.length > 0) return 4;
+  return 3;
+}
+
 function isPilotIntentAction(action: Action | undefined): action is PilotIntentAction {
   return action?.kind === "pilot-intent";
+}
+
+function isMotorProgramAction(action: Action | undefined): action is MotorProgramAction {
+  return action?.kind === "motor-program";
+}
+
+function weaponsFreeGuard(action: MotorProgramAction): MotorProgramHeldAction | undefined {
+  return action.heldActions.find((held) => held.kind === "weapons_free");
+}
+
+function targetInForwardCone(input: {
+  self: AircraftState;
+  aircraft: AircraftState[];
+  coneDeg: number;
+  rangeM: number;
+}): boolean {
+  const { self, aircraft, coneDeg, rangeM } = input;
+  const forward = basisFromQuat(self.orientation).forward;
+  const minDot = Math.cos((Math.max(0.5, coneDeg) * Math.PI) / 180);
+  for (const target of aircraft) {
+    if (target.id === self.id || target.team === self.team || target.health <= 0) continue;
+    const toTarget = sub(target.position, self.position);
+    const range = length(toTarget);
+    if (range < 1 || range > rangeM) continue;
+    if (dot(forward, normalize(toTarget)) >= minDot) return true;
+  }
+  return false;
+}
+
+// IR missile sear: a no-twitch motor-program planner that armed weapons_free fires its loaded heat-seeker
+// the instant a live IR lock exists on an enemy. The planner armed and flew the lock; the sear only pulls
+// the trigger when the seeker solution is real (assisted-sear; deterministic, no scripted flying).
+function missileSearReady(self: AircraftState, aircraft: AircraftState[]): boolean {
+  if (!hasLoadedHeatSeeker(self)) return false;
+  return aircraft.some((target) => target.id !== self.id && irLockAvailable(self, target));
+}
+
+function reflexIntentFor(action: MotorProgramAction, guard: MotorProgramHeldAction): PilotIntentAction {
+  return {
+    kind: "pilot-intent",
+    goal:
+      guard.note ??
+      `quick-time guns: target entered ${Math.round(guard.coneDeg ?? 12)} degree cone; refine nose and call the shot`,
+    urgency: 1,
+    riskTolerance: 0.72,
+    style: "twitch_guns",
+    constraints: ["do_not_crash", "avoid_stall", "preserve_solution"],
+    attention: [
+      "boresight_crosshair",
+      "target_glyph",
+      `planner_dt_${Math.round(action.sampleDtMs)}ms`,
+      `guard_${guard.condition ?? "weapons_free"}`,
+    ],
+    trigger: true,
+    armedFire: true,
+  };
+}
+
+function cockpitObservationText(self: AircraftState, aircraft: AircraftState[]): string {
+  const device = selectCameraDevice(self.devices);
+  const field = cameraAsciiEncoderV2.encode(cameraSensor.sense(device, aircraft, self)).text ?? "";
+  return [
+    "VISUAL camera-ascii@2 cockpit field.",
+    "This is the same cockpit projection the Body uses; the + at grid center is the gun boresight/pipper.",
+    "Use the grid and legend for line-up, target position, and weapons-free timing.",
+    field,
+  ].join("\n");
+}
+
+function withCockpitObservationText(observation: Observation, self: AircraftState, aircraft: AircraftState[]): Observation {
+  return {
+    ...observation,
+    text: cockpitObservationText(self, aircraft),
+  };
 }
 
 // Race the controller against its latency budget; abort + fall back on timeout or throw.
@@ -118,7 +203,10 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
   const frames: ReplayFrame[] = [];
   const decisions: TurnDecision[] = [];
   const bodyTicks: BodyTickTrace[] = [];
+  const agentPhases: AgentPhaseTrace[] = [];
+  const activeTwitchPhases: Record<string, AgentPhaseTrace | undefined> = {};
   const bodyStates: Record<string, BodyRuntimeState> = {};
+  const reflexStates: Record<string, BodyRuntimeState> = {};
   let time = 0;
   let frameIndex = 0;
   let turnsRun = 0;
@@ -129,6 +217,12 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
 
   for (let turn = 1; turn <= config.maxTurns; turn += 1) {
     turnsRun = turn;
+    config.onProgress?.({
+      phase: "turn_start",
+      turn,
+      maxTurns: config.maxTurns,
+      time,
+    });
     const actionsById: Record<string, Action> = {};
 
     // Decide once per turn, per living agent.
@@ -137,7 +231,11 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       const entry = config.agents[ship.id];
       if (!entry) continue;
 
-      const observation = toObservation(ship, aircraft, turn, time, config.sensor);
+      const baseObservation = toObservation(ship, aircraft, turn, time, config.sensor);
+      const observation =
+        entry.body || entry.reflexBody || entry.feedField
+          ? withCockpitObservationText(baseObservation, ship, aircraft)
+          : baseObservation;
       const context: ControllerContext = {
         turn,
         agentId: ship.id,
@@ -164,6 +262,28 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       if (percepts.length > 0) decision.percepts = percepts;
 
       decisions.push(decision);
+      config.onProgress?.({
+        phase: "decision",
+        turn,
+        maxTurns: config.maxTurns,
+        time,
+        agentId: ship.id,
+        agentLabel: entry.meta.label,
+        actionKind: outcome.action.kind,
+        ...(outcome.rationale !== undefined ? { rationale: outcome.rationale } : {}),
+      });
+
+      if (entry.reflexBody && isMotorProgramAction(outcome.action)) {
+        agentPhases.push({
+          agentId: ship.id,
+          turn,
+          mode: "planner",
+          startTime: time,
+          endTime: time + Math.min(config.turnDuration, outcome.action.durationMs / 1000),
+          model: entry.meta.label,
+          reason: "motor-program tape",
+        });
+      }
     }
 
     // Re-derive each held action into a control EVERY frame, so a setpoint adapter can track
@@ -171,6 +291,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
     for (let s = 0; s < stepsPerTurn; s += 1) {
       const controlsById: Record<string, ControlInput> = {};
       const pendingBodyTicks: Record<string, PendingBodyTick> = {};
+      const elapsedMs = s * config.frameDt * 1000;
       for (const ship of aircraft) {
         const action = actionsById[ship.id];
         const entry = config.agents[ship.id];
@@ -192,8 +313,70 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
           });
           controlsById[ship.id] = pending.controlInput;
           pendingBodyTicks[ship.id] = pending;
+        } else if (entry?.reflexBody && isMotorProgramAction(action)) {
+          const baseControl = adapterFor(action.kind).controlFor(action, ship, { elapsedMs });
+          const guard = weaponsFreeGuard(action);
+          const reflexActive =
+            guard !== undefined &&
+            targetInForwardCone({
+              self: ship,
+              aircraft,
+              coneDeg: guard.coneDeg ?? 12,
+              rangeM: guard.rangeM ?? 2_900,
+            });
+
+          if (reflexActive) {
+            let phase = activeTwitchPhases[ship.id];
+            if (!phase) {
+              phase = {
+                agentId: ship.id,
+                turn,
+                mode: "twitch",
+                startTime: time,
+                endTime: time + config.frameDt,
+                timeScale: clampPlaybackTimeScale(entry.reflexPlaybackTimeScale ?? 0.35),
+                model:
+                  typeof entry.meta.config?.twitchBodyModel === "string"
+                    ? entry.meta.config.twitchBodyModel
+                    : entry.meta.label,
+                reason: guard.condition ?? "weapons_free",
+              };
+              activeTwitchPhases[ship.id] = phase;
+              agentPhases.push(phase);
+            } else {
+              phase.endTime = time + config.frameDt;
+            }
+            reflexStates[ship.id] ??= createBodyRuntimeState(baseControl);
+            const pending = await runBodyTick({
+              config: entry.reflexBody,
+              state: reflexStates[ship.id],
+              turn,
+              agentId: ship.id,
+              time,
+              dt: config.frameDt,
+              self: ship,
+              aircraft,
+              pilotIntent: reflexIntentFor(action, guard),
+              device: selectCameraDevice(ship.devices),
+            });
+            controlsById[ship.id] = pending.controlInput;
+            pendingBodyTicks[ship.id] = pending;
+          } else {
+            const phase = activeTwitchPhases[ship.id];
+            if (phase) {
+              phase.endTime = time;
+              activeTwitchPhases[ship.id] = undefined;
+            }
+            controlsById[ship.id] = baseControl;
+          }
         } else if (action) {
-          controlsById[ship.id] = adapterFor(action.kind).controlFor(action, ship);
+          const control = adapterFor(action.kind).controlFor(action, ship, { elapsedMs });
+          // Release the FOX-2 if this motor-program armed weapons_free and a loaded heat-seeker now has a
+          // live IR lock — the only path by which a no-twitch planner (no reflex Body) takes the shot.
+          controlsById[ship.id] =
+            isMotorProgramAction(action) && weaponsFreeGuard(action) && missileSearReady(ship, aircraft)
+              ? { ...control, trigger: true }
+              : control;
         }
       }
       const result = stepSimulation(aircraft, controlsById, config.frameDt, projectiles, time);
@@ -201,14 +384,44 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       time += config.frameDt;
       for (const [agentId, pending] of Object.entries(pendingBodyTicks)) {
         const ship = result.aircraft.find((candidate) => candidate.id === agentId);
-        const state = bodyStates[agentId];
-        if (ship && state) bodyTicks.push(finishBodyTick(pending, state, ship));
+        const state = bodyStates[agentId] ?? reflexStates[agentId];
+        if (ship && state) {
+          const tick = finishBodyTick(pending, state, ship);
+          bodyTicks.push(tick);
+          config.onProgress?.({
+            phase: "body_tick",
+            turn,
+            maxTurns: config.maxTurns,
+            time,
+            agentId,
+            bodyTick: {
+              agentId,
+              status: tick.parsed.status,
+              tick: tick.tick,
+              feel: tick.parsed.feel,
+            },
+          });
+        }
       }
       frames.push(snapshot(frameIndex, time, turn, result.aircraft, result.events, projectiles));
       frameIndex += 1;
+      // Emit frame progress every Nth frame (every 5th by default) so we don't spam.
+      if (frameIndex % 5 === 0) {
+        config.onProgress?.({
+          phase: "frame",
+          turn,
+          maxTurns: config.maxTurns,
+          time,
+          frameIndex,
+        });
+      }
     }
 
     if (aircraft.some((ship) => ship.health <= 0)) break;
+  }
+
+  for (const phase of Object.values(activeTwitchPhases)) {
+    if (phase) phase.endTime = Math.max(phase.endTime, time);
   }
 
   const outcome = config.evaluator.evaluate(aircraft, frames, decisions, turnsRun);
@@ -222,16 +435,30 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
     if (ship.airframe) airframes[ship.id] = ship.airframe;
   }
 
-  return MatchReplaySchema.parse({
+  const replay = MatchReplaySchema.parse({
     id: config.id,
-    schemaVersion: bodyTicks.length > 0 ? 4 : 3,
+    schemaVersion: replaySchemaVersion({ bodyTicks, agentPhases }),
     turnDuration: config.turnDuration,
     frameDt: config.frameDt,
     frames,
     agents,
     decisions,
     ...(bodyTicks.length > 0 ? { bodyTicks } : {}),
+    ...(agentPhases.length > 0 ? { agentPhases } : {}),
     outcome,
     ...(Object.keys(airframes).length > 0 ? { airframes } : {}),
   });
+  config.onProgress?.({
+    phase: "complete",
+    turn: turnsRun,
+    maxTurns: config.maxTurns,
+    time,
+    replay,
+  });
+  return replay;
+}
+
+function clampPlaybackTimeScale(value: number): number {
+  if (!Number.isFinite(value)) return 0.35;
+  return Math.max(0.05, Math.min(1, value));
 }

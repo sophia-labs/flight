@@ -11,15 +11,15 @@ import { minimalEvaluator } from "../eval/outcome";
 import type { Airframe, MatchReplay, Vec3 } from "../protocol/schema";
 import { compileAirframe, defaultAirframe } from "../sim/airframe";
 import { fullFuelByTank } from "../sim/mass";
-import { length, normalize, quatLookRotation, scale, sub, vec3 } from "../sim/math";
-import type { AircraftState, FlightMetrics } from "../sim/types";
+import { add, length, normalize, quatLookRotation, scale, sub, vec3 } from "../sim/math";
+import type { AircraftState, FlightMetrics, WeaponStation } from "../sim/types";
 import { runMatch } from "./match";
 import type { MatchConfig } from "./config";
 
 export const TURN_DURATION = 2.4;
 export const FRAME_DT = 0.16;
 
-export type ScenarioRunKind = "duel" | "stern-gun" | "balloon";
+export type ScenarioRunKind = "duel" | "stern-gun" | "balloon" | "balloon-hard";
 
 export interface ScenarioRunConfig {
   kind: ScenarioRunKind;
@@ -206,7 +206,7 @@ export function createDuelDogfightStartAircraft(
 // the scripted Pilot's nearest-enemy Observation, and resolveWeapons all treat it as an ordinary
 // contact with health — the Body acquires + engages it through the exact combat stack. It is fat
 // (perceivedRadiusM ⇒ a big glyph from far away) and fragile (low health ⇒ one good burst kills it).
-export function createBalloonTarget(position: Vec3): AircraftState {
+export function createBalloonTarget(position: Vec3, heatSignatureOverride?: number): AircraftState {
   return {
     id: "balloon",
     callsign: "Red Balloon",
@@ -224,6 +224,97 @@ export function createBalloonTarget(position: Vec3): AircraftState {
     fuelKg: 0,
     static: true,
     perceivedRadiusM: 42, // ~84 m apparent span: a fat '@' glyph well before gun range
+    // A "cold" gun balloon omits this (stays invisible to IR); a thermal/flare balloon sets it so an
+    // AIM-9 can lock it. Default-undefined keeps every existing balloon scenario byte-identical.
+    ...(heatSignatureOverride !== undefined ? { heatSignatureOverride } : {}),
+  };
+}
+
+// An AIM-9M-class heat-seeking rail on the nose boresight, one round. Mirrors the catalog F-14's missile
+// station shape so resolveWeapons' firstLoadedMissileStation path launches it on the ordinary trigger —
+// no new fire contract. count=1 means ammoForStation reads 1 without seeding weaponAmmo.
+function aim9Station(): WeaponStation {
+  return {
+    id: "aim-9m-rail",
+    kind: "missile",
+    guidance: "heat-seeking",
+    count: 1,
+    caliberMm: 127,
+    localOffset: vec3(0, -0.4, -0.6),
+    localForward: vec3(0, 0, -1),
+  };
+}
+
+// Bolt a missile station onto a compiled aircraft (the default model carries none). With one loaded, a
+// trigger pull launches the AIM-9 instead of a bullet (resolveWeapons), reusing the existing fire path.
+function armWithMissile(state: AircraftState): AircraftState {
+  return {
+    ...state,
+    model: { ...state.model, weaponStations: [...state.model.weaponStations, aim9Station()] },
+  };
+}
+
+// Holds the trigger while flying straight — fires the loaded AIM-9 as soon as cooldown allows. A TEST
+// FIXTURE for the missile-harness proof (deterministic, no creds), NOT live flight behaviour.
+export const missileTriggerController: Controller = async () => ({
+  action: { kind: "raw-stick", reason: "fox-2", pitch: 0, roll: 0, yaw: 0, throttle: 0.9, trigger: true },
+  rationale: "fox-2: hold trigger to launch the loaded heat-seeker",
+});
+
+// v0.10.x basic combat harness: the 5 km heat-seeker shot the gun engagement geometrically cannot make.
+// Blue starts ~5 km dead ahead of a HOT (thermal/flare) balloon at co-altitude, carrying one AIM-9M. At
+// 5 km the balloon's IR signal (heat/rangeKm^2 = 10/25 = 0.4) clears the seeker min-lock (0.2), so a
+// trigger pull launches a missile that PN-guides to the kill.
+export function createMissileBalloonScenarioAircraft(blueAirframe: Airframe = defaultAirframe()): AircraftState[] {
+  const blueStart = vec3(0, 1_300, 5_000);
+  const balloonAt = vec3(0, 1_300, 0);
+  const blueVelocity = scale(normalize(sub(balloonAt, blueStart)), 205);
+  const blue = compileAirframe(blueAirframe);
+  const shooter: AircraftState = {
+    id: "blue-1",
+    callsign: "Blue Kite",
+    team: "blue",
+    color: "#4da3ff",
+    position: blueStart,
+    velocity: blueVelocity,
+    orientation: quatLookRotation(blueVelocity),
+    controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.9, trigger: false },
+    health: 100,
+    weaponCooldown: 0,
+    model: blue.model,
+    metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: blueStart.y },
+    angularVelocity: vec3(0, 0, 0),
+    fuelKg: blue.model.fuelCapacityKg,
+    fuelByTankKg: fullFuelByTank(blue.model),
+    devices: blue.devices,
+    airframe: blueAirframe,
+  };
+  return [armWithMissile(shooter), createBalloonTarget(balloonAt, 10)];
+}
+
+// Scripted proof of the missile harness: blue flies straight and holds the trigger; the AIM-9 locks the
+// hot balloon and kills it. Deterministic (no creds) — proves launch + IR lock + intercept end to end.
+export function buildMissileBalloonMatchConfig(turnCount = 8): MatchConfig {
+  return {
+    id: "missile-balloon-proof-001",
+    turnDuration: TURN_DURATION,
+    frameDt: FRAME_DT,
+    maxTurns: turnCount,
+    decisionTimeoutMs: 5_000,
+    initialAircraft: createMissileBalloonScenarioAircraft(),
+    sensor: perfectSensor,
+    evaluator: minimalEvaluator,
+    fallback: pursuitFallback,
+    agents: {
+      "blue-1": {
+        meta: { id: "blue-1", kind: "scripted", label: "missile shooter (scripted trigger)" },
+        controller: missileTriggerController,
+      },
+      balloon: {
+        meta: { id: "balloon", kind: "scripted", label: "balloon (static, hot)" },
+        controller: staticController,
+      },
+    },
   };
 }
 
@@ -272,6 +363,125 @@ export function createBalloonScenarioAircraft(blueAirframe: Airframe = defaultAi
     },
     createBalloonTarget(balloonAt),
   ];
+}
+
+// Longer, off-axis balloon intercept for the motor-program + twitch Body loop. Blue starts farther out
+// and pointed slightly right of the target, so the slow planner has to fly a smooth intercept before
+// the held weapons_free guard hands off to the twitch Body near the guns cone.
+export function createChallengingBalloonScenarioAircraft(blueAirframe: Airframe = defaultAirframe()): AircraftState[] {
+  const blueStart = vec3(-5_250, 1_520, 3_650);
+  const balloonAt = vec3(-760, 1_235, 240);
+  const toBalloon = sub(balloonAt, blueStart);
+  const offsetAim = add(toBalloon, vec3(720, 0, 0));
+  const blueVelocity = scale(normalize(offsetAim), 168);
+
+  const blue = compileAirframe(blueAirframe);
+  return [
+    {
+      id: "blue-1",
+      callsign: "Blue Kite",
+      team: "blue",
+      color: "#4da3ff",
+      position: blueStart,
+      velocity: blueVelocity,
+      orientation: quatLookRotation(blueVelocity),
+      controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.94, trigger: false },
+      health: 100,
+      weaponCooldown: 0.2,
+      model: blue.model,
+      metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: blueStart.y },
+      angularVelocity: vec3(0, 0, 0),
+      fuelKg: blue.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(blue.model),
+      devices: blue.devices,
+      airframe: blueAirframe,
+    },
+    createBalloonTarget(balloonAt),
+  ];
+}
+
+// v0.10.x agent-facing combat: a HOT (IR) balloon and Blue carrying an AIM-9, but harder than a turn-1
+// snapshot — Blue starts ~8.5 km out with the balloon ~35 deg off the nose (OUTSIDE the 38 deg seeker
+// cone), so the planner must TURN to bring it into the seeker AND CLOSE inside the ~6.3 km lock range
+// (heat=8) before the FOX-2 sear (match.ts) can release. A gun kill here is geometrically hopeless
+// (would-hit=NEVER); the heat-seeker is the answer, but the planner has to orient and set it up first.
+export function createChallengingMissileScenarioAircraft(blueAirframe: Airframe = defaultAirframe()): AircraftState[] {
+  const balloonAt = vec3(-760, 1_235, 240);
+  const blueStart = vec3(-6_900, 1_640, 6_150); // ~8.5 km out
+  const dir = normalize(sub(balloonAt, blueStart));
+  // Rotate the nose ~35 deg off the target in the horizontal plane so it starts outside the seeker cone.
+  const yaw = (35 * Math.PI) / 180;
+  const heading = vec3(
+    dir.x * Math.cos(yaw) - dir.z * Math.sin(yaw),
+    dir.y,
+    dir.x * Math.sin(yaw) + dir.z * Math.cos(yaw),
+  );
+  const blueVelocity = scale(heading, 195);
+  const blue = compileAirframe(blueAirframe);
+  const shooter: AircraftState = {
+    id: "blue-1",
+    callsign: "Blue Kite",
+    team: "blue",
+    color: "#4da3ff",
+    position: blueStart,
+    velocity: blueVelocity,
+    orientation: quatLookRotation(blueVelocity),
+    controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.9, trigger: false },
+    health: 100,
+    weaponCooldown: 0,
+    model: blue.model,
+    metrics: { ...INITIAL_METRICS, airspeed: length(blueVelocity), altitude: blueStart.y },
+    angularVelocity: vec3(0, 0, 0),
+    fuelKg: blue.model.fuelCapacityKg,
+    fuelByTankKg: fullFuelByTank(blue.model),
+    devices: blue.devices,
+    airframe: blueAirframe,
+  };
+  return [armWithMissile(shooter), createBalloonTarget(balloonAt, 8)];
+}
+
+// Holds a straight motor-program tape with a weapons_free guard armed — the no-twitch FOX-2 path. The
+// missile sear (match.ts) releases the AIM-9 when the IR lock goes live. Test fixture, no creds.
+export const motorProgramArmController: Controller = async () => ({
+  action: {
+    kind: "motor-program",
+    durationMs: 2_500,
+    sampleDtMs: 50,
+    samples: [
+      { tMs: 0, pitch: 0, roll: 0, yaw: 0, throttle: 0.9, trigger: false },
+      { tMs: 2_500, pitch: 0, roll: 0, yaw: 0, throttle: 0.9, trigger: false },
+    ],
+    heldActions: [{ kind: "weapons_free", condition: "ir_lock" }],
+  },
+  rationale: "fox-2 armed; sear fires on IR lock",
+});
+
+// Deterministic proof of the AGENT-FACING missile path: a motor-program planner that arms weapons_free,
+// flown with no reflex Body, fires the FOX-2 via the IR sear and pops the hot balloon. Uses the EASY
+// dead-ahead scenario so the straight-flying fixture controller acquires the lock without maneuvering
+// (the harder createChallengingMissileScenarioAircraft is for the live planner that can turn).
+export function buildMissileSearMatchConfig(turnCount = 6): MatchConfig {
+  return {
+    id: "missile-sear-proof-001",
+    turnDuration: TURN_DURATION,
+    frameDt: FRAME_DT,
+    maxTurns: turnCount,
+    decisionTimeoutMs: 5_000,
+    initialAircraft: createMissileBalloonScenarioAircraft(),
+    sensor: perfectSensor,
+    evaluator: minimalEvaluator,
+    fallback: pursuitFallback,
+    agents: {
+      "blue-1": {
+        meta: { id: "blue-1", kind: "scripted", label: "motor-program FOX-2 (sear)" },
+        controller: motorProgramArmController,
+      },
+      balloon: {
+        meta: { id: "balloon", kind: "scripted", label: "balloon (static, hot)" },
+        controller: staticController,
+      },
+    },
+  };
 }
 
 // The all-scripted duel as a MatchConfig: blue pursues, red flies defensively. Reproduces the v0.1.0
@@ -362,11 +572,29 @@ export function buildScenarioMatchConfig(blueAirframe: Airframe, scenario: Scena
   if (scenario.kind === "balloon") {
     return buildBalloonMatchConfig(turnCount, blueAirframe);
   }
+  if (scenario.kind === "balloon-hard") {
+    const config = scriptedConfig(createChallengingBalloonScenarioAircraft(blueAirframe), turnCount);
+    return {
+      ...config,
+      id: "hard-balloon-intercept-001",
+      agents: {
+        "blue-1": config.agents["blue-1"],
+        balloon: {
+          meta: { id: "balloon", kind: "scripted", label: "balloon (static)" },
+          controller: staticController,
+        },
+      },
+    };
+  }
   return buildAirframeMatchConfig(blueAirframe, turnCount);
 }
 
-export function generateScenarioMatch(blueAirframe: Airframe, scenario: ScenarioRunConfig): Promise<MatchReplay> {
-  return runMatch(buildScenarioMatchConfig(blueAirframe, scenario));
+export function generateScenarioMatch(
+  blueAirframe: Airframe,
+  scenario: ScenarioRunConfig,
+  onProgress?: (progress: import("./config").MatchProgress) => void,
+): Promise<MatchReplay> {
+  return runMatch({ ...buildScenarioMatchConfig(blueAirframe, scenario), onProgress });
 }
 
 function normalizedTurnCount(turnCount: number): number {

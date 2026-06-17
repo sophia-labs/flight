@@ -2,24 +2,30 @@ import { OrbitControls } from "@react-three/drei";
 import { Canvas } from "@react-three/fiber";
 import {
   BadgeCheck,
+  Bot,
   Camera,
   Captions,
+  Clock3,
   Film,
   Gauge,
+  MessageCircle,
   Orbit,
   Pause,
   Plane,
   Play,
   RotateCcw,
+  SendHorizontal,
   SlidersHorizontal,
   StepBack,
   StepForward,
   UserRound,
   Volume2,
   Wrench,
+  Zap,
 } from "lucide-react";
-import { useMemo, type ComponentType } from "react";
-import type { AircraftSnapshot, MatchReplay, ReplayFrame } from "../protocol/schema";
+import { useMemo, useState, type ComponentType } from "react";
+import type { AgentPhaseTrace, AircraftSnapshot, MatchReplay, ReplayFrame } from "../protocol/schema";
+import { activeAgentPhase, countAgentPhases } from "../replay/agentPhases";
 import { airframeReport, compileAirframe } from "../sim/airframe";
 import { aircraftArchetypes, type AircraftArchetype } from "../sim/aircraftCatalog";
 import { buildPerformanceEnvelope } from "../sim/performanceEnvelope";
@@ -27,6 +33,10 @@ import {
   performancePresentation,
   type PerformancePresentation,
 } from "../studio/performancePresentation";
+import {
+  DIRECT_DEEPSEEK_PLANNER_MODEL,
+  DIRECT_DEEPSEEK_TWITCH_MODEL,
+} from "../studio/schema";
 import type {
   AircraftBuild,
   PilotProfile,
@@ -73,6 +83,11 @@ interface PlaybackControls {
 interface ScenarioProgress {
   label: string;
   percent: number;
+  turn?: number;
+  maxTurns?: number;
+  actionKind?: string;
+  agentLabel?: string;
+  rationale?: string;
 }
 
 export function StudioScreen({
@@ -157,6 +172,10 @@ export function StudioScreen({
     [activeAircraft, activePilot.id],
   );
   const showFlight = Boolean((mode === "flight" || mode === "replay") && replay && frame);
+  const activePhase = useMemo(
+    () => (replay && frame ? activeAgentPhase(replay, pilotId, frame.time) : undefined),
+    [frame, pilotId, replay],
+  );
   const palette = activeArchetype?.palette ?? { base: "#4da3ff", trim: "#f2c94c" };
   const activeLoadout = defaultLoadout(activePilot);
   const stageTitle = mode === "crew" ? activeLoadout.callsign : activeAircraft.name;
@@ -237,6 +256,8 @@ export function StudioScreen({
         {showFlight && replay && frame ? (
           <SurfaceHud frame={frame} replay={replay} pilotId={pilotId} visible={cameraMode === "cabin" && hudOn} />
         ) : null}
+
+        {showFlight && frame ? <AgentPhaseBadge phase={activePhase} time={frame.time} /> : null}
       </section>
 
       <aside className="studio-panel" aria-label="VTuber Flight Studio">
@@ -313,6 +334,7 @@ export function StudioScreen({
             playback={playback}
             pilotId={pilotId}
             replay={replay}
+            activePhase={activePhase}
             soundOn={soundOn}
             voiceOn={voiceOn}
           />
@@ -557,6 +579,27 @@ function ScenarioPanel({
 }) {
   const patchScenario = <K extends keyof StudioScenarioConfig>(key: K, value: StudioScenarioConfig[K]) =>
     onUpdateScenario((scenario) => ({ ...scenario, [key]: value }));
+  const motorProgram = activeScenario.controlMode === "motor-program";
+  const setControlMode = (value: StudioScenarioConfig["controlMode"]) =>
+    onUpdateScenario((scenario) => ({
+      ...scenario,
+      controlMode: value,
+      ...(value === "motor-program"
+        ? {
+            kind: scenario.kind === "duel" ? "balloon-hard" : scenario.kind,
+            pilotModel:
+              scenario.pilotModel === "scripted-body-pilot"
+                ? DIRECT_DEEPSEEK_PLANNER_MODEL
+                : scenario.pilotModel,
+            twitchBodyModel:
+              scenario.twitchBodyModel === "scripted-fixed-wing-body"
+                ? DIRECT_DEEPSEEK_TWITCH_MODEL
+                : scenario.twitchBodyModel,
+            turnCount: Math.max(4, scenario.turnCount),
+            cameraMode: "pilot-cinema",
+          }
+        : {}),
+    }));
 
   return (
     <>
@@ -575,9 +618,22 @@ function ScenarioPanel({
         </div>
         <div className="scenario-summary-grid">
           <ScenarioMetric label="Aircraft" value={activeAircraft.name} />
-          <ScenarioMetric label="Pilot" value={labelFor(activeScenario.pilotModel)} />
-          <ScenarioMetric label="Body" value={labelFor(activeScenario.bodyModel)} />
+          <ScenarioMetric label="Loop" value={labelFor(activeScenario.controlMode)} />
+          <ScenarioMetric label={motorProgram ? "Planner" : "Pilot"} value={labelFor(activeScenario.pilotModel)} />
+          <ScenarioMetric
+            label={motorProgram ? "Twitch" : "Body"}
+            value={labelFor(motorProgram ? activeScenario.twitchBodyModel : activeScenario.bodyModel)}
+          />
           <ScenarioMetric label="Turns" value={String(activeScenario.turnCount)} />
+          {motorProgram ? (
+            <ScenarioMetric
+              label="Tape"
+              value={`${(activeScenario.motorProgramTurnMs / 1000).toFixed(1)}s / ${activeScenario.motorProgramSampleMs}ms`}
+            />
+          ) : null}
+          {motorProgram ? (
+            <ScenarioMetric label="Slow" value={`${activeScenario.twitchTimeScale.toFixed(2)}x`} />
+          ) : null}
         </div>
       </section>
 
@@ -586,29 +642,68 @@ function ScenarioPanel({
           <span>Setup</span>
         </div>
         <OptionRow
+          label="Loop"
+          selected={activeScenario.controlMode}
+          options={SCENARIO_CONTROL_OPTIONS}
+          onSelect={setControlMode}
+        />
+        <OptionRow
           label="Start"
           selected={activeScenario.kind}
           options={SCENARIO_KIND_OPTIONS}
           onSelect={(value) => patchScenario("kind", value)}
         />
         <OptionRow
-          label="Pilot"
+          label={motorProgram ? "Planner" : "Pilot"}
           selected={activeScenario.pilotModel}
           options={SCENARIO_PILOT_OPTIONS}
           onSelect={(value) => patchScenario("pilotModel", value)}
         />
-        <OptionRow
-          label="Body"
-          selected={activeScenario.bodyModel}
-          options={SCENARIO_BODY_OPTIONS}
-          onSelect={(value) => patchScenario("bodyModel", value)}
-        />
+        {motorProgram ? (
+          <OptionRow
+            label="Twitch"
+            selected={activeScenario.twitchBodyModel}
+            options={SCENARIO_TWITCH_BODY_OPTIONS}
+            onSelect={(value) => patchScenario("twitchBodyModel", value)}
+          />
+        ) : (
+          <OptionRow
+            label="Body"
+            selected={activeScenario.bodyModel}
+            options={SCENARIO_BODY_OPTIONS}
+            onSelect={(value) => patchScenario("bodyModel", value)}
+          />
+        )}
         <OptionRow
           label="Turns"
           selected={String(activeScenario.turnCount)}
           options={SCENARIO_TURN_OPTIONS}
           onSelect={(value) => patchScenario("turnCount", Number(value))}
         />
+        {motorProgram ? (
+          <OptionRow
+            label="Tape"
+            selected={String(activeScenario.motorProgramTurnMs)}
+            options={SCENARIO_MOTOR_TURN_OPTIONS}
+            onSelect={(value) => patchScenario("motorProgramTurnMs", Number(value))}
+          />
+        ) : null}
+        {motorProgram ? (
+          <OptionRow
+            label="Step"
+            selected={String(activeScenario.motorProgramSampleMs)}
+            options={SCENARIO_SAMPLE_OPTIONS}
+            onSelect={(value) => patchScenario("motorProgramSampleMs", Number(value))}
+          />
+        ) : null}
+        {motorProgram ? (
+          <OptionRow
+            label="Slow"
+            selected={String(activeScenario.twitchTimeScale)}
+            options={SCENARIO_SLOWMO_OPTIONS}
+            onSelect={(value) => patchScenario("twitchTimeScale", Number(value))}
+          />
+        ) : null}
         <OptionRow
           label="Camera"
           selected={activeScenario.cameraMode}
@@ -631,6 +726,16 @@ function ScenarioPanel({
             <i>
               <span style={{ width: `${Math.round(progress.percent * 100)}%` }} />
             </i>
+            {progress.turn !== undefined ? (
+              <div className="scenario-progress-detail">
+                {progress.actionKind ? (
+                  <span>{progress.agentLabel ?? "agent"} → {progress.actionKind}</span>
+                ) : null}
+                {progress.rationale ? (
+                  <small>{progress.rationale.slice(0, 120)}{progress.rationale.length > 120 ? "…" : ""}</small>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
         {error ? <p className="scenario-error">{error}</p> : null}
@@ -644,6 +749,18 @@ function ScenarioMetric({ label, value }: { label: string; value: string }) {
     <div>
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function AgentPhaseBadge({ phase, time }: { phase?: AgentPhaseTrace; time: number }) {
+  const mode = phase?.mode;
+  const Icon = mode === "twitch" ? Zap : mode === "body" ? Bot : mode === "planner" ? Clock3 : Gauge;
+  return (
+    <div className={`agent-phase-badge${mode ? ` phase-${mode}` : ""}`}>
+      <Icon size={16} />
+      <span>{mode ? labelFor(mode) : "Replay"}</span>
+      <strong>{phase?.timeScale ? `${phase.timeScale.toFixed(2)}x` : `${time.toFixed(1)}s`}</strong>
     </div>
   );
 }
@@ -939,6 +1056,7 @@ function OptionRow<T extends string>({
 }
 
 function ReplayPanel({
+  activePhase,
   cameraMode,
   captionsOn,
   frame,
@@ -954,6 +1072,7 @@ function ReplayPanel({
   soundOn,
   voiceOn,
 }: {
+  activePhase?: AgentPhaseTrace;
   cameraMode: CameraMode;
   captionsOn: boolean;
   frame?: ReplayFrame;
@@ -1079,6 +1198,7 @@ function ReplayPanel({
         </div>
       </section>
 
+      <AgentModePanel replay={replay} pilotId={pilotId} activePhase={activePhase} />
       <MatchStats replay={replay} pilotId={pilotId} />
       <BodyPanel replay={replay} frame={frame} pilotId={pilotId} />
       <TranscriptPanel
@@ -1087,9 +1207,199 @@ function ReplayPanel({
         pilotId={pilotId}
         onSeek={(position) => playback.setPosition(position, false)}
       />
+      <TalkToPilotPanel replay={replay} pilotId={pilotId} focusTime={frame.time} />
       <StatusPanel frame={frame} />
       <ControlsPanel frame={frame} />
     </>
+  );
+}
+
+interface DebriefTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface DebriefResponsePayload {
+  reply: string;
+  pilotLabel: string;
+  scripted: boolean;
+  time: number;
+  grounding?: { turns?: number; overshootTurn?: number };
+}
+
+// "Talk to pilot" — a toggle-gated, grounded debrief chat over the active replay. It calls
+// POST /api/scenario/debrief with the running conversation; the pilot answers from replay evidence
+// only. Self-contained state (no App-level wiring) so it's additive and reversible. Mirrors the
+// fetch convention used by /api/scenario/run in App.tsx.
+function TalkToPilotPanel({
+  focusTime,
+  pilotId,
+  replay,
+}: {
+  focusTime: number;
+  pilotId: string;
+  replay: MatchReplay;
+}) {
+  const [open, setOpen] = useState(false);
+  const [turns, setTurns] = useState<DebriefTurn[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pilotLabel, setPilotLabel] = useState<string | null>(null);
+
+  const pilotName = pilotLabel ?? replay.agents?.find((a) => a.id === pilotId)?.label ?? pilotId;
+
+  async function send(message: string) {
+    const text = message.trim();
+    if (!text || busy) return;
+    const history: DebriefTurn[] = [...turns, { role: "user", content: text }];
+    setTurns(history);
+    setDraft("");
+    setError(null);
+    setBusy(true);
+    try {
+      const response = await fetch("/api/scenario/debrief", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ replay, pilotId, time: focusTime, messages: history }),
+      });
+      const payload = (await response.json().catch(() => undefined)) as
+        | (DebriefResponsePayload & { error?: string })
+        | undefined;
+      if (!response.ok || !payload || typeof payload.reply !== "string") {
+        const reason =
+          payload && typeof payload.error === "string"
+            ? payload.error
+            : `debrief request failed (${response.status})`;
+        throw new Error(reason);
+      }
+      if (payload.pilotLabel) setPilotLabel(payload.pilotLabel);
+      setTurns((prev) => [...prev, { role: "assistant", content: payload.reply }]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      // Drop the optimistic user turn back into the draft so the question isn't lost.
+      setTurns((prev) => prev.slice(0, -1));
+      setDraft(text);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <section className="studio-section">
+        <div className="studio-section-title">
+          <span>Talk to pilot</span>
+        </div>
+        <button type="button" className="studio-quiet-button" onClick={() => setOpen(true)}>
+          <MessageCircle size={15} /> Debrief {pilotName}
+        </button>
+        <p className="studio-muted">Ask the pilot about this flight. Grounded in the replay at t={focusTime.toFixed(1)}s.</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="panel talk-panel" aria-label="Talk to pilot">
+      <div className="talk-head">
+        <h2>Talk to pilot</h2>
+        <button type="button" className="studio-quiet-button" onClick={() => setOpen(false)}>
+          Close
+        </button>
+      </div>
+      <p className="talk-grounding">
+        {pilotName} · grounded on replay {replay.id} @ t={focusTime.toFixed(1)}s
+      </p>
+      <div className="talk-log">
+        {turns.length === 0 ? (
+          <p className="studio-muted">No questions yet. Ask how the flight went, or about a specific turn.</p>
+        ) : (
+          turns.map((turn, index) => (
+            <div key={index} className={`talk-turn talk-${turn.role}`}>
+              <span className="talk-speaker">{turn.role === "user" ? "You" : pilotName}</span>
+              <p>{turn.content}</p>
+            </div>
+          ))
+        )}
+        {busy ? <p className="studio-muted talk-pending">Pilot is reviewing the tape…</p> : null}
+      </div>
+      {error ? <p className="scenario-error">{error}</p> : null}
+      <form
+        className="talk-compose"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void send(draft);
+        }}
+      >
+        <input
+          type="text"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          placeholder={turns.length === 0 ? "How did that flight go?" : "Ask a follow-up…"}
+          aria-label="Message to pilot"
+          disabled={busy}
+        />
+        <button type="submit" className="studio-primary-button" disabled={busy || !draft.trim()}>
+          <SendHorizontal size={15} /> {busy ? "…" : "Ask"}
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function AgentModePanel({
+  activePhase,
+  pilotId,
+  replay,
+}: {
+  activePhase?: AgentPhaseTrace;
+  pilotId: string;
+  replay: MatchReplay;
+}) {
+  const plannerCount = countAgentPhases(replay, pilotId, "planner");
+  const twitchCount = countAgentPhases(replay, pilotId, "twitch");
+  const bodyCount =
+    countAgentPhases(replay, pilotId, "body") ||
+    (replay.bodyTicks ?? []).filter((tick) => tick.agentId === pilotId).length;
+  const activeLabel = activePhase ? labelFor(activePhase.mode) : "Unmarked";
+  const model = activePhase?.model ?? replay.agents?.find((agent) => agent.id === pilotId)?.label ?? pilotId;
+
+  return (
+    <section className="panel agent-mode-panel" aria-label="Agent mode">
+      <div className="agent-mode-head">
+        <h2>Agent Mode</h2>
+        <span className={`agent-mode-pill mode-${activePhase?.mode ?? "planner"}`}>{activeLabel}</span>
+      </div>
+      <div className="metrics">
+        <ModeMetric icon={Clock3} label="Planner" value={String(plannerCount)} />
+        <ModeMetric icon={Zap} label="Twitch" value={String(twitchCount)} />
+        <ModeMetric icon={Bot} label="Body" value={String(bodyCount)} />
+        <ModeMetric
+          icon={Gauge}
+          label="Scale"
+          value={activePhase?.timeScale ? `${activePhase.timeScale.toFixed(2)}x` : "1x"}
+        />
+      </div>
+      <p className="agent-mode-model">{model}</p>
+    </section>
+  );
+}
+
+function ModeMetric({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: ComponentType<{ size?: number }>;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="metric mode-metric">
+      <Icon size={15} />
+      <p className="metric-label">{label}</p>
+      <div className="metric-value">{value}</div>
+    </div>
   );
 }
 
@@ -1300,14 +1610,49 @@ const COMMS_OPTIONS = ["open-cockpit", "throat-mic", "broadcast-rig"] as const;
 const GLOVE_OPTIONS = ["none", "fingerless", "flight"] as const;
 const MATERIAL_OPTIONS = ["studio-safe", "vrm", "diagnostic"] as const;
 const EXPRESSION_OPTIONS = ["neutral", "focused", "excited", "strained"] as const;
-const SCENARIO_KIND_OPTIONS = ["duel", "stern-gun", "balloon"] as const satisfies readonly StudioScenarioConfig["kind"][];
-const SCENARIO_PILOT_OPTIONS = ["scripted-body-pilot", "deepseek/deepseek-v4-flash"] as const satisfies readonly StudioScenarioConfig["pilotModel"][];
-const SCENARIO_BODY_OPTIONS = ["scripted-fixed-wing-body", "deepseek/deepseek-v4-flash"] as const satisfies readonly StudioScenarioConfig["bodyModel"][];
-const SCENARIO_TURN_OPTIONS: readonly string[] = ["1", "2", "4", "8"];
+const SCENARIO_CONTROL_OPTIONS = ["body-pilot", "motor-program"] as const satisfies readonly StudioScenarioConfig["controlMode"][];
+const SCENARIO_KIND_OPTIONS = ["duel", "stern-gun", "balloon", "balloon-hard"] as const satisfies readonly StudioScenarioConfig["kind"][];
+const SCENARIO_PILOT_OPTIONS = [
+  "scripted-body-pilot",
+  DIRECT_DEEPSEEK_PLANNER_MODEL,
+  DIRECT_DEEPSEEK_TWITCH_MODEL,
+  "deepseek/deepseek-v4-flash",
+] as const satisfies readonly StudioScenarioConfig["pilotModel"][];
+const SCENARIO_BODY_OPTIONS = [
+  "scripted-fixed-wing-body",
+  DIRECT_DEEPSEEK_TWITCH_MODEL,
+  "deepseek/deepseek-v4-flash",
+] as const satisfies readonly StudioScenarioConfig["bodyModel"][];
+const SCENARIO_TWITCH_BODY_OPTIONS = [
+  DIRECT_DEEPSEEK_TWITCH_MODEL,
+  "deepseek/deepseek-v4-flash",
+  "scripted-fixed-wing-body",
+] as const satisfies readonly StudioScenarioConfig["twitchBodyModel"][];
+const SCENARIO_TURN_OPTIONS: readonly string[] = ["1", "2", "4", "8", "12"];
+const SCENARIO_MOTOR_TURN_OPTIONS: readonly string[] = ["1500", "2500", "3500"];
+const SCENARIO_SAMPLE_OPTIONS: readonly string[] = ["50", "75", "100"];
+const SCENARIO_SLOWMO_OPTIONS: readonly string[] = ["0.25", "0.35", "0.5", "1"];
 const SCENARIO_CAMERA_OPTIONS = ["orbit", "cabin", "pilot-cinema"] as const satisfies readonly StudioScenarioConfig["cameraMode"][];
 
 const LABEL_OVERRIDES: Record<string, string> = {
+  "body-pilot": "Body Pilot",
+  "motor-program": "Motor Tape",
+  planner: "Planner",
+  body: "Body",
+  twitch: "Twitch",
+  "balloon-hard": "Hard Balloon",
   "scripted-body-pilot": "Scripted Pilot",
   "scripted-fixed-wing-body": "Scripted Body",
+  "deepseek-v4-pro": "DeepSeek V4 Pro",
+  "deepseek-v4-flash": "DeepSeek V4 Flash",
   "deepseek/deepseek-v4-flash": "DeepSeek V4 Flash",
+  "1500": "1.5s",
+  "2500": "2.5s",
+  "3500": "3.5s",
+  "50": "50ms",
+  "75": "75ms",
+  "100": "100ms",
+  "0.25": "0.25x",
+  "0.35": "0.35x",
+  "0.5": "0.5x",
 };

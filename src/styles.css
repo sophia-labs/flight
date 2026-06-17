@@ -387,6 +387,64 @@ h2 {
   gap: 10px;
 }
 
+.agent-mode-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-mode-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-mode-head h2 {
+  margin: 0;
+}
+
+.agent-mode-pill {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: #d7e5ea;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.agent-mode-pill.mode-twitch {
+  color: #f2c94c;
+  background: rgba(242, 201, 76, 0.14);
+}
+
+.agent-mode-pill.mode-body {
+  color: #58d38c;
+  background: rgba(88, 211, 140, 0.16);
+}
+
+.mode-metric {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 2px 6px;
+}
+
+.mode-metric svg {
+  grid-row: 1 / span 2;
+  color: #9fb2bd;
+}
+
+.agent-mode-model {
+  margin: 0;
+  overflow: hidden;
+  color: #8fa0a6;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .body-panel-head {
   display: flex;
   align-items: center;
@@ -522,6 +580,55 @@ h2 {
   font-size: 0.9rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agent-phase-badge {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: 18px minmax(0, auto) auto;
+  align-items: center;
+  gap: 8px;
+  max-width: min(320px, calc(100% - 32px));
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(8, 14, 16, 0.66);
+  color: #eef3f5;
+  backdrop-filter: blur(10px);
+}
+
+.agent-phase-badge span,
+.agent-phase-badge strong {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-phase-badge span {
+  color: #cdd9e0;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.agent-phase-badge strong {
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-phase-badge.phase-twitch {
+  border-color: rgba(242, 201, 76, 0.38);
+  color: #f2c94c;
+  background: rgba(39, 28, 6, 0.7);
+}
+
+.agent-phase-badge.phase-body {
+  border-color: rgba(88, 211, 140, 0.34);
+  color: #58d38c;
 }
 
 .studio-panel {
@@ -911,6 +1018,29 @@ h2 {
   height: 100%;
   border-radius: inherit;
   background: #4da3ff;
+}
+
+.scenario-progress-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.scenario-progress-detail span {
+  font-size: 0.85em;
+  color: #a2b4c8;
+}
+
+.scenario-progress-detail small {
+  font-size: 0.78em;
+  color: #6f8296;
+  line-height: 1.35;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scenario-error {
@@ -1381,6 +1511,87 @@ h2 {
   font-weight: 800;
 }
 
+.talk-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.talk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.talk-head h2 {
+  margin: 0;
+}
+
+.talk-grounding {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.talk-log {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.talk-turn {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.17);
+}
+
+.talk-turn p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.talk-turn.talk-user {
+  background: rgba(77, 163, 255, 0.12);
+}
+
+.talk-speaker {
+  color: #dce6e9;
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.talk-pending {
+  font-style: italic;
+}
+
+.talk-compose {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.talk-compose input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+
+.talk-compose .studio-primary-button {
+  flex: 0 0 auto;
+}
+
 .transcript-panel {
   display: grid;
   gap: 10px;
@@ -1757,4 +1968,420 @@ h2 {
   .metrics {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Mission Control ──────────────────────────────────────────────── */
+
+.mission-control {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: #0a1018;
+  color: #c8d6e5;
+  font-family: "IBM Plex Mono", "SF Mono", "Fira Code", monospace;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+
+.mission-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.82em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6f8296;
+  flex-shrink: 0;
+}
+
+.mission-header-left,
+.mission-header-center,
+.mission-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mission-header-left { color: #f2c94c; }
+.mission-header-center { color: #4da3ff; }
+.mission-header-right { color: #83d4ff; }
+
+/* ── Core layout ────────────────────────────────────────────────── */
+
+.mission-core {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+}
+
+.mission-radar-area {
+  flex: 0 0 55%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.mission-log-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Radar Scope ────────────────────────────────────────────────── */
+
+.radar-scope {
+  position: relative;
+  width: min(420px, 42vw);
+  height: min(420px, 42vw);
+  border-radius: 50%;
+  background: radial-gradient(circle at center, #0d1520 0%, #0a1018 70%);
+  border: 2px solid rgba(77, 163, 255, 0.25);
+  box-shadow:
+    inset 0 0 60px rgba(77, 163, 255, 0.06),
+    0 0 40px rgba(77, 163, 255, 0.08);
+  overflow: hidden;
+}
+
+.radar-ring {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  border-radius: 50%;
+  border: 1px solid rgba(77, 163, 255, 0.1);
+}
+.ring-1 { width: 33%; height: 33%; }
+.ring-2 { width: 66%; height: 66%; }
+.ring-3 { width: 100%; height: 100%; border-color: rgba(77, 163, 255, 0.15); }
+
+.radar-crosshair {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 1px;
+  height: 100%;
+  background: rgba(77, 163, 255, 0.1);
+}
+.radar-crosshair::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: 1px;
+  top: 50%;
+  translate: 0 -50%;
+  background: rgba(77, 163, 255, 0.1);
+  /* second crosshair line already exists via the horizontal rule;
+     this pseudo handles the vertical → horizontal pair. */ 
+}
+/* Fix: the vertical line is .radar-crosshair itself; we need a horizontal too */
+.radar-scope::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(77, 163, 255, 0.1);
+  z-index: 0;
+}
+
+/* Aircraft dots */
+.radar-dot {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  translate: -50% -50%;
+  z-index: 2;
+}
+.blue-dot { background: #4da3ff; box-shadow: 0 0 10px #4da3ff, 0 0 20px rgba(77, 163, 255, 0.4); }
+.red-dot  { background: #ff6b61; box-shadow: 0 0 10px #ff6b61, 0 0 20px rgba(255, 107, 97, 0.4); }
+
+.dot-pulse {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  opacity: 0.5;
+  animation: dot-pulse 2s ease-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%   { transform: scale(1); opacity: 0.5; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+/* Sweep line */
+.radar-sweep {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 50%;
+  height: 1px;
+  background: linear-gradient(to right, rgba(77, 255, 150, 0.7), transparent);
+  transform-origin: left center;
+  animation: sweep-rotate 3s linear infinite;
+  animation-play-state: paused;
+  z-index: 3;
+}
+
+.radar-scope.sweeping .radar-sweep {
+  animation-play-state: running;
+}
+
+@keyframes sweep-rotate {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Turn counter */
+.radar-turn-counter {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  text-align: center;
+  z-index: 4;
+}
+
+.turn-label {
+  display: block;
+  font-size: 0.58em;
+  letter-spacing: 0.12em;
+  color: #4da3ff;
+  opacity: 0.7;
+  text-transform: uppercase;
+}
+
+.turn-value {
+  display: block;
+  font-size: 2.4em;
+  font-weight: 700;
+  line-height: 1;
+  color: #e8f0f8;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-value small {
+  font-size: 0.45em;
+  font-weight: 400;
+  color: #6f8296;
+}
+
+/* ── Decision Log ───────────────────────────────────────────────── */
+
+.decision-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.decision-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  color: #4f637a;
+  font-size: 0.85em;
+}
+
+.decision-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+  animation: card-slide-in 0.28s ease-out;
+  flex-shrink: 0;
+}
+
+@keyframes card-slide-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.decision-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.decision-team {
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.team-blue { color: #4da3ff; }
+.team-red  { color: #ff6b61; }
+
+.decision-turn {
+  font-size: 0.68em;
+  color: #4f637a;
+  font-variant-numeric: tabular-nums;
+}
+
+.decision-card-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78em;
+  color: #a2b4c8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+
+.decision-card-rationale {
+  margin: 0;
+  font-size: 0.76em;
+  color: #6f8296;
+  line-height: 1.4;
+}
+
+/* ── Body Tick Feed ─────────────────────────────────────────────── */
+
+.body-tick-feed {
+  max-height: 110px;
+  overflow-y: auto;
+  padding: 8px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.2);
+  font-family: "IBM Plex Mono", "SF Mono", "Fira Code", monospace;
+  font-size: 0.74em;
+  flex-shrink: 0;
+}
+
+.body-tick-line {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  padding: 1px 0;
+  line-height: 1.5;
+}
+
+.body-tick-time {
+  color: #4f637a;
+  font-variant-numeric: tabular-nums;
+  min-width: 54px;
+}
+
+.body-tick-status {
+  min-width: 52px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  font-size: 0.88em;
+}
+
+.body-tick-feel {
+  color: #6f8296;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Timeline ───────────────────────────────────────────────────── */
+
+.mission-timeline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  flex-shrink: 0;
+}
+
+.timeline-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  gap: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.timeline-segment {
+  flex: 1;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  transition: background 0.3s ease;
+}
+
+.timeline-segment.done {
+  background: #4da3ff;
+}
+
+.timeline-segment.current {
+  background: #4da3ff;
+  box-shadow: 0 0 8px rgba(77, 163, 255, 0.5);
+}
+
+.timeline-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: rgba(77, 163, 255, 0.18);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.timeline-pct {
+  font-size: 0.78em;
+  color: #4da3ff;
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+  text-align: right;
+  font-weight: 600;
+}
+
+/* ── Complete Flash ─────────────────────────────────────────────── */
+
+.mission-complete-flash {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 16, 24, 0.85);
+  z-index: 200;
+  animation: complete-fade-in 0.4s ease-out;
+}
+
+.mission-complete-flash span {
+  font-size: 2.2em;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: #59d894;
+  text-shadow: 0 0 40px rgba(89, 216, 148, 0.5);
+  animation: complete-pulse 0.6s ease-in-out infinite alternate;
+}
+
+@keyframes complete-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes complete-pulse {
+  from { opacity: 0.8; transform: scale(0.98); }
+  to   { opacity: 1; transform: scale(1.02); }
 }
