@@ -103,6 +103,20 @@ export const ReplayFrameSchema = z.object({
   projectiles: z.array(ProjectileSnapshotSchema).optional(),
 });
 
+// Replay-level agent state timeline. Frames remain pure physics snapshots; these spans annotate
+// which control loop owned an agent over a time interval so the game UI, transcript tooling, and
+// future coaching loops can inspect planner/twitch handoffs without inferring them from ticks.
+export const AgentPhaseTraceSchema = z.object({
+  agentId: z.string(),
+  turn: z.number().int().nonnegative(),
+  mode: z.enum(["planner", "body", "twitch"]),
+  startTime: z.number(),
+  endTime: z.number(),
+  timeScale: z.number().positive().optional(),
+  model: z.string().optional(),
+  reason: z.string().optional(),
+});
+
 // --- v0.2.0 agent contract: actions, observations, decisions, outcome ---
 
 // StickCommand is the LLM's structured-output shape (no discriminator; `reason` first so the
@@ -160,12 +174,38 @@ export const PilotIntentActionSchema = z.object({
   armedFire: z.boolean().optional(),
 });
 
+export const MotorProgramSampleSchema = z.object({
+  tMs: z.number().int().nonnegative(),
+  pitch: z.number().min(-1).max(1),
+  roll: z.number().min(-1).max(1),
+  yaw: z.number().min(-1).max(1),
+  throttle: z.number().min(0).max(1),
+  trigger: z.boolean().optional(),
+});
+
+export const MotorProgramHeldActionSchema = z.object({
+  kind: z.enum(["weapons_free", "abort_if", "recover_if"]),
+  condition: z.string().optional(),
+  coneDeg: z.number().positive().optional(),
+  rangeM: z.number().positive().optional(),
+  note: z.string().optional(),
+});
+
+export const MotorProgramActionSchema = z.object({
+  kind: z.literal("motor-program"),
+  durationMs: z.number().positive(),
+  sampleDtMs: z.number().positive(),
+  samples: z.array(MotorProgramSampleSchema).min(1),
+  heldActions: z.array(MotorProgramHeldActionSchema),
+});
+
 // Discriminated union: a per-kind ActionAdapter turns each intent into a ControlInput per frame.
 export const ActionSchema = z.discriminatedUnion("kind", [
   RawStickActionSchema,
   SetpointActionSchema,
   FlightDirectorActionSchema,
   PilotIntentActionSchema,
+  MotorProgramActionSchema,
 ]);
 
 export const SelfPerceptSchema = z.object({
@@ -176,6 +216,9 @@ export const SelfPerceptSchema = z.object({
   health: z.number(),
   weaponCooldown: z.number(),
   stalled: z.boolean(),
+  // v0.10.x: a loaded heat-seeking missile (AIM-9 FOX-2) is available. Optional + only set when true so
+  // gun-only observations stay byte-identical.
+  missileLoaded: z.boolean().optional(),
 });
 
 // Ego-relative percept of one contact. The direction cosines are the dot products the
@@ -194,6 +237,9 @@ export const ContactPerceptSchema = z.object({
   // and existing observations stay byte-identical. The scripted Pilot uses it to open its trigger gate
   // to the balloon's generous weapon range/cone (a balloon is a big slow target you can shoot from far).
   balloon: z.boolean().optional(),
+  // v0.10.x: a heat-seeker fired now would acquire this contact (inside the IR seeker cone + lock range).
+  // Optional + only set when true. The planner uses it to take the FOX-2 instead of pressing to guns.
+  missileLock: z.boolean().optional(),
 });
 
 export const ObservationSchema = z.object({
@@ -203,6 +249,7 @@ export const ObservationSchema = z.object({
   time: z.number(),
   self: SelfPerceptSchema,
   contacts: z.array(ContactPerceptSchema),
+  messages: z.array(z.string()).optional(), // actor-to-actor prompt-stream comms (GCI, data-link, wingman)
   text: z.string().optional(), // natural-language framing — reserved for 0.3.0
 });
 
@@ -567,10 +614,11 @@ export const MatchReplaySchema = z.object({
   frameDt: z.number(),
   frames: z.array(ReplayFrameSchema).min(1),
   // All optional ⇒ v0.1.0 replays still validate and the viewer (reads only `frames`) is unchanged.
-  schemaVersion: z.union([z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  schemaVersion: z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]).optional(),
   agents: z.array(AgentMetaSchema).optional(),
   decisions: z.array(TurnDecisionSchema).optional(),
   bodyTicks: z.array(BodyTickTraceSchema).optional(),
+  agentPhases: z.array(AgentPhaseTraceSchema).optional(),
   outcome: MatchOutcomeSchema.optional(),
   airframes: z.record(z.string(), AirframeSchema).optional(), // keyed by aircraft id; the plane each flew
 });
@@ -599,12 +647,16 @@ export type AircraftSnapshot = z.infer<typeof AircraftSnapshotSchema>;
 export type ReplayEvent = z.infer<typeof ReplayEventSchema>;
 export type ProjectileSnapshot = z.infer<typeof ProjectileSnapshotSchema>;
 export type ReplayFrame = z.infer<typeof ReplayFrameSchema>;
+export type AgentPhaseTrace = z.infer<typeof AgentPhaseTraceSchema>;
 export type MatchReplay = z.infer<typeof MatchReplaySchema>;
 export type StickCommand = z.infer<typeof StickCommandSchema>;
 export type RawStickAction = z.infer<typeof RawStickActionSchema>;
 export type SetpointAction = z.infer<typeof SetpointActionSchema>;
 export type FlightDirectorAction = z.infer<typeof FlightDirectorActionSchema>;
 export type PilotIntentAction = z.infer<typeof PilotIntentActionSchema>;
+export type MotorProgramSample = z.infer<typeof MotorProgramSampleSchema>;
+export type MotorProgramHeldAction = z.infer<typeof MotorProgramHeldActionSchema>;
+export type MotorProgramAction = z.infer<typeof MotorProgramActionSchema>;
 export type Action = z.infer<typeof ActionSchema>;
 export type SelfPercept = z.infer<typeof SelfPerceptSchema>;
 export type ContactPercept = z.infer<typeof ContactPerceptSchema>;

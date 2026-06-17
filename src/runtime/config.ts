@@ -1,10 +1,9 @@
 import type { Controller } from "../agent/controller";
-import type { BodyRuntimeConfig } from "../body/runtime";
 import type { SensorModel } from "../agent/observation";
+import type { BodyRuntimeConfig } from "../body/runtime";
 import type { Evaluator } from "../eval/outcome";
 import type { Action, AgentMeta, MatchReplay, Observation } from "../protocol/schema";
 import type { AircraftState } from "../sim/types";
-
 export interface AgentEntry {
   meta: AgentMeta;
   controller: Controller;
@@ -20,8 +19,11 @@ export interface AgentEntry {
   // Viewer/game playback hint for reflex windows. Physics still runs at frameDt; the replay uses this
   // to slow terminal twitch mode down for inspection without changing the recorded sim.
   reflexPlaybackTimeScale?: number;
+  // Per-agent sensor model override. Defaults to MatchConfig.sensor.
+  sensor?: SensorModel;
+  // Actor-to-actor prompt-stream messages delivered to this agent each turn (GCI, data-link, wingman).
+  messages?: string[];
 }
-
 export interface MatchConfig {
   id: string;
   turnDuration: number;

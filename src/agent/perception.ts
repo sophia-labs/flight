@@ -25,6 +25,10 @@ export interface ProjectedContact {
   angularRadiusRad: number; // subtended radius — the rendering-free range cue
   aspectRad: number; // target heading vs the line from it to us: 0 = nose-on, PI = tail-on
   inView: boolean; // passes the device cone + range gate
+  // radar-only geometry (camera leaves these zero/undefined)
+  rangeRateMps?: number; // + opening, - closing
+  azimuthRad?: number; // horizontal angle from boresight: + right
+  elevationRad?: number; // vertical angle from boresight: + up
 }
 
 // The deterministic, pixel-free sense-datum (geometric truth). Internal — not serialized; the
@@ -42,6 +46,9 @@ export interface SenseFrame {
   selfSpeed: number;
   selfAltitude: number;
   contacts: ProjectedContact[];
+  // radar-only metadata
+  maxRangeM?: number;
+  coneHalfAngleRad?: number;
 }
 
 export interface Sensor {
@@ -125,18 +132,102 @@ export const cameraSensor: Sensor = {
   },
 };
 
+export const radarSensor: Sensor = {
+  modality: "radar",
+  sense(device, world, self) {
+    const pose = mountedSensorPose(device, self);
+    const { eye, basis, boresight, bankRad, pitchRad } = pose;
+    const coneHalfAngleRad = device.for.halfAngleRad;
+    const maxRangeM = device.for.maxRangeM;
+    const contacts: ProjectedContact[] = [];
+    for (const other of world) {
+      if (other.id === self.id || other.health <= 0) continue;
+      const toC = sub(other.position, eye);
+      const range = length(toC);
+      const dir = normalize(toC, boresight);
+      const f = dot(dir, boresight);
+      const angleFromBoresightRad = Math.acos(clamp(f, -1, 1));
+      const inView = f > 1e-6 && angleFromBoresightRad <= coneHalfAngleRad && range <= maxRangeM;
+      const localRight = dot(dir, basis.right);
+      const localUp = dot(dir, basis.up);
+      const azimuthRad = Math.atan2(localRight, Math.max(f, 0));
+      const elevationRad = Math.asin(clamp(localUp, -1, 1));
+      const rangeRateMps = dot(sub(self.velocity, other.velocity), dir);
+      contacts.push({
+        id: other.id,
+        team: other.team,
+        health: other.health,
+        range,
+        ndcX: 0,
+        ndcY: 0,
+        angularRadiusRad: 0,
+        aspectRad: 0,
+        inView,
+        rangeRateMps,
+        azimuthRad,
+        elevationRad,
+      });
+    }
+    return {
+      modality: "radar",
+      deviceId: device.id,
+      eye,
+      boresight,
+      bankRad,
+      pitchRad,
+      hHalfFovRad: coneHalfAngleRad,
+      vHalfFovRad: coneHalfAngleRad,
+      selfSpeed: length(self.velocity),
+      selfAltitude: self.position.y,
+      contacts,
+      maxRangeM,
+      coneHalfAngleRad,
+    };
+  },
+};
+
+export const radarScopeEncoder: Encoder = {
+  id: "radar-scope@1",
+  modality: "radar",
+  encode(frame) {
+    const lines: string[] = [];
+    const coneDeg = Math.round(((frame.coneHalfAngleRad ?? 0) * 2 * 180) / Math.PI);
+    lines.push(`RADAR ${frame.deviceId}: cone ${coneDeg}°, range ${Math.round(frame.maxRangeM ?? 0)} m`);
+    const visible = frame.contacts.filter((c) => c.inView);
+    if (visible.length === 0) {
+      lines.push("  NO CONTACTS");
+    } else {
+      for (const c of visible) {
+        const az = Math.round(((c.azimuthRad ?? 0) * 180) / Math.PI);
+        const el = Math.round(((c.elevationRad ?? 0) * 180) / Math.PI);
+        const rr = c.rangeRateMps ?? 0;
+        const closing = rr < 0 ? `closing ${Math.abs(Math.round(rr))}` : `opening ${Math.round(rr)}`;
+        lines.push(`  CONTACT ${c.id}: rng ${Math.round(c.range)} m, az ${az}°, el ${el}°, ${closing} m/s`);
+      }
+    }
+    return {
+      deviceId: frame.deviceId,
+      modality: "radar",
+      encoderId: radarScopeEncoder.id,
+      text: lines.join("\n"),
+    };
+  },
+};
+
 const SENSORS: Partial<Record<Modality, Sensor>> = {
   camera: cameraSensor,
-  // radar / ir: deferred — the seam exists, the physics lands in a later version.
+  radar: radarSensor,
 };
 
 const ENCODERS: Record<string, Encoder> = {
   [cameraAsciiEncoder.id]: cameraAsciiEncoder,
   [cameraAsciiEncoderV2.id]: cameraAsciiEncoderV2,
+  [radarScopeEncoder.id]: radarScopeEncoder,
 };
 
 const DEFAULT_ENCODER: Partial<Record<Modality, string>> = {
   camera: cameraAsciiEncoder.id,
+  radar: radarScopeEncoder.id,
 };
 
 export function sensorFor(modality: Modality): Sensor {

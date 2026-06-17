@@ -1,17 +1,20 @@
 import {
   defensiveController,
+  pursuitController,
   pursuitFallback,
 } from "../agent/controllers/scripted";
 import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import type { Controller } from "../agent/controller";
+import { perfectSensor, radarSensorModel } from "../agent/observation";
 import { fixedWingBodyManifest } from "../body/manifest";
 import { scriptedFixedWingBodyModel } from "../body/model";
-import { perfectSensor } from "../agent/observation";
 import { minimalEvaluator } from "../eval/outcome";
 import type { Airframe, MatchReplay, Vec3 } from "../protocol/schema";
+import { airframeFromArchetype } from "../sim/aircraftCatalog";
 import { compileAirframe, defaultAirframe } from "../sim/airframe";
 import { fullFuelByTank } from "../sim/mass";
-import { add, length, normalize, quatLookRotation, scale, sub, vec3 } from "../sim/math";
+import { add, clamp, length, normalize, quatLookRotation, scale, sub, vec3 } from "../sim/math";
+import { selectRadarDevice } from "../sim/mountedSensor";
 import type { AircraftState, FlightMetrics, WeaponStation } from "../sim/types";
 import { runMatch } from "./match";
 import type { MatchConfig } from "./config";
@@ -560,6 +563,143 @@ export function buildAirframeMatchConfig(blueAirframe: Airframe, turnCount = 28)
 export function generateAirframeMatch(blueAirframe: Airframe, turnCount = 28): Promise<MatchReplay> {
   return runMatch(buildAirframeMatchConfig(blueAirframe, turnCount));
 }
+
+
+// A sightseeing prop plane puttering along at low altitude, completely unarmed and unhurried.
+export const gentlePropController: Controller = async (observation) => {
+  const desiredAltitude = 2_500;
+  const altError = desiredAltitude - observation.self.altitude;
+  const pitch = Math.max(-0.12, Math.min(0.12, altError * 0.003));
+  const throttle = Math.max(0.35, Math.min(0.65, 0.46 + altError * 0.0005));
+  return {
+    action: {
+      kind: "raw-stick",
+      pitch,
+      roll: 0,
+      yaw: 0,
+      throttle,
+      trigger: false,
+    },
+    rationale: "gentle sightseeing cruise",
+  };
+};
+
+
+// BVR intercept controller: turn toward the radar contact while holding altitude; if no contact,
+// fly straight on the GCI datum.
+export const bvrInterceptController: Controller = async (observation) => {
+  const contact = observation.contacts[0];
+  const desiredAltitude = 10_000;
+  if (contact) {
+    const bearingRad = Math.atan2(contact.bearingRight, Math.max(contact.bearingForward, 0.02));
+    targetBankDeg = clamp((bearingRad * 180) / Math.PI, -60, 60);
+  }
+  // Load scales with bank so the turn does not bleed altitude: ~1/cos(bank) plus a small margin.
+  const bankRad = (Math.abs(targetBankDeg) * Math.PI) / 180;
+  const targetLoadG = clamp(1.05 / Math.max(Math.cos(bankRad), 0.35), 1.2, 4.5);
+  return {
+    action: {
+      kind: "flight-director",
+      targetBankDeg,
+      targetLoadG,
+      throttle: 0.82,
+      speedPriority: "hold",
+      trigger: false,
+    },
+    rationale: contact ? "radar contact, turning to intercept" : "navigating on GCI datum",
+  };
+};
+
+// F-14 starts far from a tiny civilian prop plane, navigating on a GCI datum until its nose radar
+// acquires the target. The prop plane has no radar and no weapons.
+export function createBvrInterceptAircraft(): AircraftState[] {
+  const f14Airframe = airframeFromArchetype("variable-sweep-tomcat");
+  const propAirframe = airframeFromArchetype("day-tripper");
+  const f14Compiled = compileAirframe(f14Airframe);
+  const propCompiled = compileAirframe(propAirframe);
+
+  const propPosition = vec3(0, 2_500, 0);
+  const propVelocity = vec3(55, 0, 0);
+  const f14Position = vec3(0, 2_500, -42_400);
+  const f14Velocity = vec3(0, 0, 420);
+  const prop: AircraftState = {
+    id: "prop-1",
+    callsign: "Day Tripper",
+    team: "red",
+    color: "#f4c95d",
+    position: propPosition,
+    velocity: propVelocity,
+    orientation: quatLookRotation(propVelocity),
+    controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.46, trigger: false },
+    health: 100,
+    weaponCooldown: 0,
+    model: propCompiled.model,
+    metrics: { ...INITIAL_METRICS, airspeed: length(propVelocity), altitude: 2_500 },
+    angularVelocity: vec3(0, 0, 0),
+    fuelKg: propCompiled.model.fuelCapacityKg,
+    fuelByTankKg: fullFuelByTank(propCompiled.model),
+    devices: propCompiled.devices,
+    airframe: propAirframe,
+  };
+
+  const f14: AircraftState = {
+    id: "blue-1",
+    callsign: "Tomcat-1",
+    team: "blue",
+    color: "#4da3ff",
+    position: f14Position,
+    velocity: f14Velocity,
+    orientation: quatLookRotation(f14Velocity),
+    controls: { pitch: 0, roll: 0, yaw: 0, throttle: 0.92, trigger: false },
+    health: 100,
+    weaponCooldown: 0.2,
+    model: f14Compiled.model,
+    metrics: { ...INITIAL_METRICS, airspeed: length(f14Velocity), altitude: 2_500 },
+    angularVelocity: vec3(0, 0, 0),
+    fuelKg: f14Compiled.model.fuelCapacityKg,
+    fuelByTankKg: fullFuelByTank(f14Compiled.model),
+    devices: f14Compiled.devices,
+    airframe: f14Airframe,
+  };
+
+  return [f14, prop];
+}
+
+export function buildBvrInterceptMatchConfig(turnCount = 30): MatchConfig {
+  const aircraft = createBvrInterceptAircraft();
+  const f14 = aircraft.find((a) => a.id === "blue-1")!;
+  const radarDevice = selectRadarDevice(f14.devices);
+  const sensor = radarDevice ? radarSensorModel(radarDevice) : perfectSensor;
+  const gciMessage =
+    "GCI to TOMCAT-1: SLOW CONTACT LAST KNOWN BRG 315, RANGE 42 KM, ALTITUDE LOW. INTERCEPT AND IDENTIFY.";
+  return {
+    id: "bvr-intercept-001",
+    turnDuration: TURN_DURATION,
+    frameDt: FRAME_DT,
+    maxTurns: normalizedTurnCount(turnCount),
+    decisionTimeoutMs: 15_000,
+    initialAircraft: aircraft,
+    agents: {
+      "blue-1": {
+        meta: { id: "blue-1", kind: "scripted", label: "Tomcat-1 (radar intercept)" },
+        sensor,
+        controller: pursuitController(0.72),
+      },
+      "prop-1": {
+        meta: { id: "prop-1", kind: "scripted", label: "Day Tripper (unarmed sightseeing)" },
+        controller: gentlePropController,
+      },
+    },
+    sensor: perfectSensor,
+    evaluator: minimalEvaluator,
+    fallback: pursuitFallback,
+  };
+}
+
+export function generateBvrInterceptMatch(turnCount = 30): Promise<MatchReplay> {
+  return runMatch(buildBvrInterceptMatchConfig(turnCount));
+}
+
 
 export function buildScenarioMatchConfig(blueAirframe: Airframe, scenario: ScenarioRunConfig): MatchConfig {
   const turnCount = normalizedTurnCount(scenario.turnCount);

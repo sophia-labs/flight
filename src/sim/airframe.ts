@@ -40,6 +40,16 @@ export function noseCamera(): SensorDevice {
   };
 }
 
+export function noseRadar(): SensorDevice {
+  return {
+    id: "nose-radar",
+    kind: "sensor",
+    modality: "radar",
+    pose: { offset: vec3(0, 0.15, -7.6), rotation: quatIdentity() },
+    for: { halfAngleRad: 0.35, maxRangeM: 120_000 },
+  };
+}
+
 // A pilot-seat camera for the viewer's mounted cockpit view. Kept as a real sensor part rather than
 // a renderer-only offset so HUD/cockpit rendering can share the same mount-pose vocabulary as sensors.
 export function cockpitCamera(): SensorDevice {

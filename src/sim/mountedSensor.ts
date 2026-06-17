@@ -38,6 +38,22 @@ export function selectCameraDevice(parts: Part[] | undefined, preferredId = "coc
   );
 }
 
+export function radarDevices(parts: Part[] | undefined): SensorDevice[] {
+  return (parts ?? []).filter(
+    (part): part is SensorDevice => part.kind === "sensor" && part.modality === "radar",
+  );
+}
+
+export function selectRadarDevice(parts: Part[] | undefined, preferredId = "nose-radar"): SensorDevice {
+  const radars = radarDevices(parts);
+  return (
+    radars.find((device) => device.id === preferredId) ??
+    radars.find((device) => device.id === "nose-radar") ??
+    radars[0] ??
+    undefined
+  );
+}
+
 export function mountedSensorPose(
   device: SensorDevice,
   carrier: SensorCarrier,

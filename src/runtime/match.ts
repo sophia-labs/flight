@@ -231,7 +231,8 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
       const entry = config.agents[ship.id];
       if (!entry) continue;
 
-      const baseObservation = toObservation(ship, aircraft, turn, time, config.sensor);
+      const sensor = entry.sensor ?? config.sensor;
+      const baseObservation = toObservation(ship, aircraft, turn, time, sensor, entry.messages ?? []);
       const observation =
         entry.body || entry.reflexBody || entry.feedField
           ? withCockpitObservationText(baseObservation, ship, aircraft)

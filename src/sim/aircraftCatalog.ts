@@ -1,5 +1,5 @@
 import type { Airframe, Part } from "../protocol/schema";
-import { cockpitCamera, noseCamera } from "./airframe";
+import { cockpitCamera, noseCamera, noseRadar } from "./airframe";
 import { quatFromAxisAngle, quatIdentity, vec3 } from "./math";
 
 type CanopyStyle = Extract<Part, { kind: "canopy" }>["style"];
@@ -251,6 +251,86 @@ export const referenceAircraft: ReferenceAircraft[] = [
   },
 ];
 
+function dayTripperArchetype(): Airframe {
+  const body = quatIdentity();
+  const lengthM = 7.3;
+  const spanM = 10.5;
+  const wingAreaM2 = 14.7;
+  const chordM = wingAreaM2 / spanM;
+  const cockpitEye = vec3(0, 0.95, -1.05);
+  const parts: Part[] = [
+    {
+      id: "fuselage",
+      kind: "fuselage",
+      pose: { offset: vec3(0, 0, 0), rotation: body },
+      dims: { length: lengthM * 0.95, width: 0.95, height: 1.05 },
+      massKg: 460,
+    },
+    {
+      id: "main-wing",
+      kind: "wing",
+      pose: { offset: vec3(0, -0.06, 0.2), rotation: body },
+      planform: { span: spanM, chord: chordM },
+      massKg: 180,
+      control: { axis: "roll", area: wingAreaM2 * 0.12 },
+    },
+    {
+      id: "tailplane",
+      kind: "wing",
+      pose: { offset: vec3(0, 0.16, lengthM * 0.42), rotation: body },
+      planform: { span: 2.8, chord: 0.7 },
+      massKg: 55,
+      control: { axis: "pitch", area: 1.1 },
+    },
+    {
+      id: "fin",
+      kind: "wing",
+      pose: { offset: vec3(0, 0.55, lengthM * 0.38), rotation: body },
+      planform: { span: 1.5, chord: 0.75 },
+      massKg: 28,
+      control: { axis: "yaw", area: 0.75 },
+    },
+    {
+      id: "engine",
+      kind: "engine",
+      pose: { offset: vec3(0, 0.05, -1.1), rotation: body },
+      thrustN: 10_000,
+      idleThrustFraction: 0.08,
+      massKg: 180,
+      dims: { radius: 0.35, length: 1.1 },
+    },
+    {
+      id: "canopy",
+      kind: "canopy",
+      pose: { offset: vec3(0, 0.78, -0.9), rotation: body },
+      dims: { length: 1.6, width: 0.72, height: 0.55 },
+      massKg: 45,
+      style: "bubble",
+    },
+    {
+      id: "tricycle-gear",
+      kind: "gear",
+      pose: { offset: vec3(0, -0.62, 0.1), rotation: body },
+      trackM: 2.4,
+      heightM: 0.78,
+      wheelRadiusM: 0.22,
+      massKg: 75,
+      style: "tricycle",
+    },
+    {
+      id: "fuel-cell",
+      kind: "tank",
+      pose: { offset: vec3(0, -0.05, -0.3), rotation: body },
+      fuelKg: 60,
+      dryMassKg: 12,
+      dims: { radius: 0.32, length: 1.2 },
+    },
+    pilotStationAt(cockpitEye),
+    cockpitAt(cockpitEye, Math.PI / 2.4),
+  ];
+  return { id: "day-tripper", parts };
+}
+
 export const aircraftArchetypes: AircraftArchetype[] = [
   {
     id: "variable-sweep-tomcat",
@@ -262,6 +342,17 @@ export const aircraftArchetypes: AircraftArchetype[] = [
     referenceIds: ["f14d"],
     palette: { base: "#8f989e", trim: "#d14438" },
     airframe: variableSweepTomcatArchetype(),
+  },
+  {
+    id: "day-tripper",
+    name: "Day Tripper",
+    shortName: "Tripper",
+    role: "civilian sightseeing aircraft",
+    summary: "A tiny, friendly, slow-flying prop plane with a bubble canopy, no radar, and absolutely no weapons.",
+    designLine: "Piper Cub / Cessna 172 spirit: low, slow, gentle, and completely unarmed.",
+    referenceIds: ["cessna-172", "piper-cub"],
+    palette: { base: "#f4c95d", trim: "#4aa3df" },
+    airframe: dayTripperArchetype(),
   },
   {
     id: "inline-escort",
@@ -1056,6 +1147,7 @@ function variableSweepTomcatArchetype(): Airframe {
     pilotStationAt(cockpitEye),
     cockpitAt(cockpitEye, Math.PI / 2.55),
     noseAt(vec3(0, 0.15, -lengthM * 0.55)),
+    radarAt(vec3(0, 0.15, -7.6)),
   ];
   return { id: "variable-sweep-tomcat", parts };
 }
@@ -1094,6 +1186,13 @@ function pilotStationAt(eye: ReturnType<typeof vec3>, canopyId = "canopy"): Part
 function noseAt(offset: ReturnType<typeof vec3>): Part {
   return {
     ...noseCamera(),
+    pose: { offset, rotation: quatIdentity() },
+  };
+}
+
+function radarAt(offset: ReturnType<typeof vec3>): Part {
+  return {
+    ...noseRadar(),
     pose: { offset, rotation: quatIdentity() },
   };
 }
