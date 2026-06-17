@@ -56,6 +56,40 @@ describe("replay verification", () => {
     expect(formatReplayVerification(summary)).toContain("verification=llm-ensemble-ready");
   });
 
+  it("accepts a live motor-program planner plus live twitch Body replay", () => {
+    const summary = summarizeReplayVerification(
+      replayWith({
+        agents: [
+          {
+            id: "blue-1",
+            kind: "llm",
+            label: "deepseek-v4-pro/motor-program",
+            config: { twitchBodyModel: "deepseek-v4-flash" },
+          },
+        ],
+        decisions: [
+          {
+            agentId: "blue-1",
+            source: "controller",
+            action: { kind: "motor-program" },
+            usage: { inputTokens: 100, outputTokens: 80, costUsd: 0.003 },
+          },
+        ],
+        bodyTicks: [
+          {
+            agentId: "blue-1",
+            parsed: { status: "ok" },
+            usage: { inputTokens: 120, outputTokens: 20, costUsd: 0.001 },
+          },
+        ],
+      }),
+    );
+
+    expect(summary.llmEnsembleReady).toBe(true);
+    expect(summary.motorProgramDecisions).toBe(1);
+    expect(formatReplayVerification(summary)).toContain("motor=1/1");
+  });
+
   it("rejects fallback, scripted, and failed Body traces", () => {
     const summary = summarizeReplayVerification(
       replayWith({

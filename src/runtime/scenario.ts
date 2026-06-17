@@ -1,11 +1,10 @@
 import {
   defensiveController,
-  pursuitController,
   pursuitFallback,
 } from "../agent/controllers/scripted";
 import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import type { Controller } from "../agent/controller";
-import { perfectSensor, radarSensorModel } from "../agent/observation";
+import { perfectSensor } from "../agent/observation";
 import { fixedWingBodyManifest } from "../body/manifest";
 import { scriptedFixedWingBodyModel } from "../body/model";
 import { minimalEvaluator } from "../eval/outcome";
@@ -14,7 +13,6 @@ import { airframeFromArchetype } from "../sim/aircraftCatalog";
 import { compileAirframe, defaultAirframe } from "../sim/airframe";
 import { fullFuelByTank } from "../sim/mass";
 import { add, clamp, length, normalize, quatLookRotation, scale, sub, vec3 } from "../sim/math";
-import { selectRadarDevice } from "../sim/mountedSensor";
 import type { AircraftState, FlightMetrics, WeaponStation } from "../sim/types";
 import { runMatch } from "./match";
 import type { MatchConfig } from "./config";
@@ -22,7 +20,7 @@ import type { MatchConfig } from "./config";
 export const TURN_DURATION = 2.4;
 export const FRAME_DT = 0.16;
 
-export type ScenarioRunKind = "duel" | "stern-gun" | "balloon" | "balloon-hard";
+export type ScenarioRunKind = "duel" | "stern-gun" | "balloon" | "balloon-hard" | "bvr-intercept";
 
 export interface ScenarioRunConfig {
   kind: ScenarioRunKind;
@@ -585,35 +583,12 @@ export const gentlePropController: Controller = async (observation) => {
 };
 
 
-// BVR intercept controller: turn toward the radar contact while holding altitude; if no contact,
-// fly straight on the GCI datum.
-export const bvrInterceptController: Controller = async (observation) => {
-  const contact = observation.contacts[0];
-  const desiredAltitude = 10_000;
-  if (contact) {
-    const bearingRad = Math.atan2(contact.bearingRight, Math.max(contact.bearingForward, 0.02));
-    targetBankDeg = clamp((bearingRad * 180) / Math.PI, -60, 60);
-  }
-  // Load scales with bank so the turn does not bleed altitude: ~1/cos(bank) plus a small margin.
-  const bankRad = (Math.abs(targetBankDeg) * Math.PI) / 180;
-  const targetLoadG = clamp(1.05 / Math.max(Math.cos(bankRad), 0.35), 1.2, 4.5);
-  return {
-    action: {
-      kind: "flight-director",
-      targetBankDeg,
-      targetLoadG,
-      throttle: 0.82,
-      speedPriority: "hold",
-      trigger: false,
-    },
-    rationale: contact ? "radar contact, turning to intercept" : "navigating on GCI datum",
-  };
-};
-
 // F-14 starts far from a tiny civilian prop plane, navigating on a GCI datum until its nose radar
 // acquires the target. The prop plane has no radar and no weapons.
-export function createBvrInterceptAircraft(): AircraftState[] {
-  const f14Airframe = airframeFromArchetype("variable-sweep-tomcat");
+export function createBvrInterceptAircraft(
+  blueAirframe: Airframe = airframeFromArchetype("variable-sweep-tomcat"),
+): AircraftState[] {
+  const f14Airframe = blueAirframe;
   const propAirframe = airframeFromArchetype("day-tripper");
   const f14Compiled = compileAirframe(f14Airframe);
   const propCompiled = compileAirframe(propAirframe);
@@ -665,35 +640,10 @@ export function createBvrInterceptAircraft(): AircraftState[] {
   return [f14, prop];
 }
 
-export function buildBvrInterceptMatchConfig(turnCount = 30): MatchConfig {
-  const aircraft = createBvrInterceptAircraft();
-  const f14 = aircraft.find((a) => a.id === "blue-1")!;
-  const radarDevice = selectRadarDevice(f14.devices);
-  const sensor = radarDevice ? radarSensorModel(radarDevice) : perfectSensor;
-  const gciMessage =
-    "GCI to TOMCAT-1: SLOW CONTACT LAST KNOWN BRG 315, RANGE 42 KM, ALTITUDE LOW. INTERCEPT AND IDENTIFY.";
-  return {
-    id: "bvr-intercept-001",
-    turnDuration: TURN_DURATION,
-    frameDt: FRAME_DT,
-    maxTurns: normalizedTurnCount(turnCount),
-    decisionTimeoutMs: 15_000,
-    initialAircraft: aircraft,
-    agents: {
-      "blue-1": {
-        meta: { id: "blue-1", kind: "scripted", label: "Tomcat-1 (radar intercept)" },
-        sensor,
-        controller: pursuitController(0.72),
-      },
-      "prop-1": {
-        meta: { id: "prop-1", kind: "scripted", label: "Day Tripper (unarmed sightseeing)" },
-        controller: gentlePropController,
-      },
-    },
-    sensor: perfectSensor,
-    evaluator: minimalEvaluator,
-    fallback: pursuitFallback,
-  };
+export function buildBvrInterceptMatchConfig(turnCount = 30, blueAirframe?: Airframe): MatchConfig {
+  void turnCount;
+  void blueAirframe;
+  throw new Error("BVR intercept requires the server scenario runner so it can use a live radar-limited pilot");
 }
 
 export function generateBvrInterceptMatch(turnCount = 30): Promise<MatchReplay> {
@@ -725,6 +675,9 @@ export function buildScenarioMatchConfig(blueAirframe: Airframe, scenario: Scena
         },
       },
     };
+  }
+  if (scenario.kind === "bvr-intercept") {
+    return buildBvrInterceptMatchConfig(turnCount, blueAirframe);
   }
   return buildAirframeMatchConfig(blueAirframe, turnCount);
 }

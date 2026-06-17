@@ -157,10 +157,17 @@ describe("buildNativeRenderTimeline", () => {
     expect(timeline.frames[0].camera.mode).toBe("pilot-hero");
     expect(timeline.frames[0].camera.shot).toBe("pilot-hero-canopy");
     expect(timeline.frames[0].camera.eye.z).toBeLessThan(timeline.frames[0].camera.target.z);
-    expect(timeline.frames[0].pilotDynamics?.gLoad).toBeCloseTo(4.2);
-    expect(timeline.frames[0].pilotDynamics?.strain).toBeGreaterThan(0.4);
-    expect(timeline.frames[0].pilotDynamics?.seatSinkM).toBeGreaterThan(0.04);
-    expect(timeline.frames[0].pilotDynamics?.rootRollDeg).toBeLessThan(-5);
+    // pilotPose carries the same per-bone rotations, expressions, and lookAt the React viewer uses.
+    const pose = timeline.frames[0].pilotPose;
+    expect(pose).toBeDefined();
+    // Hard pull (4.2 G, roll 0.8) should drive significant chest/head rotations.
+    expect(Math.abs(pose!.bones.chest?.x ?? 0)).toBeGreaterThan(0.01);
+    expect(Math.abs(pose!.bones.head?.x ?? 0)).toBeGreaterThan(0.01);
+    // gForcePose should produce strain-driven expressions.
+    expect(pose!.expressions.angry).toBeGreaterThan(0);
+    expect(pose!.expressions.ih).toBeGreaterThan(0);
+    expect(Math.abs(pose!.lookAt.x)).toBeGreaterThan(0);
+    expect(Math.abs(pose!.lookAt.y)).toBeGreaterThan(0);
   });
 
   it("exports split-screen cameras, pilot FEEL subtitles, and projectiles", () => {

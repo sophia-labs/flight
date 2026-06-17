@@ -38,6 +38,7 @@ import {
   worldVectorToLocal,
 } from "./mass";
 import { sampleJetPropulsion } from "./jet";
+import { mountedSensorPose, selectRadarDevice } from "./mountedSensor";
 import { samplePropulsion } from "./propulsion";
 import { surfaceControlSnapshot, surfaceEffectiveDeflectionRad } from "./types";
 import type {
@@ -105,12 +106,29 @@ export const AIM9M_SIDEWINDER_PROFILE = {
   proximityRadiusM: 10,
 };
 
+// v0.11.x active-radar BVR missile profile. This is a gameplay-facing Phoenix-class weapon for the
+// Super Tomcat: long range, active radar terminal seeker, slower turning than a dogfight missile, and a
+// larger proximity warhead. It is intentionally approximate and data-driven through WeaponStation.
+export const AIM54C_PHOENIX_PROFILE = {
+  id: "aim-54c" as const,
+  speedMps: 1_120,
+  effectiveRangeM: 85_000,
+  seekerRangeM: 60_000,
+  lifetimeS: 90,
+  seekerHalfAngleRad: (30 * Math.PI) / 180,
+  trackHalfAngleRad: (42 * Math.PI) / 180,
+  maxLateralG: 18,
+  navigationConstant: 3.1,
+  proximityRadiusM: 18,
+};
+
 const MISSILE_SPEED = AIM9M_SIDEWINDER_PROFILE.speedMps;
 const MISSILE_LIFETIME_S = AIM9M_SIDEWINDER_PROFILE.lifetimeS;
 const MISSILE_MAX_RANGE_M = AIM9M_SIDEWINDER_PROFILE.effectiveRangeM;
 const MISSILE_COOLDOWN_S = 6;
 const MISSILE_PROXIMITY_RADIUS_M = AIM9M_SIDEWINDER_PROFILE.proximityRadiusM;
 const MISSILE_DAMAGE = 72;
+const RADAR_MISSILE_DAMAGE = 100;
 
 // The capture radius a round must pass within to register a hit on a target. A balloon uses its big
 // perceived size; an aircraft is a small point target. Mirrored by the on-solution geometry in
@@ -162,16 +180,26 @@ export {
   MISSILE_MAX_RANGE_M,
   MISSILE_COOLDOWN_S,
   MISSILE_DAMAGE,
+  RADAR_MISSILE_DAMAGE,
 };
 
-function projectileProfile(kind: Projectile["kind"]) {
-  if (kind === "missile") {
+function missileProfileForModel(model: Projectile["missileModel"] | undefined) {
+  return model === AIM54C_PHOENIX_PROFILE.id ? AIM54C_PHOENIX_PROFILE : AIM9M_SIDEWINDER_PROFILE;
+}
+
+function missileProfileForStation(station: WeaponStation) {
+  return station.guidance === "active-radar" ? AIM54C_PHOENIX_PROFILE : AIM9M_SIDEWINDER_PROFILE;
+}
+
+function projectileProfile(round: Projectile) {
+  if (round.kind === "missile") {
+    const missile = missileProfileForModel(round.missileModel);
     return {
-      damage: MISSILE_DAMAGE,
-      lifetimeS: MISSILE_LIFETIME_S,
-      maxRangeM: MISSILE_MAX_RANGE_M,
-      proximityRadiusM: MISSILE_PROXIMITY_RADIUS_M,
-      label: "missile",
+      damage: missile.id === AIM54C_PHOENIX_PROFILE.id ? RADAR_MISSILE_DAMAGE : MISSILE_DAMAGE,
+      lifetimeS: missile.lifetimeS,
+      maxRangeM: missile.effectiveRangeM,
+      proximityRadiusM: missile.proximityRadiusM,
+      label: missile.id === AIM54C_PHOENIX_PROFILE.id ? "radar missile" : "missile",
     };
   }
 
@@ -185,7 +213,7 @@ function projectileProfile(kind: Projectile["kind"]) {
 }
 
 function projectileHitRadiusM(round: Projectile, target: AircraftState): number {
-  return targetHitRadiusM(target) + projectileProfile(round.kind).proximityRadiusM;
+  return targetHitRadiusM(target) + projectileProfile(round).proximityRadiusM;
 }
 
 function clampMagnitude(v: Vec3, maxMagnitude: number): Vec3 {
@@ -207,6 +235,9 @@ function missileForward(round: Projectile): Vec3 {
 // whether the seeker can maintain a useful signal.
 export function targetHeatSignature(target: AircraftState, observerPosition: Vec3): number {
   if (target.health <= 0) return 0;
+  // An explicit IR emitter (e.g. a thermal/flare balloon with no engine to compute heat from): the
+  // override IS the omnidirectional source strength; the seeker applies range attenuation downstream.
+  if (target.heatSignatureOverride !== undefined) return Math.max(0, target.heatSignatureOverride);
   const jetCount = target.model.jetPropulsions.length;
   const propCount = target.model.propulsions.length;
   const thrustPointCount = target.model.thrustPoints.length;
@@ -228,6 +259,75 @@ export function targetHeatSignature(target: AircraftState, observerPosition: Vec
   const rearAspect = clamp01((dot(toObserver, scale(targetForward, -1)) + 1) / 2);
   const aspectGain = 0.32 + rearAspect * 0.68;
   return baseHeat * aspectGain;
+}
+
+// Pre-launch IR lock check: would a heat-seeker fired NOW from `shooter` acquire `target`? Mirrors the
+// seeker geometry spawnMissile uses (nose-forward cone + range-attenuated signal vs min-lock), so the
+// observation, the firing sear, and the actual launch all agree. Pure geometry + IR ⇒ deterministic.
+export function irLockAvailable(shooter: AircraftState, target: AircraftState): boolean {
+  if (target.team === shooter.team || target.health <= 0) return false;
+  const toTarget = sub(target.position, shooter.position);
+  const range = length(toTarget);
+  if (range < 1 || range > MISSILE_MAX_RANGE_M) return false;
+  const nose = basisFromQuat(shooter.orientation).forward;
+  if (Math.acos(clamp(dot(nose, normalize(toTarget)), -1, 1)) > AIM9M_SIDEWINDER_PROFILE.seekerHalfAngleRad) {
+    return false;
+  }
+  const rangeKm = Math.max(0.25, range / 1_000);
+  return (
+    targetHeatSignature(target, shooter.position) / (rangeKm * rangeKm) >= AIM9M_SIDEWINDER_PROFILE.minLockSignal
+  );
+}
+
+// Does this ship carry a loaded heat-seeking missile (a station with ammo remaining)?
+export function hasLoadedHeatSeeker(shooter: AircraftState): boolean {
+  return shooter.model.weaponStations.some(
+    (s) => s.kind === "missile" && s.guidance === "heat-seeking" && (shooter.weaponAmmo?.[s.id] ?? s.count) > 0,
+  );
+}
+
+export function hasLoadedActiveRadarMissile(shooter: AircraftState): boolean {
+  return shooter.model.weaponStations.some(
+    (s) => s.kind === "missile" && s.guidance === "active-radar" && (shooter.weaponAmmo?.[s.id] ?? s.count) > 0,
+  );
+}
+
+interface RadarTrackCandidate {
+  target: AircraftState;
+  angleRad: number;
+  range: number;
+  signal: number;
+}
+
+function radarTrackCandidate(shooter: AircraftState, target: AircraftState): RadarTrackCandidate | undefined {
+  if (target.team === shooter.team || target.health <= 0 || target.id === shooter.id) return undefined;
+  const radar = selectRadarDevice(shooter.devices);
+  if (!radar) return undefined;
+  const pose = mountedSensorPose(radar, shooter);
+  const toTarget = sub(target.position, pose.eye);
+  const range = length(toTarget);
+  if (range < 1 || range > Math.min(radar.for.maxRangeM, AIM54C_PHOENIX_PROFILE.effectiveRangeM)) {
+    return undefined;
+  }
+  const los = normalize(toTarget, pose.boresight);
+  const angleRad = Math.acos(clamp(dot(pose.boresight, los), -1, 1));
+  if (angleRad > radar.for.halfAngleRad) return undefined;
+  const signal = clamp(1 - range / Math.max(radar.for.maxRangeM, 1), 0.05, 1);
+  return { target, angleRad, range, signal };
+}
+
+export function activeRadarLockAvailable(shooter: AircraftState, target: AircraftState): boolean {
+  return hasLoadedActiveRadarMissile(shooter) && radarTrackCandidate(shooter, target) !== undefined;
+}
+
+function bestRadarTrackTarget(shooter: AircraftState, aircraft: AircraftState[]): RadarTrackCandidate | undefined {
+  let best: RadarTrackCandidate | undefined;
+  for (const target of aircraft) {
+    const candidate = radarTrackCandidate(shooter, target);
+    if (!candidate) continue;
+    if (!best || candidate.signal > best.signal) best = candidate;
+  }
+  return best;
 }
 
 interface HeatSeekerCandidate {
@@ -331,6 +431,109 @@ function guideHeatSeekingMissile(round: Projectile, aircraft: AircraftState[], d
     targetHeat: candidate.heat,
     lockSignal: candidate.signal,
   };
+}
+
+interface ActiveRadarCandidate {
+  target: AircraftState;
+  angleRad: number;
+  signal: number;
+}
+
+function activeRadarCandidate(
+  round: Projectile,
+  target: AircraftState,
+  maxAngleRad: number,
+  maxRangeM: number,
+): ActiveRadarCandidate | undefined {
+  if (target.team === round.team || target.health <= 0 || target.id === round.ownerId) return undefined;
+  const toTarget = sub(target.position, round.position);
+  const range = length(toTarget);
+  if (range < 1 || range > maxRangeM) return undefined;
+  const los = normalize(toTarget);
+  const angleRad = Math.acos(clamp(dot(missileForward(round), los), -1, 1));
+  if (angleRad > maxAngleRad) return undefined;
+  const signal = clamp(1 - range / Math.max(maxRangeM, 1), 0.02, 1);
+  return { target, angleRad, signal };
+}
+
+function strongestActiveRadarTarget(
+  round: Projectile,
+  aircraft: AircraftState[],
+  maxAngleRad: number,
+  maxRangeM: number,
+): ActiveRadarCandidate | undefined {
+  let best: ActiveRadarCandidate | undefined;
+  for (const target of aircraft) {
+    const candidate = activeRadarCandidate(round, target, maxAngleRad, maxRangeM);
+    if (!candidate) continue;
+    if (!best || candidate.signal > best.signal) best = candidate;
+  }
+  return best;
+}
+
+function activeRadarTarget(round: Projectile, aircraft: AircraftState[]): ActiveRadarCandidate | undefined {
+  const lockedTarget = round.targetId
+    ? aircraft.find((target) => target.id === round.targetId && target.health > 0)
+    : undefined;
+  if (lockedTarget) {
+    const current = activeRadarCandidate(
+      round,
+      lockedTarget,
+      AIM54C_PHOENIX_PROFILE.trackHalfAngleRad,
+      AIM54C_PHOENIX_PROFILE.seekerRangeM,
+    );
+    if (current) return current;
+  }
+  return strongestActiveRadarTarget(
+    round,
+    aircraft,
+    AIM54C_PHOENIX_PROFILE.seekerHalfAngleRad,
+    AIM54C_PHOENIX_PROFILE.seekerRangeM,
+  );
+}
+
+function guideActiveRadarMissile(round: Projectile, aircraft: AircraftState[], dt: number): Projectile {
+  if (round.kind !== "missile" || round.guidance !== "active-radar") return round;
+  const candidate = activeRadarTarget(round, aircraft);
+  if (!candidate) {
+    return {
+      ...round,
+      lockState: round.lockState === "acquired" ? "lost" : (round.lockState ?? "none"),
+      seekerAngleRad: undefined,
+      lockSignal: undefined,
+    };
+  }
+
+  const target = candidate.target;
+  const toTarget = sub(target.position, round.position);
+  const rangeSq = Math.max(dot(toTarget, toTarget), 1);
+  const los = normalize(toTarget);
+  const relativeVelocity = sub(target.velocity, round.velocity);
+  const closingSpeed = Math.max(0, -dot(relativeVelocity, los));
+  const losRate = scale(cross(toTarget, relativeVelocity), 1 / rangeSq);
+  const commandedAccel = scale(
+    cross(losRate, los),
+    AIM54C_PHOENIX_PROFILE.navigationConstant * Math.max(closingSpeed, 1),
+  );
+  const limitedAccel = clampMagnitude(commandedAccel, AIM54C_PHOENIX_PROFILE.maxLateralG * GRAVITY_MPS2);
+  const previousSpeed = Math.max(length(round.velocity), 1);
+  const nextDirection = normalize(add(round.velocity, scale(limitedAccel, dt)), missileForward(round));
+
+  return {
+    ...round,
+    velocity: scale(nextDirection, previousSpeed),
+    targetId: target.id,
+    lockState: "acquired",
+    seekerAngleRad: candidate.angleRad,
+    lockSignal: candidate.signal,
+  };
+}
+
+function guideMissile(round: Projectile, aircraft: AircraftState[], dt: number): Projectile {
+  if (round.kind !== "missile") return round;
+  if (round.guidance === "heat-seeking") return guideHeatSeekingMissile(round, aircraft, dt);
+  if (round.guidance === "active-radar") return guideActiveRadarMissile(round, aircraft, dt);
+  return round;
 }
 
 // Closest approach (squared) of the swept segment p0->p1 to a fixed point c. A fast bullet can step
@@ -506,8 +709,8 @@ function stepProjectiles(
 ): Projectile[] {
   const survivors: Projectile[] = [];
   for (const round of projectiles) {
-    const guidedRound = guideHeatSeekingMissile(round, aircraft, dt);
-    const profile = projectileProfile(guidedRound.kind);
+    const guidedRound = guideMissile(round, aircraft, dt);
+    const profile = projectileProfile(guidedRound);
     const p0 = guidedRound.position;
     const p1 = add(p0, scale(guidedRound.velocity, dt));
     const stepLen = length(sub(p1, p0));
@@ -760,6 +963,31 @@ function firstLoadedMissileStation(shooter: AircraftState): WeaponStation | unde
   );
 }
 
+function loadedMissileStations(shooter: AircraftState): WeaponStation[] {
+  return shooter.model.weaponStations.filter(
+    (station) => station.kind === "missile" && ammoForStation(shooter, station) > 0,
+  );
+}
+
+function stationHasHeatLock(shooter: AircraftState, aircraft: AircraftState[]): boolean {
+  return aircraft.some((target) => target.id !== shooter.id && irLockAvailable(shooter, target));
+}
+
+function stationHasRadarLock(shooter: AircraftState, aircraft: AircraftState[]): boolean {
+  return aircraft.some((target) => target.id !== shooter.id && radarTrackCandidate(shooter, target) !== undefined);
+}
+
+function selectedLoadedMissileStation(shooter: AircraftState, aircraft: AircraftState[]): WeaponStation | undefined {
+  const stations = loadedMissileStations(shooter);
+  return (
+    stations.find((station) => station.guidance === "heat-seeking" && stationHasHeatLock(shooter, aircraft)) ??
+    stations.find((station) => station.guidance === "active-radar" && stationHasRadarLock(shooter, aircraft)) ??
+    stations.find((station) => station.guidance === "heat-seeking") ??
+    stations.find((station) => station.guidance === "active-radar") ??
+    firstLoadedMissileStation(shooter)
+  );
+}
+
 function spawnMissile(
   shooter: AircraftState,
   station: WeaponStation,
@@ -770,14 +998,17 @@ function spawnMissile(
   spendStationAmmo(shooter, station);
   shooter.weaponCooldown = MISSILE_COOLDOWN_S;
 
+  const profile = missileProfileForStation(station);
   const forward = normalize(rotateVec(shooter.orientation, station.localForward), basisFromQuat(shooter.orientation).forward);
   const muzzle = add(shooter.position, rotateVec(shooter.orientation, station.localOffset));
-  const velocity = add(scale(forward, MISSILE_SPEED), shooter.velocity);
+  const velocity = add(scale(forward, profile.speedMps), shooter.velocity);
   const initialRound: Projectile = {
     id: `missile-${shooter.id}-${station.id}-${time.toFixed(4)}`,
     kind: "missile",
     guidance: station.guidance,
-    ...(station.guidance === "heat-seeking" ? { missileModel: AIM9M_SIDEWINDER_PROFILE.id } : {}),
+    ...(station.guidance === "heat-seeking" || station.guidance === "active-radar"
+      ? { missileModel: profile.id }
+      : {}),
     position: muzzle,
     velocity,
     ownerId: shooter.id,
@@ -793,16 +1024,31 @@ function spawnMissile(
         AIM9M_SIDEWINDER_PROFILE.minLockSignal,
       )
     : undefined;
-  const target = heatTarget?.target ?? (station.guidance === "none" ? nearestOpponent(shooter, aircraft) : undefined);
+  const radarTarget = station.guidance === "active-radar" ? bestRadarTrackTarget(shooter, aircraft) : undefined;
+  const target =
+    heatTarget?.target ??
+    radarTarget?.target ??
+    (station.guidance === "none" ? nearestOpponent(shooter, aircraft) : undefined);
   const round: Projectile = {
     ...initialRound,
-    lockState: station.guidance === "heat-seeking" ? (heatTarget ? "acquired" : "none") : "none",
+    lockState:
+      station.guidance === "heat-seeking"
+        ? (heatTarget ? "acquired" : "none")
+        : station.guidance === "active-radar"
+          ? (radarTarget ? "acquired" : "none")
+          : "none",
     ...(target ? { targetId: target.id } : {}),
     ...(heatTarget
       ? {
           seekerAngleRad: heatTarget.angleRad,
           targetHeat: heatTarget.heat,
           lockSignal: heatTarget.signal,
+        }
+      : {}),
+    ...(radarTarget
+      ? {
+          seekerAngleRad: radarTarget.angleRad,
+          lockSignal: radarTarget.signal,
         }
       : {}),
   };
@@ -813,6 +1059,8 @@ function spawnMissile(
     ...(target ? { targetId: target.id } : {}),
     message: station.guidance === "heat-seeking"
       ? `${shooter.callsign} launches AIM-9M`
+      : station.guidance === "active-radar"
+        ? `${shooter.callsign} launches AIM-54C`
       : `${shooter.callsign} launches missile`,
     origin: muzzle,
     ...(target ? { impact: target.position } : {}),
@@ -879,7 +1127,7 @@ function resolveWeapons(
       continue;
     }
 
-    const missileStation = firstLoadedMissileStation(shooter);
+    const missileStation = selectedLoadedMissileStation(shooter, aircraft);
     spawned.push(
       missileStation
         ? spawnMissile(shooter, missileStation, time, aircraft, events)

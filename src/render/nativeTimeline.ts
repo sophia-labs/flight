@@ -10,16 +10,21 @@ import type {
   Vec3,
 } from "../protocol/schema";
 import { defaultAirframe } from "../sim/airframe";
-import { basisFromQuat, add, clamp, length, normalize, scale, sub, vec3, WORLD_UP } from "../sim/math";
+import { basisFromQuat, add, clamp, length, lerp, normalize, scale, sub, vec3, WORLD_UP } from "../sim/math";
 import { mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
 import { sampleReplayFrame } from "../viewer/replaySample";
 import { deriveSurfaceControls } from "../viewer/surfaceTelemetry";
+import { computeCockpitRig, computePilotForces } from "../viewer/pilotRig";
+import { buildPilotPose, type PilotPose } from "../viewer/pilotPose";
 
+import { computePilotCinemaShot } from "../viewer/pilotCinema";
 export type NativeCameraMode =
   | "cinematic"
   | "chase"
   | "cockpit"
+  | "director"
   | "orbit"
+  | "pilot-cinema"
   | "pilot-hero"
   | "split-balloon"
   | "split-dogfight";
@@ -67,9 +72,11 @@ export interface NativeRenderFrame {
   index: number;
   time: number;
   replayPosition: number;
+  // Per-frame pilot pose derived from the same computePilotForces + buildPilotPose pipeline the React
+  // viewer uses — full per-bone rotations, expression weights, and lookAt, not a lossy summary.
   camera: NativeRenderCamera;
+  pilotPose?: NativePilotPose;
   externalCamera?: NativeRenderCamera;
-  pilotDynamics?: NativePilotDynamics;
   aircraft: NativeRenderAircraft[];
   events: ReplayEvent[];
   projectiles?: ProjectileSnapshot[];
@@ -78,20 +85,18 @@ export interface NativeRenderFrame {
 export interface NativeRenderSubtitle {
   start: number;
   end: number;
-  label: "FEEL";
+  label: "FEEL" | "THOUGHT";
   text: string;
 }
 
-export interface NativePilotDynamics {
-  pilotId: string;
-  gLoad: number;
-  strain: number;
-  rootPitchDeg: number;
-  rootRollDeg: number;
-  headPitchDeg: number;
-  headRollDeg: number;
-  seatSinkM: number;
-  cameraShakeLocal: Vec3;
+/** Full per-frame pilot pose — the same shape that buildPilotPose in pilotPose.ts produces.
+ *  Carries per-bone Euler rotations (radians), expression blend weights (0-1),
+ *  and a lookAt offset (normalized screen-space). A Blender importer applies bones
+ *  as offset-from-rest quaternions and maps expression names to VRM blend shapes. */
+export interface NativePilotPose {
+  bones: Record<string, { x: number; y: number; z: number }>;
+  expressions: Record<string, number>;
+  lookAt: { x: number; y: number };
 }
 
 export interface NativeRenderCamera {
@@ -101,6 +106,8 @@ export interface NativeRenderCamera {
   target: Vec3;
   up: Vec3;
   verticalFovDeg: number;
+  focusDistanceM?: number;
+  fStop?: number;
 }
 
 export interface NativeRenderAircraft {
@@ -119,6 +126,11 @@ export interface NativeRenderAircraft {
   altitude: number;
   aoaDeg: number;
   gLoad: number;
+  mach?: number;
+  dynamicPressurePa?: number;
+  sweepDeg?: number;
+  afterburner?: boolean;
+  engineSpool?: number;
   stalled: boolean;
   static?: boolean;
 }
@@ -145,7 +157,13 @@ export function buildNativeRenderTimeline(
   const durationSeconds = positiveFinite(options.seconds ?? defaultDuration(replay), "seconds");
   const frameCount = Math.max(1, Math.round(durationSeconds * fps));
   const airframes = resolveAirframes(replay);
-  const subtitles = splitScreen ? buildFeelSubtitles(replay, pilotId, frameCount / fps) : [];
+  const duration = frameCount / fps;
+  // THOUGHT track (the slow planner's per-turn rationale) is carried in every mode so a render can show
+  // subtitles + drive an expression/lipsync puppet; FEEL (the Body's proprioception) stays split-screen.
+  const subtitles = [
+    ...buildThoughtSubtitles(replay, pilotId, duration),
+    ...(splitScreen ? buildFeelSubtitles(replay, pilotId, duration) : []),
+  ].sort((a, b) => a.start - b.start);
   const frames: NativeRenderFrame[] = [];
 
   for (let index = 0; index < frameCount; index += 1) {
@@ -160,26 +178,37 @@ export function buildNativeRenderTimeline(
       return serializeAircraft(ship, airframe);
     });
     const pilot = aircraft.find((ship) => ship.id === pilotId) ?? aircraft[0];
-    const pilotDynamics = pilot ? computePilotDynamics(pilot, time) : undefined;
+    // Camera shake is Blender-specific; the React viewer handles shake via VRM bone animation.
+    const shake = pilot ? computeCameraShake(pilot, time) : undefined;
+    // Pilot pose computed by the SAME pipeline the React viewer uses — not a lossy clone.
+    const pilotPose: NativePilotPose | undefined = pilot
+      ? buildPilotPose({
+          elapsed: time,
+          forces: computePilotForces(pilot),
+          trigger: pilot.controls.trigger,
+        })
+      : undefined;
 
     frames.push({
       index,
       time,
       replayPosition,
       camera: splitScreen && pilot
-        ? pilotHeroCamera(pilot, pilotDynamics, time)
+        ? pilotHeroCamera(pilot, shake?.shake ?? vec3(0, 0, 0), shake?.strain ?? 0, time)
         : computeCamera({
             aircraft,
             airframes,
             pilotId,
-            pilotDynamics,
+            cameraShake: shake,
+            projectiles,
             mode: cameraMode,
             width,
             height,
             time,
+            durationSeconds,
           }),
       ...(splitScreen ? { externalCamera: splitExternalCamera(aircraft, pilotId, time, cameraMode) } : {}),
-      ...(pilotDynamics ? { pilotDynamics } : {}),
+      ...(pilotPose ? { pilotPose } : {}),
       aircraft,
       events: sampled.events,
       ...(projectiles.length ? { projectiles } : {}),
@@ -215,6 +244,25 @@ export function buildNativeRenderTimeline(
     ...(subtitles.length ? { subtitles } : {}),
     frames,
   };
+}
+
+// The planner's THOUGHTS as a subtitle track — its per-turn rationale, with each line held until the next
+// decision. This is what a render shows as captions and can feed to an expression/lipsync VTuber puppet.
+function buildThoughtSubtitles(replay: MatchReplay, pilotId: string, durationSeconds: number): NativeRenderSubtitle[] {
+  const thoughts = (replay.decisions ?? [])
+    .filter((d) => d.agentId === pilotId && typeof d.rationale === "string" && d.rationale.trim().length > 0)
+    .map((d) => ({ time: d.observation.time, text: (d.rationale ?? "").trim() }))
+    .filter((d) => Number.isFinite(d.time) && d.time >= 0 && d.time < durationSeconds && d.text.length > 0)
+    .sort((a, b) => a.time - b.time);
+  return thoughts.map((thought, index) => {
+    const next = thoughts[index + 1]?.time ?? durationSeconds;
+    return {
+      start: thought.time,
+      end: Math.min(durationSeconds, Math.max(thought.time + 1.2, next)),
+      label: "THOUGHT" as const,
+      text: thought.text,
+    };
+  });
 }
 
 function buildFeelSubtitles(replay: MatchReplay, pilotId: string, durationSeconds: number): NativeRenderSubtitle[] {
@@ -300,6 +348,11 @@ function serializeAircraft(ship: AircraftSnapshot, airframe: Airframe): NativeRe
     altitude: ship.altitude,
     aoaDeg: ship.aoaDeg,
     gLoad: ship.gLoad,
+    ...(ship.mach !== undefined ? { mach: ship.mach } : {}),
+    ...(ship.dynamicPressurePa !== undefined ? { dynamicPressurePa: ship.dynamicPressurePa } : {}),
+    ...(ship.sweepDeg !== undefined ? { sweepDeg: ship.sweepDeg } : {}),
+    ...(ship.afterburner !== undefined ? { afterburner: ship.afterburner } : {}),
+    ...(ship.engineSpool !== undefined ? { engineSpool: ship.engineSpool } : {}),
     stalled: ship.stalled,
     ...(ship.static ? { static: true } : {}),
   };
@@ -309,20 +362,24 @@ function computeCamera({
   aircraft,
   airframes,
   pilotId,
-  pilotDynamics,
+  cameraShake,
+  projectiles,
   mode,
   width,
   height,
   time,
+  durationSeconds,
 }: {
   aircraft: NativeRenderAircraft[];
   airframes: Record<string, Airframe>;
   pilotId: string;
-  pilotDynamics?: NativePilotDynamics;
+  cameraShake: { shake: Vec3; strain: number } | undefined;
+  projectiles: ProjectileSnapshot[];
   mode: NativeCameraMode;
   width: number;
   height: number;
   time: number;
+  durationSeconds: number;
 }): NativeRenderCamera {
   const pilot = aircraft.find((ship) => ship.id === pilotId) ?? aircraft[0];
   if (!pilot) {
@@ -337,10 +394,14 @@ function computeCamera({
   }
 
   if (mode === "cockpit") return cockpitCamera(pilot, airframes[pilot.id], width / height);
-  if (mode === "pilot-hero") return pilotHeroCamera(pilot, pilotDynamics, time);
-  if (isSplitScreenMode(mode)) return pilotHeroCamera(pilot, pilotDynamics, time);
+  if (mode === "pilot-cinema") return pilotCinemaCamera(pilot, airframes[pilot.id], time);
+  if (mode === "pilot-hero") return pilotHeroCamera(pilot, cameraShake?.shake ?? vec3(0, 0, 0), cameraShake?.strain ?? 0, time);
+  if (isSplitScreenMode(mode)) return pilotHeroCamera(pilot, cameraShake?.shake ?? vec3(0, 0, 0), cameraShake?.strain ?? 0, time);
   if (mode === "chase") return chaseCamera(pilot, "chase");
   if (mode === "orbit") return orbitCamera(aircraft, time);
+  if (mode === "director") {
+    return directorCamera(pilot, aircraft, airframes[pilot.id], width / height, time, durationSeconds, projectiles);
+  }
   return cinematicCamera(pilot, aircraft, airframes[pilot.id], width / height, time);
 }
 
@@ -366,6 +427,31 @@ function cockpitCamera(ship: NativeRenderAircraft, airframe: Airframe | undefine
   });
 }
 
+/** Cockpit interior camera using the same 6-shot sequence the React viewer cycles through.
+ *  computePilotCinemaShot calls computeCockpitRig internally to place cameras relative to the
+ *  actual crew station — canopy frame, stick/throttle/pedal positions, instrument panel. */
+function pilotCinemaCamera(
+  ship: NativeRenderAircraft,
+  airframe: Airframe | undefined,
+  time: number,
+): NativeRenderCamera {
+  const shot = computePilotCinemaShot({
+    controls: ship.controls,
+    parts: airframe?.parts,
+    time,
+  });
+  return sanitizeCamera({
+    mode: "pilot-cinema",
+    shot: shot.key,
+    eye: localToWorld(ship, { x: shot.eye.x, y: shot.eye.y, z: shot.eye.z }),
+    target: localToWorld(ship, { x: shot.target.x, y: shot.target.y, z: shot.target.z }),
+    up: basisFromQuat(ship.orientation).up,
+    verticalFovDeg: shot.fov,
+    focusDistanceM: 1.8,
+    fStop: 3.5,
+  });
+}
+
 function chaseCamera(ship: NativeRenderAircraft, shot: string): NativeRenderCamera {
   const basis = basisFromQuat(ship.orientation);
   const eye = add(add(ship.position, scale(basis.forward, -38)), add(scale(basis.up, 10), scale(basis.right, 8)));
@@ -379,48 +465,40 @@ function chaseCamera(ship: NativeRenderAircraft, shot: string): NativeRenderCame
     verticalFovDeg: 38,
   });
 }
-
 function pilotHeroCamera(
   ship: NativeRenderAircraft,
-  dynamics: NativePilotDynamics | undefined,
+  shake: Vec3,
+  strain: number,
   time: number,
 ): NativeRenderCamera {
-  const shake = dynamics?.cameraShakeLocal ?? vec3(0, 0, 0);
-  const gFocus = dynamics?.strain ?? 0;
   const driftX = Math.sin(time * 1.7) * 0.035;
   return sanitizeCamera({
     mode: "pilot-hero",
     shot: "pilot-hero-canopy",
     eye: localToWorld(ship, vec3(0.62 + driftX + shake.x, 1.24 + shake.y, -5.22 + shake.z)),
-    target: localToWorld(ship, vec3(0.05 + shake.x * 0.2, 0.16 - gFocus * 0.06 + shake.y * 0.14, -4.35)),
+    target: localToWorld(ship, vec3(0.05 + shake.x * 0.2, 0.16 - strain * 0.06 + shake.y * 0.14, -4.35)),
     up: basisFromQuat(ship.orientation).up,
     verticalFovDeg: 46,
+    focusDistanceM: 2.4,
+    fStop: 4,
   });
 }
 
-function computePilotDynamics(ship: NativeRenderAircraft, time: number): NativePilotDynamics {
+/** Camera-shake and strain for pilot-hero / director camera positioning.
+ *  This is a Blender-specific effect — the React viewer does not shake the camera;
+ *  VRM bone animation handles cockpit shake there. */
+function computeCameraShake(ship: NativeRenderAircraft, time: number): { shake: Vec3; strain: number } {
   const gExcess = clamp(ship.gLoad - 1, -1.2, 5.5);
   const strain = clamp((ship.gLoad - 1.15) / 4.2, 0, 1);
-  const rollInput = clamp(ship.controls.roll, -1, 1);
-  const pitchInput = clamp(ship.controls.pitch, -1, 1);
-  const yawInput = clamp(ship.controls.yaw, -1, 1);
   const buffet = clamp((Math.abs(ship.aoaDeg) - 8) / 12, 0, 1) + (ship.stalled ? 0.7 : 0);
   const buzz = 0.35 + strain * 1.2 + buffet * 1.4;
-
   return {
-    pilotId: ship.id,
-    gLoad: ship.gLoad,
-    strain,
-    rootPitchDeg: clamp(-gExcess * 3.1 + pitchInput * 3.5, -12, 9),
-    rootRollDeg: clamp(-rollInput * 8.5 - yawInput * 2.8, -13, 13),
-    headPitchDeg: clamp(-gExcess * 2.2 + pitchInput * 1.5, -9, 5),
-    headRollDeg: clamp(-rollInput * 4.2 - yawInput * 1.2, -7, 7),
-    seatSinkM: clamp(gExcess * 0.018, -0.012, 0.075),
-    cameraShakeLocal: vec3(
+    shake: vec3(
       (Math.sin(time * 23.0) * 0.022 + Math.sin(time * 41.0) * 0.008) * buzz,
       (Math.sin(time * 19.0 + 0.4) * 0.016) * buzz - strain * 0.018,
       Math.sin(time * 29.0 + 1.1) * 0.012 * buzz,
     ),
+    strain,
   };
 }
 
@@ -582,6 +660,274 @@ function cinematicCamera(
 
   const orbit = orbitCamera(aircraft, time);
   return { ...orbit, mode: "cinematic", shot: "wide-orbit" };
+}
+
+function directorCamera(
+  pilot: NativeRenderAircraft,
+  aircraft: NativeRenderAircraft[],
+  airframe: Airframe | undefined,
+  aspect: number,
+  time: number,
+  durationSeconds: number,
+  projectiles: ProjectileSnapshot[],
+): NativeRenderCamera {
+  const launchTime = 10.7;
+  const impactTime = 16.5;
+
+  if (time < 2.4) {
+    return directorOpeningJetCamera(pilot, segmentT(time, 0, 2.4), time);
+  }
+
+  if (time < 4.4) {
+    return directorLeadPassCamera(pilot, segmentT(time, 2.4, 4.4));
+  }
+
+  if (time < 5.8) {
+    const cs = computeCameraShake(pilot, time);
+    const hero = pilotHeroCamera(pilot, cs.shake, cs.strain, time);
+    return sanitizeCamera({
+      ...hero,
+      mode: "director",
+      shot: "director-pilot-pressure-insert",
+      verticalFovDeg: 41,
+      focusDistanceM: 1.7,
+      fStop: 3.2,
+    });
+  }
+  if (time < impactTime - 0.75) {
+    const missile = projectiles.find((projectile) => projectile.kind === "missile" && projectile.team === pilot.team);
+    if (missile) {
+      return directorMissileChaseCamera(pilot, aircraft, missile, segmentT(time, launchTime + 1.45, impactTime - 0.75), time);
+    }
+    return {
+      ...splitExternalCamera(aircraft, pilot.id, time, "split-balloon"),
+      mode: "director",
+      shot: "director-hunt-wide",
+      verticalFovDeg: 34,
+      focusDistanceM: 220,
+      fStop: 7.5,
+    };
+  }
+
+  if (time < impactTime + 1) {
+    return directorTerminalCamera(pilot, aircraft, segmentT(time, impactTime - 0.75, impactTime + 1), time);
+  }
+
+  return directorAftermathCamera(pilot, aircraft, segmentT(time, impactTime + 1, durationSeconds), time);
+}
+
+function directorOpeningJetCamera(pilot: NativeRenderAircraft, t: number, time: number): NativeRenderCamera {
+  const basis = basisFromQuat(pilot.orientation);
+  const slash = easeInOut(t);
+  const eye = add(
+    pilot.position,
+    add(
+      scale(basis.forward, lerp(-46, -38, slash)),
+      add(scale(basis.right, lerp(-22, 10, slash)), scale(WORLD_UP, lerp(12, 9, slash) + Math.sin(time * 2.2) * 0.9)),
+    ),
+  );
+  const target = add(pilot.position, add(scale(basis.forward, lerp(8, 14, slash)), scale(basis.up, 1.9)));
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-jet-immediate",
+    eye,
+    target,
+    up: WORLD_UP,
+    verticalFovDeg: lerp(37, 34, slash),
+    focusDistanceM: length(sub(target, eye)),
+    fStop: 5.6,
+  });
+}
+
+function directorLeadPassCamera(pilot: NativeRenderAircraft, t: number): NativeRenderCamera {
+  const basis = basisFromQuat(pilot.orientation);
+  const dolly = easeInOut(t);
+  const eye = add(
+    pilot.position,
+    add(
+      scale(basis.forward, lerp(86, 24, dolly)),
+      add(scale(basis.right, lerp(-46, 34, dolly)), scale(WORLD_UP, lerp(17, 8, dolly) + Math.sin(t * Math.PI) * 5)),
+    ),
+  );
+  const target = add(pilot.position, add(scale(basis.forward, lerp(5, 36, dolly)), scale(basis.up, 2.4)));
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-lead-pass-dolly",
+    eye,
+    target,
+    up: WORLD_UP,
+    verticalFovDeg: lerp(29, 24, dolly),
+    focusDistanceM: length(sub(target, eye)),
+    fStop: 5.6,
+  });
+}
+
+function directorWingGlideCamera(pilot: NativeRenderAircraft, t: number, time: number): NativeRenderCamera {
+  const basis = basisFromQuat(pilot.orientation);
+  const drift = easeInOut(t);
+  const skyLift = Math.sin(time * 0.9) * 1.2;
+  const eye = add(
+    pilot.position,
+    add(
+      scale(basis.right, lerp(42, -30, drift)),
+      add(scale(basis.forward, lerp(-76, -68, drift)), scale(WORLD_UP, lerp(-24, -18, drift) + skyLift)),
+    ),
+  );
+  const target = add(pilot.position, add(scale(basis.forward, lerp(5, 10, drift)), scale(WORLD_UP, 5.5)));
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-wing-glide",
+    eye,
+    target,
+    up: WORLD_UP,
+    verticalFovDeg: lerp(45, 44, drift),
+    focusDistanceM: length(sub(target, eye)),
+    fStop: 6.3,
+  });
+}
+
+function directorCockpitLaunchCamera(
+  pilot: NativeRenderAircraft,
+  airframe: Airframe | undefined,
+  aspect: number,
+  t: number,
+): NativeRenderCamera {
+  void airframe;
+  void aspect;
+
+  const basis = basisFromQuat(pilot.orientation);
+  const flight = normalize(pilot.velocity, basis.forward);
+  const flatFlight = normalize(vec3(flight.x, 0, flight.z), basis.forward);
+  const lateral = normalize(vec3(-flatFlight.z, 0, flatFlight.x), basis.right);
+  const belly = normalize(add(scale(basis.up, -1), scale(WORLD_UP, -0.25)), scale(WORLD_UP, -1));
+  const squeeze = easeInOut(t);
+  const railKick = Math.sin(clamp(t, 0, 1) * Math.PI);
+  const eye = add(
+    pilot.position,
+    add(
+      scale(flight, lerp(-52, -62, squeeze)),
+      add(
+        scale(lateral, lerp(-34, 10, squeeze)),
+        add(scale(belly, lerp(18, 16, squeeze)), scale(WORLD_UP, lerp(-4, -1, squeeze) - railKick * 2.2)),
+      ),
+    ),
+  );
+  const target = add(
+    pilot.position,
+    add(scale(flight, lerp(10, 14, squeeze)), add(scale(basis.up, -1.5), scale(WORLD_UP, lerp(5, 12, squeeze)))),
+  );
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-rail-launch",
+    eye,
+    target,
+    up: WORLD_UP,
+    verticalFovDeg: lerp(31, 38, squeeze),
+    focusDistanceM: length(sub(target, eye)),
+    fStop: 5.6,
+  });
+}
+
+function directorMissileChaseCamera(
+  pilot: NativeRenderAircraft,
+  aircraft: NativeRenderAircraft[],
+  missile: ProjectileSnapshot,
+  t: number,
+  time: number,
+): NativeRenderCamera {
+  const targetShip = splitTargetAircraft(aircraft, pilot, "split-balloon");
+  const missileDir = normalize(missile.velocity, normalize(sub(targetShip?.position ?? pilot.position, missile.position), vec3(0, 0, -1)));
+  const flat = normalize(vec3(missileDir.x, 0, missileDir.z), vec3(0, 0, -1));
+  const lateral = normalize(vec3(-flat.z, 0, flat.x), basisFromQuat(pilot.orientation).right);
+  const chase = easeInOut(t);
+  const roll = Math.sin(time * 1.15) * 0.6;
+  const sideSweep = Math.sin(chase * Math.PI * 1.15 + 0.2);
+  const eye = add(
+    missile.position,
+    add(
+      scale(missileDir, lerp(-140, -92, chase)),
+      add(
+        scale(lateral, sideSweep * lerp(42, 28, chase)),
+        scale(WORLD_UP, lerp(-44, -24, chase) + Math.sin(time * 1.8) * 3.2),
+      ),
+    ),
+  );
+  const forwardAim = add(missile.position, add(scale(missileDir, lerp(110, 180, chase)), scale(WORLD_UP, lerp(28, 18, chase))));
+  const lookTarget = targetShip ? mixVec3(forwardAim, add(targetShip.position, scale(WORLD_UP, 18)), clamp((chase - 0.58) / 0.42, 0, 1) * 0.72) : forwardAim;
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-missile-chase",
+    eye,
+    target: lookTarget,
+    up: normalize(add(WORLD_UP, scale(lateral, roll * 0.18)), WORLD_UP),
+    verticalFovDeg: lerp(46, 34, chase),
+    focusDistanceM: length(sub(lookTarget, eye)),
+    fStop: 6.3,
+  });
+}
+
+function directorTerminalCamera(
+  pilot: NativeRenderAircraft,
+  aircraft: NativeRenderAircraft[],
+  t: number,
+  time: number,
+): NativeRenderCamera {
+  const targetShip = splitTargetAircraft(aircraft, pilot, "split-balloon") ?? pilot;
+  const line = normalize(sub(targetShip.position, pilot.position), basisFromQuat(pilot.orientation).forward);
+  const lateral = normalize(vec3(-line.z, 0, line.x), basisFromQuat(pilot.orientation).right);
+  const beat = easeInOut(t);
+  const eye = add(
+    targetShip.position,
+    add(scale(line, lerp(-180, -72, beat)), add(scale(lateral, lerp(-82, 28, beat)), scale(WORLD_UP, 52 + Math.sin(time * 1.7) * 7))),
+  );
+  const target = mixVec3(add(targetShip.position, scale(WORLD_UP, 12)), pilot.position, lerp(0.15, 0.46, beat));
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-terminal-cross",
+    eye,
+    target,
+    up: WORLD_UP,
+    verticalFovDeg: lerp(38, 30, beat),
+    focusDistanceM: length(sub(target, eye)),
+    fStop: 8,
+  });
+}
+
+function directorAftermathCamera(
+  pilot: NativeRenderAircraft,
+  aircraft: NativeRenderAircraft[],
+  t: number,
+  time: number,
+): NativeRenderCamera {
+  const targetShip = splitTargetAircraft(aircraft, pilot, "split-balloon") ?? pilot;
+  const center = mixVec3(pilot.position, targetShip.position, 0.58);
+  const angle = time * 0.18 + 1.4;
+  const radius = lerp(210, 310, easeInOut(t));
+  const eye = add(center, vec3(Math.cos(angle) * radius, 132 + t * 28, Math.sin(angle) * radius));
+  return sanitizeCamera({
+    mode: "director",
+    shot: "director-aftermath-wide",
+    eye,
+    target: add(center, scale(WORLD_UP, 10)),
+    up: WORLD_UP,
+    verticalFovDeg: 33,
+    focusDistanceM: length(sub(center, eye)),
+    fStop: 9,
+  });
+}
+
+function segmentT(time: number, start: number, end: number): number {
+  return clamp((time - start) / Math.max(0.001, end - start), 0, 1);
+}
+
+function easeInOut(t: number): number {
+  const x = clamp(t, 0, 1);
+  return x * x * (3 - 2 * x);
+}
+
+function mixVec3(a: Vec3, b: Vec3, t: number): Vec3 {
+  const x = clamp(t, 0, 1);
+  return vec3(lerp(a.x, b.x, x), lerp(a.y, b.y, x), lerp(a.z, b.z, x));
 }
 
 function averagePosition(aircraft: NativeRenderAircraft[]): Vec3 {

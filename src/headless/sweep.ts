@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { actionSpecs, type ActionMode } from "../agent/actionSpec";
 import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import { FLIGHT_RULES, piController, resolveOpenRouterModel } from "../agent/controllers/pi";
-import { defensiveController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
+import { defensiveController, motorProgramController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
 import { perfectSensor } from "../agent/observation";
 import { competenceEvaluator } from "../eval/outcome";
 import type { Competence, MatchSummary } from "../protocol/schema";
@@ -28,6 +28,9 @@ const SCRIPTED = process.argv.includes("--scripted");
 const PILOT_ID = "blue-1";
 const OUT = "sweep-results.jsonl";
 const MATCHES_DIR = "public/matches"; // served by Vite for the in-browser match browser
+const DEFAULT_LIVE_BODY_MODEL = "deepseek-v4-flash";
+const MOTOR_PROGRAM_TURN_DURATION = 2.5;
+const MOTOR_PROGRAM_FRAME_DT = 0.05;
 
 function safeId(model: string, mode: string, bodyModel: string | undefined, repeat: number): string {
   const body = bodyModel ? `__body-${bodyModel.replace(/[^a-z0-9.]+/gi, "-")}` : "";
@@ -40,7 +43,8 @@ const MODELS = SCRIPTED
       "anthropic/claude-haiku-4.5",
       "openai/gpt-4o-mini",
       "google/gemini-2.5-flash",
-      "deepseek/deepseek-v4-flash",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
       "deepseek/deepseek-chat-v3.1",
     ];
 function parseActionMode(raw: string): ActionMode {
@@ -60,10 +64,16 @@ function parseActionModes(raw: string | undefined, fallback: ActionMode[]): Acti
 }
 
 const BODY_MODEL = process.env.SWEEP_BODY_MODEL ?? SCRIPTED_BODY_MODEL;
+const TWITCH_BODY_MODEL =
+  process.env.SWEEP_TWITCH_BODY_MODEL ??
+  process.env.SWEEP_BODY_MODEL ??
+  (SCRIPTED ? SCRIPTED_BODY_MODEL : DEFAULT_LIVE_BODY_MODEL);
 const DEFAULT_MODES: ActionMode[] = SCRIPTED
   ? ["flight-director"]
   : process.env.SWEEP_BODY_MODEL
     ? ["pilot-intent"]
+    : process.env.SWEEP_TWITCH_BODY_MODEL
+      ? ["motor-program"]
     : ["raw-stick", "setpoint", "flight-director"];
 const MODES: ActionMode[] = parseActionModes(process.env.SWEEP_MODES, DEFAULT_MODES);
 const REPEATS = Number(process.env.SWEEP_REPEATS ?? 3);
@@ -73,16 +83,23 @@ const BODY_TIMEOUT_MS = Number(process.env.SWEEP_BODY_TIMEOUT_MS ?? 15_000);
 const BODY_MAX_TOKENS = Number(process.env.SWEEP_BODY_MAX_TOKENS ?? 96);
 const BODY_MAX_RETRIES = Number(process.env.SWEEP_BODY_MAX_RETRIES ?? 2);
 const BODY_EMPTY_RETRIES = Number(process.env.SWEEP_BODY_EMPTY_RETRIES ?? 1);
+const PILOT_MAX_TOKENS = Number(process.env.SWEEP_PILOT_MAX_TOKENS ?? (MODES.includes("motor-program") ? 4_096 : 512));
 
 interface Key {
   model: string;
   mode: ActionMode;
   repeat: number;
   bodyModel?: string;
+  twitchBodyModel?: string;
 }
 
 function buildConfig(model: string, mode: ActionMode, repeat: number): MatchConfig {
   const usesBody = mode === "pilot-intent";
+  const usesReflexBody = mode === "motor-program";
+  const frameDt = usesReflexBody ? Number(process.env.SWEEP_FRAME_DT ?? MOTOR_PROGRAM_FRAME_DT) : FRAME_DT;
+  const turnDuration = usesReflexBody
+    ? Number(process.env.SWEEP_TURN_DURATION ?? MOTOR_PROGRAM_TURN_DURATION)
+    : TURN_DURATION;
   const body = usesBody
     ? createHeadlessBodyConfig({
         modelSlug: BODY_MODEL,
@@ -92,15 +109,29 @@ function buildConfig(model: string, mode: ActionMode, repeat: number): MatchConf
         timeoutMs: BODY_TIMEOUT_MS,
       })
     : undefined;
+  const reflexBody = usesReflexBody
+    ? createHeadlessBodyConfig({
+        modelSlug: TWITCH_BODY_MODEL,
+        maxTokens: BODY_MAX_TOKENS,
+        maxRetries: BODY_MAX_RETRIES,
+        emptyRetries: BODY_EMPTY_RETRIES,
+        timeoutMs: BODY_TIMEOUT_MS,
+      })
+    : undefined;
+  if (reflexBody) reflexBody.manifest = { ...reflexBody.manifest, bodyTickDt: frameDt };
   const blue = SCRIPTED
     ? usesBody
       ? bodyPilotController(0.82)
+      : usesReflexBody
+        ? motorProgramController(0.82)
       : pursuitController(0.82)
-    : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES });
+    : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES, maxTokens: PILOT_MAX_TOKENS });
   return {
-    id: `${model}|${mode}${usesBody ? `|body:${bodyModelLabel(BODY_MODEL)}` : ""}|${repeat}`,
-    turnDuration: TURN_DURATION,
-    frameDt: FRAME_DT,
+    id:
+      `${model}|${mode}${usesBody ? `|body:${bodyModelLabel(BODY_MODEL)}` : ""}` +
+      `${usesReflexBody ? `|twitch:${bodyModelLabel(TWITCH_BODY_MODEL)}` : ""}|${repeat}`,
+    turnDuration,
+    frameDt,
     maxTurns: MAX_TURNS,
     decisionTimeoutMs: 30_000,
     initialAircraft: createInitialAircraft(),
@@ -113,12 +144,24 @@ function buildConfig(model: string, mode: ActionMode, repeat: number): MatchConf
           id: "blue-1",
           kind: SCRIPTED ? "scripted" : "llm",
           label: `${model}/${mode}`,
-          ...(body
-            ? { config: { bodyId: body.manifest.bodyId, bodyModel: bodyModelLabel(BODY_MODEL) } }
+          ...(body || reflexBody
+            ? {
+                config: {
+                  ...(body ? { bodyId: body.manifest.bodyId, bodyModel: bodyModelLabel(BODY_MODEL) } : {}),
+                  ...(reflexBody
+                    ? {
+                        motorProgramDtMs: 50,
+                        twitchBodyId: reflexBody.manifest.bodyId,
+                        twitchBodyModel: bodyModelLabel(TWITCH_BODY_MODEL),
+                      }
+                    : {}),
+                },
+              }
             : {}),
         },
         controller: blue,
         ...(body ? { body } : {}),
+        ...(reflexBody ? { reflexBody } : {}),
       },
       "red-1": { meta: { id: "red-1", kind: "scripted", label: "defensive" }, controller: defensiveController(0.64) },
     },
@@ -174,7 +217,13 @@ async function main(): Promise<void> {
     for (const mode of MODES) {
       for (let r = 0; r < REPEATS; r += 1) {
         jobs.push({
-          key: { model, mode, repeat: r, ...(mode === "pilot-intent" ? { bodyModel: bodyModelLabel(BODY_MODEL) } : {}) },
+          key: {
+            model,
+            mode,
+            repeat: r,
+            ...(mode === "pilot-intent" ? { bodyModel: bodyModelLabel(BODY_MODEL) } : {}),
+            ...(mode === "motor-program" ? { twitchBodyModel: bodyModelLabel(TWITCH_BODY_MODEL) } : {}),
+          },
           config: buildConfig(model, mode, r),
         });
       }
@@ -190,6 +239,9 @@ async function main(): Promise<void> {
   );
   if (MODES.includes("pilot-intent")) {
     console.error(`body: ${bodyModelLabel(BODY_MODEL)} timeout=${BODY_TIMEOUT_MS}ms`);
+  }
+  if (MODES.includes("motor-program")) {
+    console.error(`twitch body: ${bodyModelLabel(TWITCH_BODY_MODEL)} timeout=${BODY_TIMEOUT_MS}ms pilotMaxTokens=${PILOT_MAX_TOKENS}`);
   }
 
   const t0 = Date.now();
@@ -218,7 +270,7 @@ async function main(): Promise<void> {
         rec.fallbackRate = fb.rate;
         if (fb.reason) rec.fallbackReason = fb.reason;
 
-        const file = `${safeId(res.key.model, res.key.mode, res.key.bodyModel, res.key.repeat)}.json`;
+        const file = `${safeId(res.key.model, res.key.mode, res.key.bodyModel ?? res.key.twitchBodyModel, res.key.repeat)}.json`;
         writeFileSync(`${MATCHES_DIR}/${file}`, JSON.stringify(res.replay));
         manifest.push({
           id: res.replay.id,
@@ -262,7 +314,9 @@ async function main(): Promise<void> {
     }
   >();
   for (const res of results) {
-    const gk = `${res.key.model} · ${res.key.mode}${res.key.bodyModel ? ` · body ${res.key.bodyModel}` : ""}`;
+    const gk =
+      `${res.key.model} · ${res.key.mode}${res.key.bodyModel ? ` · body ${res.key.bodyModel}` : ""}` +
+      `${res.key.twitchBodyModel ? ` · twitch ${res.key.twitchBodyModel}` : ""}`;
     const g = groups.get(gk) ?? {
       n: 0,
       errors: 0,

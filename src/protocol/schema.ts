@@ -80,8 +80,8 @@ export const ReplayEventSchema = z.object({
 export const ProjectileSnapshotSchema = z.object({
   id: z.string(),
   kind: z.enum(["bullet", "missile"]).optional(),
-  guidance: z.enum(["none", "heat-seeking"]).optional(),
-  missileModel: z.enum(["aim-9m"]).optional(),
+  guidance: z.enum(["none", "heat-seeking", "active-radar"]).optional(),
+  missileModel: z.enum(["aim-9m", "aim-54c"]).optional(),
   lockState: z.enum(["none", "acquired", "lost"]).optional(),
   position: Vec3Schema,
   velocity: Vec3Schema,
@@ -219,6 +219,8 @@ export const SelfPerceptSchema = z.object({
   // v0.10.x: a loaded heat-seeking missile (AIM-9 FOX-2) is available. Optional + only set when true so
   // gun-only observations stay byte-identical.
   missileLoaded: z.boolean().optional(),
+  // v0.11.x: a loaded active-radar BVR missile is available.
+  radarMissileLoaded: z.boolean().optional(),
 });
 
 // Ego-relative percept of one contact. The direction cosines are the dot products the
@@ -240,6 +242,8 @@ export const ContactPerceptSchema = z.object({
   // v0.10.x: a heat-seeker fired now would acquire this contact (inside the IR seeker cone + lock range).
   // Optional + only set when true. The planner uses it to take the FOX-2 instead of pressing to guns.
   missileLock: z.boolean().optional(),
+  // v0.11.x: an active-radar missile fired now has a valid radar track/weapon solution on this contact.
+  radarLock: z.boolean().optional(),
 });
 
 export const ObservationSchema = z.object({
@@ -578,7 +582,7 @@ export const WeaponPartSchema = z.object({
   dims: z.object({ length: finiteNumber, width: finiteNumber, height: finiteNumber }),
   role: z.enum(["machine-gun", "cannon", "rocket-rail", "bomb-rack"]),
   weaponType: z.enum(["gun", "rocket", "missile", "bomb"]).optional(),
-  guidance: z.enum(["none", "heat-seeking"]).optional(),
+  guidance: z.enum(["none", "heat-seeking", "active-radar"]).optional(),
 });
 
 export const TankPartSchema = z.object({

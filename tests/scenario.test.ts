@@ -27,4 +27,12 @@ describe("scenario runtime", () => {
     expect(balloon.id).toBe("balloon-hunt-001");
     expect(balloon.initialAircraft[0]?.airframe).toEqual(tomcat.airframe);
   });
+
+  it("does not build BVR through the client-side scripted scenario path", () => {
+    const tomcat = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat")!;
+
+    expect(() =>
+      buildScenarioMatchConfig(tomcat.airframe, { kind: "bvr-intercept", turnCount: 12 }),
+    ).toThrow(/server scenario runner/);
+  });
 });

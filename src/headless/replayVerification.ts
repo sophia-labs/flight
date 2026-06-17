@@ -12,6 +12,7 @@ export interface ReplayVerificationSummary {
   pilotControllerDecisions: number;
   pilotFallbacks: number;
   pilotIntentDecisions: number;
+  motorProgramDecisions: number;
   bodyTickCount: number;
   bodyParseableTicks: number;
   bodyFailedTicks: number;
@@ -66,10 +67,12 @@ export function summarizeReplayVerification(
   const pilotControllerDecisions = decisions.filter((decision) => decision.source === "controller").length;
   const pilotFallbacks = decisions.filter((decision) => decision.source === "fallback").length;
   const pilotIntentDecisions = decisions.filter((decision) => decision.action.kind === "pilot-intent").length;
+  const motorProgramDecisions = decisions.filter((decision) => decision.action.kind === "motor-program").length;
+  const embodiedPlannerDecisions = pilotIntentDecisions + motorProgramDecisions;
   const bodyFailedTicks = statusCounts.failed;
   const bodyModelErrors = bodyTicks.filter((tick) => tick.modelError).length;
   const bodyParseableTicks = bodyTicks.length - bodyFailedTicks;
-  const bodyModel = asConfigValue(pilot?.config, "bodyModel");
+  const bodyModel = asConfigValue(pilot?.config, "bodyModel") ?? asConfigValue(pilot?.config, "twitchBodyModel");
   const pilotCostUsd = usageCost(decisions);
   const bodyCostUsd = usageCost(bodyTicks);
   const latencies = bodyTicks
@@ -81,8 +84,11 @@ export function summarizeReplayVerification(
   if (pilot && pilot.kind !== "llm") errors.push(`pilot agent ${pilotId} is ${pilot.kind}, not llm`);
   if (decisions.length === 0) errors.push(`pilot agent ${pilotId} has no decisions`);
   if (pilotFallbacks > 0) errors.push(`pilot used fallback on ${pilotFallbacks}/${decisions.length} decisions`);
-  if (pilotIntentDecisions !== decisions.length) {
-    errors.push(`pilot produced ${pilotIntentDecisions}/${decisions.length} pilot-intent decisions`);
+  if (embodiedPlannerDecisions !== decisions.length) {
+    errors.push(
+      `pilot produced ${embodiedPlannerDecisions}/${decisions.length} embodied-planner decisions ` +
+        `(pilot-intent=${pilotIntentDecisions}, motor-program=${motorProgramDecisions})`,
+    );
   }
   if (bodyTicks.length === 0) errors.push(`pilot agent ${pilotId} has no Body ticks`);
   if (!bodyModel) errors.push(`pilot agent ${pilotId} has no recorded Body model`);
@@ -101,6 +107,7 @@ export function summarizeReplayVerification(
     pilotControllerDecisions,
     pilotFallbacks,
     pilotIntentDecisions,
+    motorProgramDecisions,
     bodyTickCount: bodyTicks.length,
     bodyParseableTicks,
     bodyFailedTicks,
@@ -124,7 +131,8 @@ function statusText(statusCounts: Record<BodyStatus, number>): string {
 export function formatReplayVerification(summary: ReplayVerificationSummary): string {
   const lines = [
     `pilot=${summary.pilotLabel ?? summary.pilotId} controller=${summary.pilotControllerDecisions}/${summary.pilotDecisionCount} ` +
-      `intent=${summary.pilotIntentDecisions}/${summary.pilotDecisionCount} fallbacks=${summary.pilotFallbacks}`,
+      `intent=${summary.pilotIntentDecisions}/${summary.pilotDecisionCount} motor=${summary.motorProgramDecisions}/${summary.pilotDecisionCount} ` +
+      `fallbacks=${summary.pilotFallbacks}`,
     `body=${summary.bodyModel ?? "unknown"} parseable=${summary.bodyParseableTicks}/${summary.bodyTickCount} ` +
       `${statusText(summary.bodyStatusCounts) || "no-status"} modelErrors=${summary.bodyModelErrors}`,
     `cost=$${summary.totalCostUsd.toFixed(4)} pilot=$${summary.pilotCostUsd.toFixed(4)} body=$${summary.bodyCostUsd.toFixed(4)}` +

@@ -278,7 +278,7 @@ const OUTPUT_CONTRACT = [
   // warming=closing on it; hot=almost there, steady; now=the target is ON the reticle — FIRE. Only say
   // SOLUTION now when the target glyph sits in the centre cell(s) over the + boresight. The gun has an",
   "If FIELD says '(no contacts in view)', SOLUTION must be cold.",
-  "When weapons are FREE and an aircraft contact line says exactly 12 o'clock level with rng under 1000, SOLUTION now is mandatory, not optional; do not answer hot.",
+  "When weapons are FREE and an aircraft contact line says exactly 12 o'clock level with rng <= 2200, SOLUTION now is mandatory, not optional; do not answer hot.",
   "assisted sear: it fires only when the Pilot has armed you (weapons free) AND you call SOLUTION now AND",
   "a round fired this instant would actually strike — so calling now at empty sky simply wastes nothing.",
 ];
@@ -339,7 +339,7 @@ export function buildBodyPrompt(
     // Weapons-free is the Pilot ARMING you (a held action): when armed, YOU own the firing decision —
     // fly the reticle on and call SOLUTION now. When safe, the sear is dead no matter what you call.
     `weapons: ${pilotIntent.armedFire ? "FREE — weapons free, call your own shot (SOLUTION now) when lined up" : "SAFE — hold fire"}`,
-    `fire_cue: ${pilotIntent.armedFire ? "MANDATORY: if FIELD shows a contact as exactly 12 o'clock level and rng <= 1000, return SOLUTION now, not hot. If it says high, low, or 1,2,3,6,9,10,11 o'clock, do not say now." : "weapons safe: return cold unless you are only tracking"}`,
+    `fire_cue: ${pilotIntent.armedFire ? "MANDATORY: if FIELD shows a contact as exactly 12 o'clock level and rng <= 2200, return SOLUTION now, not hot. If it says high, low, or 1,2,3,6,9,10,11 o'clock, do not say now." : "weapons safe: return cold unless you are only tracking"}`,
     `constraints: ${pilotIntent.constraints.join("; ") || "none"}`,
     `attention: ${pilotIntent.attention.join("; ") || "none"}`,
     "",

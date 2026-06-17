@@ -600,6 +600,26 @@ function ScenarioPanel({
           }
         : {}),
     }));
+  const setScenarioKind = (value: StudioScenarioConfig["kind"]) =>
+    onUpdateScenario((scenario) => ({
+      ...scenario,
+      kind: value,
+      ...(value === "bvr-intercept"
+        ? {
+            controlMode: "motor-program",
+            pilotModel:
+              scenario.pilotModel === "scripted-body-pilot"
+                ? DIRECT_DEEPSEEK_PLANNER_MODEL
+                : scenario.pilotModel,
+            twitchBodyModel:
+              scenario.twitchBodyModel === "scripted-fixed-wing-body"
+                ? DIRECT_DEEPSEEK_TWITCH_MODEL
+                : scenario.twitchBodyModel,
+            turnCount: Math.max(12, scenario.turnCount),
+            cameraMode: "pilot-cinema",
+          }
+        : {}),
+    }));
 
   return (
     <>
@@ -651,7 +671,7 @@ function ScenarioPanel({
           label="Start"
           selected={activeScenario.kind}
           options={SCENARIO_KIND_OPTIONS}
-          onSelect={(value) => patchScenario("kind", value)}
+          onSelect={setScenarioKind}
         />
         <OptionRow
           label={motorProgram ? "Planner" : "Pilot"}
@@ -1611,7 +1631,7 @@ const GLOVE_OPTIONS = ["none", "fingerless", "flight"] as const;
 const MATERIAL_OPTIONS = ["studio-safe", "vrm", "diagnostic"] as const;
 const EXPRESSION_OPTIONS = ["neutral", "focused", "excited", "strained"] as const;
 const SCENARIO_CONTROL_OPTIONS = ["body-pilot", "motor-program"] as const satisfies readonly StudioScenarioConfig["controlMode"][];
-const SCENARIO_KIND_OPTIONS = ["duel", "stern-gun", "balloon", "balloon-hard"] as const satisfies readonly StudioScenarioConfig["kind"][];
+const SCENARIO_KIND_OPTIONS = ["duel", "stern-gun", "balloon", "balloon-hard", "bvr-intercept"] as const satisfies readonly StudioScenarioConfig["kind"][];
 const SCENARIO_PILOT_OPTIONS = [
   "scripted-body-pilot",
   DIRECT_DEEPSEEK_PLANNER_MODEL,
@@ -1628,7 +1648,7 @@ const SCENARIO_TWITCH_BODY_OPTIONS = [
   "deepseek/deepseek-v4-flash",
   "scripted-fixed-wing-body",
 ] as const satisfies readonly StudioScenarioConfig["twitchBodyModel"][];
-const SCENARIO_TURN_OPTIONS: readonly string[] = ["1", "2", "4", "8", "12"];
+const SCENARIO_TURN_OPTIONS: readonly string[] = ["1", "2", "4", "8", "12", "16", "24"];
 const SCENARIO_MOTOR_TURN_OPTIONS: readonly string[] = ["1500", "2500", "3500"];
 const SCENARIO_SAMPLE_OPTIONS: readonly string[] = ["50", "75", "100"];
 const SCENARIO_SLOWMO_OPTIONS: readonly string[] = ["0.25", "0.35", "0.5", "1"];
@@ -1641,6 +1661,7 @@ const LABEL_OVERRIDES: Record<string, string> = {
   body: "Body",
   twitch: "Twitch",
   "balloon-hard": "Hard Balloon",
+  "bvr-intercept": "BVR Intercept",
   "scripted-body-pilot": "Scripted Pilot",
   "scripted-fixed-wing-body": "Scripted Body",
   "deepseek-v4-pro": "DeepSeek V4 Pro",

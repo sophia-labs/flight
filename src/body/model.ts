@@ -24,10 +24,14 @@ export type BodyModel = (input: BodyModelInput) => Promise<BodyModelResult>;
 // glyph-field's legend. Each in-view contact is a line ` <id>  <h> o'clock <elev>  rng <m>  <aspect>-<L|R>  hp <n>`.
 // We pick the nearest contact (the legend lists by range order from the encoder is not guaranteed, so
 // scan all) and derive the steer side from its bearing. Pure string parsing — deterministic.
-const CONTACT_LINE = /\b(\d{1,2}) o'clock\b.*?\brng (\d+)\b.*?-([LR])\b/;
+const CONTACT_LINE = /\b(\d{1,2}) o'clock\s+(high|level|low)\b.*?\brng (\d+)\b.*?-([LR])\b/;
+
+const TWITCH_GUN_NOW_RANGE_M = 2_200;
+const TWITCH_GUN_HOT_RANGE_M = 2_650;
 
 interface FieldContact {
   clock: number;
+  elevation: "high" | "level" | "low";
   rangeM: number;
   side: "L" | "R";
 }
@@ -36,7 +40,14 @@ function parseFieldContacts(field: string): FieldContact[] {
   const out: FieldContact[] = [];
   for (const line of field.split("\n")) {
     const m = CONTACT_LINE.exec(line);
-    if (m) out.push({ clock: Number(m[1]), rangeM: Number(m[2]), side: m[3] as "L" | "R" });
+    if (m) {
+      out.push({
+        clock: Number(m[1]),
+        elevation: m[2] as FieldContact["elevation"],
+        rangeM: Number(m[3]),
+        side: m[4] as "L" | "R",
+      });
+    }
   }
   return out;
 }
@@ -46,10 +57,11 @@ function nearestContact(field: string): FieldContact | undefined {
 }
 
 // Steer side toward the nearest contact: left (-1) / right (+1) / centred (0). A contact on the nose
-// (12 o'clock, or 11/1 with the L/R side already telling us the lean) reads centred when dead-ahead.
+// (12 o'clock) or directly below the pipper (6 o'clock) reads centred laterally; high/low correction is
+// handled by pitch, not by rolling into a turn.
 function targetSide(contact: FieldContact | undefined): number {
   if (!contact) return 0;
-  if (contact.clock === 12) return 0;
+  if (contact.clock === 12 || contact.clock === 6) return 0;
   return contact.side === "L" ? -1 : 1;
 }
 
@@ -69,9 +81,35 @@ function contactAhead(contact: FieldContact | undefined): boolean {
 //   now     : on the nose AND inside the round's reach — FIRE
 function solutionCall(contact: FieldContact | undefined): "cold" | "warming" | "hot" | "now" {
   if (!contact || contact.clock !== 12) return "cold"; // not on the boresight reticle
-  if (contact.rangeM <= 2_900) return "now"; // dead-on and in reach — call the shot
-  if (contact.rangeM <= 4_200) return "hot";
+  if (contact.elevation !== "level") return contact.rangeM <= TWITCH_GUN_HOT_RANGE_M ? "hot" : "warming";
+  if (contact.rangeM <= TWITCH_GUN_NOW_RANGE_M) return "now"; // centred and inside effective bullet reach
+  if (contact.rangeM <= TWITCH_GUN_HOT_RANGE_M) return "hot";
   return "warming";
+}
+
+function isTwitchGunIntent(pilotIntent: PilotIntentAction): boolean {
+  return (
+    pilotIntent.style.includes("twitch") ||
+    pilotIntent.goal.includes("quick-time") ||
+    pilotIntent.attention.includes("boresight_crosshair")
+  );
+}
+
+function verticalCorrection(contact: FieldContact | undefined): number {
+  if (!contact) return 0;
+  if (contact.elevation === "high") return 2;
+  if (contact.elevation === "low") return -2;
+  if (contact.clock === 6) return -1;
+  return 0;
+}
+
+function twitchFeel(contact: FieldContact | undefined, solution: "cold" | "warming" | "hot" | "now"): string {
+  if (!contact) return "lost the pipper";
+  if (solution === "now") return "pipper centered squeeze";
+  if (contact.clock === 12 && contact.elevation === "high") return "pipper just low lifting";
+  if (contact.clock === 12 && contact.elevation === "low") return "pipper just high easing down";
+  if (contact.clock === 6) return "target below the crosshair";
+  return contact.side === "L" ? "fine left pipper correction" : "fine right pipper correction";
 }
 
 // FIELD-FEED: vision is FOV-limited, so the contact often leaves frame. We remember which way it last
@@ -186,11 +224,27 @@ export const scriptedFixedWingBodyModel: BodyModel = async ({ pilotIntent, propr
     nextMemory = searchToken(searchSide);
   }
 
-  const speedExpect = pitch < 0 && push >= 4 ? "recover" : push <= 2 ? "bleed" : "stable";
-  const marginExpect = dangerousMargin || pitch < 0 ? "better" : "stable";
   // Call the shot from the field-read (only matters when the Pilot has armed weapons free; the sear
   // still gates it on a real target in the reticle). The Body owns the firing decision here.
   const solution = solutionCall(target);
+  if (isTwitchGunIntent(pilotIntent) && !dangerousMargin && !lowEnergy && !groundPanic) {
+    const fineSide = targetSide(target);
+    const finePitch = verticalCorrection(target);
+    const centered = target?.clock === 12 && target.elevation === "level";
+    roll = centered ? 0 : fineSide;
+    yaw = centered ? 0 : fineSide * 2;
+    pitch = finePitch;
+    push = target && target.rangeM < 1_600 ? 3 : 4;
+    tone = "pulse";
+    toneLevel = centered ? 1 : 2;
+    feel = twitchFeel(target, solution);
+    nextMemory = target
+      ? `${fineSide < 0 ? "pipper_left" : fineSide > 0 ? "pipper_right" : "pipper_center"} ${target.elevation}`.trim()
+      : memory ?? "";
+  }
+
+  const speedExpect = pitch < 0 && push >= 4 ? "recover" : push <= 2 ? "bleed" : "stable";
+  const marginExpect = dangerousMargin || pitch < 0 ? "better" : "stable";
 
   return [
     `MUSCLE ROLL=${roll} PITCH=${pitch} YAW=${yaw} PUSH=${push}`,

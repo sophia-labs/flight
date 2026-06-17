@@ -2,7 +2,7 @@ import type { Controller } from "../agent/controller";
 import type { SensorModel } from "../agent/observation";
 import type { BodyRuntimeConfig } from "../body/runtime";
 import type { Evaluator } from "../eval/outcome";
-import type { Action, AgentMeta, MatchReplay, Observation } from "../protocol/schema";
+import type { Action, AgentMeta, ContactPercept, MatchReplay, Observation, SelfPercept } from "../protocol/schema";
 import type { AircraftState } from "../sim/types";
 export interface AgentEntry {
   meta: AgentMeta;
@@ -52,6 +52,8 @@ export interface MatchProgress {
   agentLabel?: string;
   actionKind?: string;
   rationale?: string;
+  contacts?: ContactPercept[];
+  self?: SelfPercept;
   frameIndex?: number;
   bodyTick?: { agentId: string; status: string; tick: number; feel?: string };
   replay?: MatchReplay; // only on complete

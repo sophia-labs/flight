@@ -123,10 +123,33 @@ test("opens the advanced builder from the studio screen", async ({ page }) => {
   await expect(page.getByText("PROP CURVE")).toBeVisible();
   await expect(page.getByText("surfaces")).toBeVisible();
   await expect(page.getByText("engines")).toBeVisible();
-  await expect(page.getByRole("button", { name: /WING main-wing/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /wing variable-sweep-wing/i })).toBeVisible();
   await page.getByRole("button", { name: /CREW-STATION pilot-station/i }).click();
   await expect(page.getByText("pilot socket")).toBeVisible();
   await expect(page.getByRole("button", { name: "Fly this ▶" })).toBeVisible();
+});
+
+test("exposes motor tape scenario tuning in Scene mode", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Scene" }).click();
+  await expect(page.getByRole("button", { name: "Scene" })).toHaveClass(/active/);
+  await expect(page.getByRole("button", { name: "Run Scenario" })).toBeVisible();
+  await expect(page.getByText("Loop").first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Motor Tape" }).click();
+  await expect(page.getByRole("button", { name: "Motor Tape" })).toHaveClass(/active/);
+  await expect(page.getByText("Hard Balloon").first()).toBeVisible();
+  await expect(page.getByText("Planner").first()).toBeVisible();
+  await expect(page.getByText("Twitch").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "DeepSeek V4 Pro" })).toHaveClass(/active/);
+  await expect(page.locator("button.active").filter({ hasText: "DeepSeek V4 Flash" })).toBeVisible();
+  await expect(page.getByText("Tape").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "2.5s" })).toHaveClass(/active/);
+  await expect(page.getByText("Step").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "50ms" })).toHaveClass(/active/);
+  await expect(page.getByText("Slow").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "0.35x" })).toHaveClass(/active/);
 });
 
 test("launches a replay from the studio and shows cabin surface telemetry", async ({ page }) => {
@@ -144,7 +167,7 @@ test("launches a replay from the studio and shows cabin surface telemetry", asyn
   await expect(hud.getByText("AIL L")).toBeVisible();
   await expect(hud.getByText("AIL R")).toBeVisible();
   await expect(hud.getByText("ELEV")).toBeVisible();
-  await expect(hud.getByText("RUD", { exact: true })).toBeVisible();
+  await expect(hud.getByText("RUD", { exact: true }).first()).toBeVisible();
   await expect(hud.getByText("PED")).toBeVisible();
   await expect(hud.getByText("THR")).toBeVisible();
   await expect(hud.getByText(/hinge [+-]?\d+\.\d deg/).first()).toBeVisible();

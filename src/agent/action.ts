@@ -3,19 +3,25 @@ import {
   type Action,
   type ControlInput,
   type FlightDirectorAction,
+  type MotorProgramAction,
+  type MotorProgramSample,
   type PilotIntentAction,
   type RawStickAction,
   type SetpointAction,
 } from "../protocol/schema";
-import { basisFromQuat, clamp, cross, dot, length, normalize, scale, sub, vec3 } from "../sim/math";
+import { basisFromQuat, clamp, cross, dot, length, lerp, normalize, scale, sub, vec3 } from "../sim/math";
 import type { AircraftState } from "../sim/types";
 
 // Converts an expressed intent into a clamped ControlInput. Called once PER FRAME (15×/turn), so
 // a closed-loop adapter can track a setpoint and protect the flight envelope as state evolves.
 // raw-stick ignores state and returns the same stick every frame (behaviour identical to v0.2).
+export interface ActionAdapterContext {
+  elapsedMs?: number;
+}
+
 export interface ActionAdapter {
   readonly vocabulary: Action["kind"];
-  controlFor(action: Action, self: AircraftState): ControlInput;
+  controlFor(action: Action, self: AircraftState, context?: ActionAdapterContext): ControlInput;
 }
 
 export const rawStickAdapter: ActionAdapter = {
@@ -138,11 +144,48 @@ export const pilotIntentAdapter: ActionAdapter = {
   },
 };
 
+function sortedProgramSamples(action: MotorProgramAction): MotorProgramSample[] {
+  return [...action.samples].sort((a, b) => a.tMs - b.tMs);
+}
+
+function samplePair(samples: MotorProgramSample[], elapsedMs: number): [MotorProgramSample, MotorProgramSample] {
+  if (samples.length === 1) return [samples[0], samples[0]];
+  if (elapsedMs <= samples[0].tMs) return [samples[0], samples[0]];
+  for (let i = 1; i < samples.length; i += 1) {
+    if (elapsedMs <= samples[i].tMs) return [samples[i - 1], samples[i]];
+  }
+  const last = samples[samples.length - 1];
+  return [last, last];
+}
+
+export function controlForMotorProgram(action: MotorProgramAction, elapsedMs = 0): ControlInput {
+  const samples = sortedProgramSamples(action);
+  const tMs = clamp(elapsedMs, 0, action.durationMs);
+  const [a, b] = samplePair(samples, tMs);
+  const span = b.tMs - a.tMs;
+  const t = span > 0 ? clamp((tMs - a.tMs) / span, 0, 1) : 0;
+  return clampControlInput({
+    pitch: lerp(a.pitch, b.pitch, t),
+    roll: lerp(a.roll, b.roll, t),
+    yaw: lerp(a.yaw, b.yaw, t),
+    throttle: lerp(a.throttle, b.throttle, t),
+    trigger: a.trigger === true || b.trigger === true,
+  });
+}
+
+export const motorProgramAdapter: ActionAdapter = {
+  vocabulary: "motor-program",
+  controlFor(action, _self, context) {
+    return controlForMotorProgram(action as MotorProgramAction, context?.elapsedMs ?? 0);
+  },
+};
+
 const ADAPTERS: Record<Action["kind"], ActionAdapter> = {
   "raw-stick": rawStickAdapter,
   setpoint: setpointAdapter,
   "flight-director": flightDirectorAdapter,
   "pilot-intent": pilotIntentAdapter,
+  "motor-program": motorProgramAdapter,
 };
 
 export function adapterFor(kind: Action["kind"]): ActionAdapter {

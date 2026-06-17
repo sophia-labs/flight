@@ -135,7 +135,7 @@ export interface PropulsionPoint {
 export interface WeaponStation {
   id: string;
   kind: "gun" | "rocket" | "missile" | "bomb";
-  guidance: "none" | "heat-seeking";
+  guidance: "none" | "heat-seeking" | "active-radar";
   count: number;
   caliberMm: number;
   localOffset: Vec3;
@@ -221,6 +221,10 @@ export interface AircraftState {
   // Runtime ammo buckets keyed by WeaponStation.id. Absent means "not initialized yet"; the first
   // missile shot seeds from the station's configured count. Guns remain unlimited for now.
   weaponAmmo?: Record<string, number>;
+  // v0.10.x IR target: an explicit heat signature a non-engine target emits so a heat-seeker can lock
+  // it — e.g. a thermal/flare balloon. When set, it REPLACES the computed engine/throttle/aspect heat
+  // (a static balloon has no engine to derive heat from) and is treated as an omnidirectional source.
+  heatSignatureOverride?: number;
 }
 
 export interface FlightMetrics {
@@ -243,8 +247,8 @@ export interface FlightMetrics {
 export interface Projectile {
   id: string;
   kind: "bullet" | "missile";
-  guidance?: "none" | "heat-seeking";
-  missileModel?: "aim-9m";
+  guidance?: "none" | "heat-seeking" | "active-radar";
+  missileModel?: "aim-9m" | "aim-54c";
   lockState?: "none" | "acquired" | "lost";
   position: Vec3;
   velocity: Vec3;

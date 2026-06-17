@@ -73,6 +73,12 @@ describe("airframe compiler", () => {
     expect(tomcat.airframe.parts.find((part) => part.id === "m61-and-missiles")).toMatchObject({
       kind: "weapon",
       role: "rocket-rail",
+      guidance: "heat-seeking",
+    });
+    expect(tomcat.airframe.parts.find((part) => part.id === "phoenix-radar-missiles")).toMatchObject({
+      kind: "weapon",
+      role: "rocket-rail",
+      guidance: "active-radar",
     });
   });
 

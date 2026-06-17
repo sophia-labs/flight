@@ -25,7 +25,12 @@ import {
 import { SEA_LEVEL_DENSITY_KG_M3, densityAtAltitude, stallSpeedMps } from "../src/sim/aero";
 import { aircraftArchetypes } from "../src/sim/aircraftCatalog";
 import { compileAirframe, defaultAirframe } from "../src/sim/airframe";
-import { DEFAULT_MODEL, stepSimulation } from "../src/sim/flight";
+import {
+  activeRadarLockAvailable,
+  DEFAULT_MODEL,
+  hasLoadedActiveRadarMissile,
+  stepSimulation,
+} from "../src/sim/flight";
 import {
   currentMassProperties,
   fullFuelByTank,
@@ -41,9 +46,9 @@ import {
   generateDemoMatch,
 } from "../src/runtime/scenario";
 import { runMatch } from "../src/runtime/match";
-import { toObservation, perfectSensor } from "../src/agent/observation";
+import { toObservation, perfectSensor, radarSensorModel } from "../src/agent/observation";
 import { senseAndEncode } from "../src/agent/perception";
-import { selectCameraDevice } from "../src/sim/mountedSensor";
+import { selectCameraDevice, selectRadarDevice } from "../src/sim/mountedSensor";
 
 describe("flight sim replay generation", () => {
   it("produces deterministic replay data", async () => {
@@ -221,6 +226,8 @@ function makeAircraft(o: Partial<AircraftState> = {}): AircraftState {
     angularVelocity: o.angularVelocity ?? vec3(0, 0, 0),
     fuelKg: o.fuelKg ?? 0,
     fuelByTankKg: o.fuelByTankKg ?? fullFuelByTank(o.model ?? DEFAULT_MODEL),
+    devices: o.devices,
+    airframe: o.airframe,
   };
 }
 
@@ -503,6 +510,110 @@ describe("flight physics characterization", () => {
     expect(events.some((e) => e.type === "shot" && e.message.includes("AIM-9M"))).toBe(true);
     expect(events.some((e) => e.type === "hit" && e.targetId === "red-1")).toBe(true);
     expect(target.health).toBeLessThanOrEqual(28);
+  });
+
+  it("surfaces active-radar missile loadout and radar lock in pilot observations", () => {
+    const tomcat = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat")!;
+    const compiled = compileAirframe(tomcat.airframe);
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      model: compiled.model,
+      devices: compiled.devices,
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, -320),
+      position: vec3(0, 10_000, 0),
+      fuelKg: compiled.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(compiled.model),
+      weaponCooldown: 0,
+    });
+    const target = makeAircraft({
+      id: "red-1",
+      team: "red",
+      velocity: vec3(0, 0, -120),
+      position: vec3(0, 10_000, -25_000),
+    });
+    const radar = selectRadarDevice(shooter.devices);
+
+    expect(hasLoadedActiveRadarMissile(shooter)).toBe(true);
+    expect(radar).toBeDefined();
+    expect(activeRadarLockAvailable(shooter, target)).toBe(true);
+
+    const obs = toObservation(shooter, [shooter, target], 1, 0, radarSensorModel(radar!));
+    expect(obs.self.radarMissileLoaded).toBe(true);
+    expect(obs.contacts).toHaveLength(1);
+    expect(obs.contacts[0]).toMatchObject({ id: "red-1", radarLock: true });
+    expect(obs.contacts[0].missileLock).toBeUndefined();
+  });
+
+  it("active-radar missile launches on radar track and kills at BVR range", () => {
+    const tomcat = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat")!;
+    const compiled = compileAirframe(tomcat.airframe);
+    const shooter = makeAircraft({
+      id: "blue-1",
+      team: "blue",
+      model: compiled.model,
+      devices: compiled.devices,
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, -320),
+      position: vec3(0, 10_000, 0),
+      fuelKg: compiled.model.fuelCapacityKg,
+      fuelByTankKg: fullFuelByTank(compiled.model),
+      weaponCooldown: 0,
+    });
+    const target = makeAircraft({
+      id: "red-1",
+      team: "red",
+      orientation: quatLookRotation(vec3(0, 0, -1)),
+      velocity: vec3(0, 0, -120),
+      position: vec3(0, 10_000, -25_000),
+    });
+
+    let result = stepSimulation(
+      [shooter, target],
+      {
+        "blue-1": controls({ throttle: 0.9, trigger: true }),
+        "red-1": controls({ throttle: 0.55, trigger: false }),
+      },
+      0.1,
+      [],
+      0,
+    );
+
+    expect(result.events.filter((e) => e.type === "shot")).toHaveLength(1);
+    expect(result.events[0].message).toContain("launches AIM-54C");
+    expect(result.projectiles[0]).toMatchObject({
+      kind: "missile",
+      guidance: "active-radar",
+      missileModel: "aim-54c",
+      lockState: "acquired",
+      ownerId: "blue-1",
+      targetId: "red-1",
+    });
+    expect(shooter.weaponAmmo?.["phoenix-radar-missiles"]).toBe(3);
+    expect(shooter.weaponAmmo?.["m61-and-missiles"]).toBeUndefined();
+
+    let projectiles = result.projectiles;
+    let time = 0.1;
+    const events = [...result.events];
+    for (let i = 0; i < 360 && target.health > 0; i += 1) {
+      result = stepSimulation(
+        [shooter, target],
+        {
+          "blue-1": controls({ throttle: 0.9, trigger: true }),
+          "red-1": controls({ throttle: 0.55, trigger: false }),
+        },
+        0.1,
+        projectiles,
+        time,
+      );
+      projectiles = result.projectiles;
+      events.push(...result.events);
+      time += 0.1;
+    }
+
+    expect(events.some((e) => e.type === "hit" && e.targetId === "red-1" && e.message.includes("radar missile"))).toBe(true);
+    expect(target.health).toBe(0);
   });
 
   it("misses when the target is out of range (the round despawns short)", () => {

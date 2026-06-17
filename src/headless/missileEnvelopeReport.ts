@@ -3,13 +3,19 @@ import { dirname, resolve } from "node:path";
 import type { ReplayEvent } from "../protocol/schema";
 import { aircraftArchetypes } from "../sim/aircraftCatalog";
 import { compileAirframe } from "../sim/airframe";
-import { AIM9M_SIDEWINDER_PROFILE, stepSimulation, targetHeatSignature } from "../sim/flight";
+import {
+  AIM54C_PHOENIX_PROFILE,
+  AIM9M_SIDEWINDER_PROFILE,
+  stepSimulation,
+  targetHeatSignature,
+} from "../sim/flight";
 import { fullFuelByTank } from "../sim/mass";
 import { length, quatLookRotation, sub, vec3 } from "../sim/math";
-import type { AircraftModel, AircraftState, Projectile } from "../sim/types";
+import type { AircraftState, Projectile } from "../sim/types";
 
 type MissileAspect = "rear" | "head-on" | "beam-left" | "beam-right";
 type TargetManeuver = "steady" | "jink";
+type MissileProfileId = "aim-9m" | "aim-54c";
 
 export interface MissileEnvelopeCase {
   id: string;
@@ -50,7 +56,7 @@ export interface MissileEnvelopeResult {
 interface MissileEnvelopeReport {
   schemaVersion: 1;
   generatedAt: string;
-  missileProfile: typeof AIM9M_SIDEWINDER_PROFILE;
+  missileProfile: typeof AIM9M_SIDEWINDER_PROFILE | typeof AIM54C_PHOENIX_PROFILE;
   historicalAnchor: {
     source: string;
     url: string;
@@ -67,10 +73,11 @@ interface MissileEnvelopeReport {
 }
 
 const argv = process.argv.slice(2);
-const out = resolve(flag("--out") ?? "reports/missile-envelope.json");
+const profileId = profileFlag();
+const out = resolve(flag("--out") ?? (profileId === "aim-54c" ? "reports/active-radar-missile-envelope.json" : "reports/missile-envelope.json"));
 const dt = numberFlag("--dt", 0.05);
-const maxTimeS = numberFlag("--max-time", 28);
-const altitudeM = numberFlag("--altitude", 1_500);
+const maxTimeS = numberFlag("--max-time", profileId === "aim-54c" ? 95 : 28);
+const altitudeM = numberFlag("--altitude", profileId === "aim-54c" ? 8_000 : 1_500);
 
 function flag(name: string): string | undefined {
   const index = argv.indexOf(name);
@@ -88,10 +95,39 @@ function numberFlag(name: string, fallback: number): number {
   return value;
 }
 
-function tomcatModel(): AircraftModel {
+function profileFlag(): MissileProfileId {
+  const raw = flag("--profile") ?? "aim-9m";
+  if (raw === "aim-9m" || raw === "aim-54c") return raw;
+  throw new Error("--profile must be aim-9m or aim-54c");
+}
+
+function missileProfile() {
+  return profileId === "aim-54c" ? AIM54C_PHOENIX_PROFILE : AIM9M_SIDEWINDER_PROFILE;
+}
+
+function historicalAnchor(profile: MissileProfileId): MissileEnvelopeReport["historicalAnchor"] {
+  if (profile === "aim-54c") {
+    return {
+      source: "Flight internal AIM-54C Phoenix-class gameplay profile",
+      url: "internal://flight/sim/flight#AIM54C_PHOENIX_PROFILE",
+      speed: "1120 m/s",
+      range: "85 km effective, 60 km active seeker",
+      guidance: "active radar terminal homing",
+    };
+  }
+  return {
+    source: "NAVAIR AIM-9M Sidewinder public product page",
+    url: "https://www.navair.navy.mil/product/AIM-9M-Sidewinder",
+    speed: "Mach 2.5",
+    range: "10-18 miles",
+    guidance: "solid-state infrared homing",
+  };
+}
+
+function tomcat(): ReturnType<typeof compileAirframe> {
   const archetype = aircraftArchetypes.find((candidate) => candidate.id === "variable-sweep-tomcat");
   if (!archetype) throw new Error("missing variable-sweep-tomcat archetype");
-  return compileAirframe(archetype.airframe).model;
+  return compileAirframe(archetype.airframe);
 }
 
 function controls(throttle: number, trigger: boolean, maneuver: TargetManeuver = "steady", time = 0) {
@@ -108,7 +144,7 @@ function controls(throttle: number, trigger: boolean, maneuver: TargetManeuver =
 }
 
 function makeAircraft(
-  model: AircraftModel,
+  compiled: ReturnType<typeof compileAirframe>,
   id: string,
   team: "blue" | "red",
   position: ReturnType<typeof vec3>,
@@ -127,7 +163,7 @@ function makeAircraft(
     controls: controls(throttle, false),
     health: 100,
     weaponCooldown: 0,
-    model,
+    model: compiled.model,
     metrics: {
       airspeed: length(velocity),
       altitude: position.y,
@@ -138,8 +174,9 @@ function makeAircraft(
       engineSpool: throttle,
     },
     angularVelocity: vec3(0, 0, 0),
-    fuelKg: model.fuelCapacityKg,
-    fuelByTankKg: fullFuelByTank(model),
+    fuelKg: compiled.model.fuelCapacityKg,
+    fuelByTankKg: fullFuelByTank(compiled.model),
+    ...(id === "blue-1" ? { devices: compiled.devices } : {}),
     engineSpool: throttle,
   };
 }
@@ -151,9 +188,9 @@ function targetVelocity(c: MissileEnvelopeCase) {
   return vec3(0, 0, -c.targetSpeedMps);
 }
 
-function runCase(model: AircraftModel, c: MissileEnvelopeCase): MissileEnvelopeResult {
+function runCase(compiled: ReturnType<typeof compileAirframe>, c: MissileEnvelopeCase): MissileEnvelopeResult {
   const shooter = makeAircraft(
-    model,
+    compiled,
     "blue-1",
     "blue",
     vec3(0, altitudeM, 0),
@@ -162,7 +199,7 @@ function runCase(model: AircraftModel, c: MissileEnvelopeCase): MissileEnvelopeR
     true,
   );
   const target = makeAircraft(
-    model,
+    compiled,
     "red-1",
     "red",
     vec3(c.lateralOffsetM, altitudeM, -c.rangeM),
@@ -170,6 +207,10 @@ function runCase(model: AircraftModel, c: MissileEnvelopeCase): MissileEnvelopeR
     c.targetThrottle,
     c.targetAfterburner,
   );
+  shooter.weaponAmmo =
+    profileId === "aim-54c"
+      ? { "m61-and-missiles": 0 }
+      : { "phoenix-radar-missiles": 0 };
 
   let projectiles: Projectile[] = [];
   let time = 0;
@@ -270,7 +311,7 @@ function runCase(model: AircraftModel, c: MissileEnvelopeCase): MissileEnvelopeR
   };
 }
 
-function cases(): MissileEnvelopeCase[] {
+function sidewinderCases(): MissileEnvelopeCase[] {
   return [
     { id: "rear-hot-2km", aspect: "rear", rangeM: 2_000, lateralOffsetM: 0, shooterSpeedMps: 260, targetSpeedMps: 210, targetThrottle: 1, targetAfterburner: true, maneuver: "steady" },
     { id: "rear-hot-6km", aspect: "rear", rangeM: 6_000, lateralOffsetM: 0, shooterSpeedMps: 260, targetSpeedMps: 220, targetThrottle: 1, targetAfterburner: true, maneuver: "steady" },
@@ -291,21 +332,31 @@ function cases(): MissileEnvelopeCase[] {
   ];
 }
 
+function phoenixCases(): MissileEnvelopeCase[] {
+  return [
+    { id: "bvr-head-on-18km", aspect: "head-on", rangeM: 18_000, lateralOffsetM: 0, shooterSpeedMps: 430, targetSpeedMps: 260, targetThrottle: 0.85, targetAfterburner: false, maneuver: "steady" },
+    { id: "bvr-head-on-35km", aspect: "head-on", rangeM: 35_000, lateralOffsetM: 0, shooterSpeedMps: 430, targetSpeedMps: 260, targetThrottle: 0.85, targetAfterburner: false, maneuver: "steady" },
+    { id: "bvr-head-on-60km", aspect: "head-on", rangeM: 60_000, lateralOffsetM: 0, shooterSpeedMps: 440, targetSpeedMps: 280, targetThrottle: 0.9, targetAfterburner: false, maneuver: "steady" },
+    { id: "bvr-offset-25km", aspect: "head-on", rangeM: 25_000, lateralOffsetM: 2_500, shooterSpeedMps: 430, targetSpeedMps: 260, targetThrottle: 0.85, targetAfterburner: false, maneuver: "steady" },
+    { id: "bvr-offset-45km", aspect: "head-on", rangeM: 45_000, lateralOffsetM: 4_000, shooterSpeedMps: 440, targetSpeedMps: 260, targetThrottle: 0.85, targetAfterburner: false, maneuver: "steady" },
+    { id: "bvr-beam-25km", aspect: "beam-right", rangeM: 25_000, lateralOffsetM: 1_500, shooterSpeedMps: 430, targetSpeedMps: 260, targetThrottle: 0.85, targetAfterburner: false, maneuver: "steady" },
+    { id: "bvr-beam-jink-25km", aspect: "beam-right", rangeM: 25_000, lateralOffsetM: 1_500, shooterSpeedMps: 430, targetSpeedMps: 260, targetThrottle: 0.9, targetAfterburner: false, maneuver: "jink" },
+  ];
+}
+
+function cases(): MissileEnvelopeCase[] {
+  return profileId === "aim-54c" ? phoenixCases() : sidewinderCases();
+}
+
 async function main(): Promise<void> {
-  const model = tomcatModel();
-  const results = cases().map((testCase) => runCase(model, testCase));
+  const compiled = tomcat();
+  const results = cases().map((testCase) => runCase(compiled, testCase));
   const hits = results.filter((result) => result.hit).length;
   const report: MissileEnvelopeReport = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
-    missileProfile: AIM9M_SIDEWINDER_PROFILE,
-    historicalAnchor: {
-      source: "NAVAIR AIM-9M Sidewinder public product page",
-      url: "https://www.navair.navy.mil/product/AIM-9M-Sidewinder",
-      speed: "Mach 2.5",
-      range: "10-18 miles",
-      guidance: "solid-state infrared homing",
-    },
+    missileProfile: missileProfile(),
+    historicalAnchor: historicalAnchor(profileId),
     summary: {
       cases: results.length,
       hits,

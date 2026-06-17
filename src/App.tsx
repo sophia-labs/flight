@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type Airframe, type MatchReplay } from "./protocol/schema";
+import { type Airframe, type ContactPercept, type MatchReplay } from "./protocol/schema";
 import { generateScenarioMatch } from "./runtime/scenario";
 import { aircraftArchetypes } from "./sim/aircraftCatalog";
 import {
@@ -24,7 +24,7 @@ import {
 import { loadStudioProject, saveStudioProject } from "./studio/store";
 import type { CameraMode } from "./viewer/FlightScene";
 import { HangarScreen } from "./viewer/HangarScreen";
-import { MissionControl, type MissionState } from "./viewer/MissionControl";
+import { MissionControl, type MissionRadarTrack, type MissionState } from "./viewer/MissionControl";
 import { sampleReplayFrame } from "./viewer/replaySample";
 import { StudioScreen } from "./viewer/StudioScreen";
 import { usePlayback } from "./viewer/usePlayback";
@@ -62,6 +62,20 @@ export interface ScenarioLaunchProgress {
   actionKind?: string;
   agentLabel?: string;
   rationale?: string;
+}
+
+function missionRadarTracks(contacts: ContactPercept[] | undefined): MissionRadarTrack[] {
+  return (contacts ?? []).map((contact) => ({
+    id: contact.id,
+    team: contact.team,
+    range: contact.range,
+    bearingForward: contact.bearingForward,
+    bearingRight: contact.bearingRight,
+    bearingUp: contact.bearingUp,
+    missileLock: contact.missileLock,
+    radarLock: contact.radarLock,
+    health: contact.health,
+  }));
 }
 
 export function App() {
@@ -209,17 +223,26 @@ export function App() {
       percent: 0,
       decisions: [],
       bodyTicks: [],
+      radarTracks: [],
       complete: false,
     });
     // Yield so React paints the initial MissionControl frame before the match runs
     await nextPaint();
-    const pushDecision = (turn: number, agentId: string, agentLabel: string, actionKind: string, rationale?: string) => {
+    const pushDecision = (
+      turn: number,
+      agentId: string,
+      agentLabel: string,
+      actionKind: string,
+      rationale?: string,
+      contacts?: ContactPercept[],
+    ) => {
       const id = missionIdRef.current++;
       setMissionState((prev) => {
         if (!prev) return prev;
         return {
           ...prev,
           decisions: [...prev.decisions, { id, turn, agentId, agentLabel, actionKind, rationale }],
+          ...(agentId === "blue-1" ? { radarTracks: missionRadarTracks(contacts) } : {}),
         };
       });
     };
@@ -287,7 +310,7 @@ export function App() {
                 const pct = 0.05 + Math.min(0.9, (turn / Math.max(1, maxTurns)) * 0.9);
                 updateProgress(turn, pct);
                 if (event.phase === "decision" && event.agentId && event.agentLabel && event.actionKind) {
-                  pushDecision(turn, event.agentId, event.agentLabel, event.actionKind, event.rationale);
+                  pushDecision(turn, event.agentId, event.agentLabel, event.actionKind, event.rationale, event.contacts);
                 }
                 if (event.phase === "body_tick" && event.bodyTick) {
                   pushBodyTick(
@@ -317,7 +340,14 @@ export function App() {
           const pct = 0.05 + Math.min(0.9, (turn / Math.max(1, maxTurns)) * 0.9);
           updateProgress(turn, pct);
           if (progress.phase === "decision" && progress.agentId && progress.agentLabel && progress.actionKind) {
-            pushDecision(turn, progress.agentId, progress.agentLabel, progress.actionKind, progress.rationale);
+            pushDecision(
+              turn,
+              progress.agentId,
+              progress.agentLabel,
+              progress.actionKind,
+              progress.rationale,
+              progress.contacts,
+            );
           }
           if (progress.phase === "body_tick" && progress.bodyTick) {
             pushBodyTick(
@@ -424,6 +454,7 @@ function nextPaint(): Promise<void> {
 const SCENARIO_TITLE_BY_KIND: Record<StudioScenarioConfig["kind"], string> = {
   balloon: "balloon hunt",
   "balloon-hard": "hard balloon intercept",
+  "bvr-intercept": "BVR intercept",
   duel: "merge duel",
   "stern-gun": "stern gun start",
 };
@@ -431,9 +462,9 @@ const SCENARIO_TITLE_BY_KIND: Record<StudioScenarioConfig["kind"], string> = {
 function scenarioRunsOnServer(scenario: StudioScenarioConfig): boolean {
   return (
     scenario.controlMode === "motor-program" ||
+    scenario.kind === "bvr-intercept" ||
     scenario.kind === "balloon-hard" ||
     scenario.pilotModel !== "scripted-body-pilot" ||
     scenario.bodyModel !== "scripted-fixed-wing-body"
   );
 }
-

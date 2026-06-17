@@ -3,7 +3,7 @@ import { actionSpecs } from "../agent/actionSpec";
 import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import { FLIGHT_RULES, piController } from "../agent/controllers/pi";
 import { defensiveController, pursuitFallback } from "../agent/controllers/scripted";
-import { perfectSensor } from "../agent/observation";
+import { perfectSensor, radarSensorModel, type SensorModel } from "../agent/observation";
 import { competenceEvaluator } from "../eval/outcome";
 import { AirframeSchema, MatchReplaySchema, type Airframe, type MatchReplay } from "../protocol/schema";
 import type { MatchConfig } from "../runtime/config";
@@ -12,12 +12,15 @@ import {
   FRAME_DT,
   TURN_DURATION,
   createBalloonScenarioAircraft,
+  createBvrInterceptAircraft,
   createChallengingBalloonScenarioAircraft,
   createDuelGunStartAircraft,
   createInitialAircraft,
+  gentlePropController,
   staticController,
 } from "../runtime/scenario";
 import { defaultAirframe } from "../sim/airframe";
+import { selectRadarDevice } from "../sim/mountedSensor";
 import {
   SCRIPTED_BODY_MODEL,
   bodyModelLabel,
@@ -30,6 +33,26 @@ import {
   type StudioScenarioConfig,
   type StudioScenarioConfigInput,
 } from "../studio/schema";
+
+const NO_CONTACT_SENSOR: SensorModel = {
+  detect() {
+    return [];
+  },
+};
+
+const BVR_GCI_MESSAGE =
+  "GCI to INTERCEPTOR-1: SLOW CONTACT LAST KNOWN BRG 315, RANGE 42 KM, ALTITUDE LOW. INTERCEPT AND IDENTIFY. If radarLock appears, arm weapons_free condition radar_lock for FOX-3 release; do not assume visual tally.";
+
+const BVR_FLIGHT_RULES = `${FLIGHT_RULES}
+
+BVR intercept scenario:
+- You are flying the player aircraft as a live pilot in the game engine, not following a scripted intercept.
+- This is an intercept-and-identify mission with active-radar BVR missiles available when self.radarMissileLoaded is true.
+- messages may include GCI or data-link cues. Treat them as offboard reports; contacts still come from your aircraft sensor model.
+- If contacts is empty, fly a stable high-energy search/intercept profile from the GCI cue: stay well above the deck, keep speed up, and avoid steep nose-low dives.
+- If a radar contact appears, use bearingRight/bearingUp/range/closureRate to point and manage closure. Do not lawn-dart while chasing a low slow target.
+- When a contact has radarLock=true and weaponCooldown is ready, arm weapons_free with condition radar_lock and keep the tape smooth. The engine releases the active-radar missile only on a real lock.
+- Keep direct trigger false in motor-program samples unless the observation explicitly presents a valid weapon solution.`;
 
 const ScenarioRunRequestSchema = z.object({
   airframe: AirframeSchema,
@@ -64,9 +87,12 @@ export function buildServerScenarioMatchConfig(
   const scenario = StudioScenarioConfigSchema.parse(input);
   assertLiveKeysAvailable(scenario);
   const motorProgram = scenario.controlMode === "motor-program";
+  const bvrScenario = scenario.kind === "bvr-intercept";
   const frameDt = motorProgram ? scenario.motorProgramSampleMs / 1000 : FRAME_DT;
   const turnDuration = motorProgram ? scenario.motorProgramTurnMs / 1000 : TURN_DURATION;
   const bodyModelSlug = bodyModelSlugFor(motorProgram ? scenario.twitchBodyModel : scenario.bodyModel);
+  const initialAircraft = initialAircraftForScenario(blueAirframe, scenario.kind);
+  const blueSensor = bvrScenario ? sensorForBvr(initialAircraft) : perfectSensor;
   const body = createHeadlessBodyConfig({
     modelSlug: bodyModelSlug,
     maxTokens: numberEnv("SCENARIO_BODY_MAX_TOKENS", numberEnv("BODY_MAX_TOKENS", 96)),
@@ -76,18 +102,23 @@ export function buildServerScenarioMatchConfig(
     bodyTickDt: frameDt,
   });
   const pilotModelSlug = pilotModelSlugFor(scenario);
-  const livePilot = motorProgram || scenario.pilotModel !== "scripted-body-pilot";
+  const livePilot = bvrScenario || motorProgram || scenario.pilotModel !== "scripted-body-pilot";
   const blueController = livePilot
     ? piController({
         slug: pilotModelSlug,
         spec: actionSpecs[motorProgram ? "motor-program" : "pilot-intent"],
-        rules: FLIGHT_RULES,
+        rules: bvrScenario ? BVR_FLIGHT_RULES : FLIGHT_RULES,
         maxTokens: numberEnv("SCENARIO_PILOT_MAX_TOKENS", motorProgram ? 4_096 : 512),
       })
     : bodyPilotController(0.82);
   const balloonScenario = scenario.kind === "balloon" || scenario.kind === "balloon-hard";
   const redEntry =
-    balloonScenario
+    bvrScenario
+      ? {
+          meta: { id: "prop-1", kind: "scripted" as const, label: "Day Tripper (unarmed sightseeing)" },
+          controller: gentlePropController,
+        }
+      : balloonScenario
       ? {
           meta: { id: "balloon", kind: "scripted" as const, label: "balloon (static)" },
           controller: staticController,
@@ -103,8 +134,8 @@ export function buildServerScenarioMatchConfig(
     frameDt,
     maxTurns: normalizedTurnCount(scenario.turnCount),
     decisionTimeoutMs: numberEnv("SCENARIO_DECISION_TIMEOUT_MS", 30_000),
-    initialAircraft: initialAircraftForScenario(blueAirframe, scenario.kind),
-    sensor: perfectSensor,
+    initialAircraft,
+    sensor: bvrScenario ? NO_CONTACT_SENSOR : perfectSensor,
     evaluator: competenceEvaluator,
     fallback: pursuitFallback,
     agents: {
@@ -129,6 +160,8 @@ export function buildServerScenarioMatchConfig(
           },
         },
         controller: blueController,
+        sensor: blueSensor,
+        ...(bvrScenario ? { messages: [BVR_GCI_MESSAGE] } : {}),
         ...(motorProgram ? { reflexBody: body, reflexPlaybackTimeScale: scenario.twitchTimeScale } : { body }),
       },
       [redEntry.meta.id]: redEntry,
@@ -137,10 +170,17 @@ export function buildServerScenarioMatchConfig(
 }
 
 function initialAircraftForScenario(blueAirframe: Airframe, kind: StudioScenarioConfig["kind"]) {
+  if (kind === "bvr-intercept") return createBvrInterceptAircraft(blueAirframe);
   if (kind === "balloon-hard") return createChallengingBalloonScenarioAircraft(blueAirframe);
   if (kind === "balloon") return createBalloonScenarioAircraft(blueAirframe);
   if (kind === "stern-gun") return createDuelGunStartAircraft(blueAirframe, defaultAirframe());
   return createInitialAircraft(blueAirframe, defaultAirframe());
+}
+
+function sensorForBvr(aircraft: ReturnType<typeof createBvrInterceptAircraft>): SensorModel {
+  const blue = aircraft.find((ship) => ship.id === "blue-1");
+  const radar = selectRadarDevice(blue?.devices);
+  return radar ? radarSensorModel(radar) : NO_CONTACT_SENSOR;
 }
 
 function scenarioRunId(scenario: StudioScenarioConfig): string {
@@ -160,6 +200,9 @@ function pilotModelSlugFor(scenario: StudioScenarioConfig): string {
   if (scenario.controlMode === "motor-program") {
     return scenario.pilotModel === "scripted-body-pilot" ? DIRECT_DEEPSEEK_PLANNER_MODEL : scenario.pilotModel;
   }
+  if (scenario.kind === "bvr-intercept" && scenario.pilotModel === "scripted-body-pilot") {
+    return DIRECT_DEEPSEEK_PLANNER_MODEL;
+  }
   return scenario.pilotModel;
 }
 
@@ -167,6 +210,13 @@ function assertLiveKeysAvailable(scenario: StudioScenarioConfig): void {
   if (scenario.controlMode === "motor-program") {
     assertModelKey(pilotModelSlugFor(scenario), "motor-program planner");
     assertModelKey(bodyModelSlugFor(scenario.twitchBodyModel), "twitch body");
+    return;
+  }
+  if (scenario.kind === "bvr-intercept") {
+    assertModelKey(pilotModelSlugFor(scenario), "BVR pilot");
+    if (scenario.bodyModel !== "scripted-fixed-wing-body") {
+      assertModelKey(bodyModelSlugFor(scenario.bodyModel), "BVR body");
+    }
     return;
   }
   if (scenario.pilotModel !== "scripted-body-pilot") assertModelKey(scenario.pilotModel, "scenario pilot");

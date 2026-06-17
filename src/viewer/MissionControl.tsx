@@ -29,6 +29,18 @@ export interface MissionBodyTick {
   feel?: string;
 }
 
+export interface MissionRadarTrack {
+  id: string;
+  team: "blue" | "red";
+  range: number;
+  bearingForward: number;
+  bearingRight: number;
+  bearingUp: number;
+  missileLock?: boolean;
+  radarLock?: boolean;
+  health: number;
+}
+
 export interface MissionState {
   scenarioLabel: string;
   aircraftName: string;
@@ -38,6 +50,7 @@ export interface MissionState {
   percent: number;
   decisions: MissionDecision[];
   bodyTicks: MissionBodyTick[];
+  radarTracks: MissionRadarTrack[];
   complete: boolean;
 }
 
@@ -79,7 +92,31 @@ function bodyStatusColor(status: string): string {
 
 // ── RadarScope ─────────────────────────────────────────────────────
 
-function RadarScope({ turn, maxTurns, active }: { turn: number; maxTurns: number; active: boolean }) {
+const RADAR_SCOPE_RANGE_M = 80_000;
+
+function radarClamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function radarTrackPosition(track: MissionRadarTrack): { left: number; top: number } {
+  const radial = radarClamp(track.range / RADAR_SCOPE_RANGE_M, 0.08, 0.95);
+  return {
+    left: 50 + radarClamp(track.bearingRight, -1, 1) * radial * 45,
+    top: 50 - radarClamp(track.bearingForward, -1, 1) * radial * 45,
+  };
+}
+
+function RadarScope({
+  turn,
+  maxTurns,
+  active,
+  tracks,
+}: {
+  turn: number;
+  maxTurns: number;
+  active: boolean;
+  tracks: MissionRadarTrack[];
+}) {
   const sweepRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -100,27 +137,38 @@ function RadarScope({ turn, maxTurns, active }: { turn: number; maxTurns: number
       <div className="radar-ring ring-3" />
       <div className="radar-crosshair" />
 
-      {/* Aircraft dots */}
+      {/* Ownship */}
       <div
         className="radar-dot blue-dot"
         aria-label="Blue aircraft position"
         style={{
-          left: "42%",
-          top: "44%",
+          left: "50%",
+          top: "50%",
         }}
       >
         <span className="dot-pulse" />
       </div>
-      <div
-        className="radar-dot red-dot"
-        aria-label="Red aircraft position"
-        style={{
-          left: "58%",
-          top: "52%",
-        }}
-      >
-        <span className="dot-pulse" />
-      </div>
+
+      {tracks.slice(0, 8).map((track) => {
+        const pos = radarTrackPosition(track);
+        const locked = track.radarLock || track.missileLock;
+        return (
+          <div
+            key={track.id}
+            className={`radar-dot ${track.team === "blue" ? "blue-dot" : "red-dot"}${locked ? " locked" : ""}`}
+            aria-label={`${track.id} ${Math.round(track.range / 1000)} kilometers${locked ? " locked" : ""}`}
+            style={{
+              left: `${pos.left}%`,
+              top: `${pos.top}%`,
+            }}
+          >
+            <span className="dot-pulse" />
+            <span className="radar-dot-label">
+              {locked ? "LOCK" : `${Math.round(track.range / 1000)}K`}
+            </span>
+          </div>
+        );
+      })}
 
       {/* Sweep line */}
       <div ref={sweepRef} className="radar-sweep" />
@@ -280,7 +328,12 @@ export function MissionControl({ state }: { state: MissionState }) {
       <div className="mission-core">
         {/* Radar scope — center-left */}
         <div className="mission-radar-area">
-          <RadarScope turn={state.turn} maxTurns={state.maxTurns} active={!state.complete} />
+          <RadarScope
+            turn={state.turn}
+            maxTurns={state.maxTurns}
+            active={!state.complete}
+            tracks={state.radarTracks}
+          />
         </div>
 
         {/* Decision log — right column */}

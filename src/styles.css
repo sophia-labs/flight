@@ -2108,6 +2108,31 @@ h2 {
 }
 .blue-dot { background: #4da3ff; box-shadow: 0 0 10px #4da3ff, 0 0 20px rgba(77, 163, 255, 0.4); }
 .red-dot  { background: #ff6b61; box-shadow: 0 0 10px #ff6b61, 0 0 20px rgba(255, 107, 97, 0.4); }
+.radar-dot.locked {
+  width: 10px;
+  height: 10px;
+  outline: 1px solid rgba(242, 201, 76, 0.9);
+  outline-offset: 3px;
+}
+
+.radar-dot-label {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 6px);
+  translate: -50% 0;
+  color: #d7e5ea;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: nowrap;
+  text-shadow: 0 0 6px rgba(10, 16, 24, 0.95);
+  pointer-events: none;
+}
+
+.radar-dot.locked .radar-dot-label {
+  color: #f2c94c;
+}
 
 .dot-pulse {
   position: absolute;

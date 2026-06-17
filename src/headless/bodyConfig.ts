@@ -11,6 +11,7 @@ export interface HeadlessBodyConfigOptions {
   maxRetries?: number;
   emptyRetries?: number;
   timeoutMs?: number;
+  bodyTickDt?: number;
 }
 
 export function isLiveBodyModel(modelSlug = SCRIPTED_BODY_MODEL): boolean {
@@ -24,16 +25,20 @@ export function bodyModelLabel(modelSlug = SCRIPTED_BODY_MODEL): string {
 export function createHeadlessBodyConfig(options: HeadlessBodyConfigOptions = {}): BodyRuntimeConfig {
   const modelSlug = options.modelSlug ?? SCRIPTED_BODY_MODEL;
   const timeoutMs = options.timeoutMs;
+  const manifest =
+    options.bodyTickDt !== undefined
+      ? { ...fixedWingBodyManifest, bodyTickDt: options.bodyTickDt }
+      : fixedWingBodyManifest;
   if (!isLiveBodyModel(modelSlug)) {
     return {
-      manifest: fixedWingBodyManifest,
+      manifest,
       model: scriptedFixedWingBodyModel,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     };
   }
 
   return {
-    manifest: fixedWingBodyManifest,
+    manifest,
     model: piBodyModel({
       slug: modelSlug,
       maxTokens: options.maxTokens,

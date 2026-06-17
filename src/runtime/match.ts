@@ -28,7 +28,13 @@ import {
   type PendingBodyTick,
 } from "../body/runtime";
 import { selectCameraDevice } from "../sim/mountedSensor";
-import { hasLoadedHeatSeeker, irLockAvailable, stepSimulation } from "../sim/flight";
+import {
+  activeRadarLockAvailable,
+  hasLoadedActiveRadarMissile,
+  hasLoadedHeatSeeker,
+  irLockAvailable,
+  stepSimulation,
+} from "../sim/flight";
 import { basisFromQuat, dot, length, normalize, sub } from "../sim/math";
 import { toSnapshot, type AircraftState, type Projectile } from "../sim/types";
 import type { AgentEntry, MatchConfig, MatchProgress } from "./config";
@@ -90,8 +96,27 @@ function isMotorProgramAction(action: Action | undefined): action is MotorProgra
   return action?.kind === "motor-program";
 }
 
-function weaponsFreeGuard(action: MotorProgramAction): MotorProgramHeldAction | undefined {
-  return action.heldActions.find((held) => held.kind === "weapons_free");
+function weaponsFreeGuards(action: MotorProgramAction): MotorProgramHeldAction[] {
+  return action.heldActions.filter((held) => held.kind === "weapons_free");
+}
+
+function heldCondition(guard: MotorProgramHeldAction): string {
+  return (guard.condition ?? "").trim().toLowerCase();
+}
+
+function guardAuthorizesHeatMissile(guard: MotorProgramHeldAction): boolean {
+  const condition = heldCondition(guard);
+  return ["ir_lock", "missile_lock", "heat_lock", "fox_2", "fox-2"].includes(condition);
+}
+
+function guardAuthorizesRadarMissile(guard: MotorProgramHeldAction): boolean {
+  const condition = heldCondition(guard);
+  return ["radar_lock", "fox_3", "fox-3"].includes(condition);
+}
+
+function guardAuthorizesGunTwitch(guard: MotorProgramHeldAction): boolean {
+  const condition = heldCondition(guard);
+  return condition === "" || condition === "target_in_forward_gun_cone" || condition === "gun_cone";
 }
 
 function targetInForwardCone(input: {
@@ -116,9 +141,15 @@ function targetInForwardCone(input: {
 // IR missile sear: a no-twitch motor-program planner that armed weapons_free fires its loaded heat-seeker
 // the instant a live IR lock exists on an enemy. The planner armed and flew the lock; the sear only pulls
 // the trigger when the seeker solution is real (assisted-sear; deterministic, no scripted flying).
-function missileSearReady(self: AircraftState, aircraft: AircraftState[]): boolean {
-  if (!hasLoadedHeatSeeker(self)) return false;
-  return aircraft.some((target) => target.id !== self.id && irLockAvailable(self, target));
+function missileSearReady(self: AircraftState, aircraft: AircraftState[], guard: MotorProgramHeldAction): boolean {
+  const heatReady =
+    guardAuthorizesHeatMissile(guard) &&
+    hasLoadedHeatSeeker(self) && aircraft.some((target) => target.id !== self.id && irLockAvailable(self, target));
+  const radarReady =
+    guardAuthorizesRadarMissile(guard) &&
+    hasLoadedActiveRadarMissile(self) &&
+    aircraft.some((target) => target.id !== self.id && activeRadarLockAvailable(self, target));
+  return heatReady || radarReady;
 }
 
 function reflexIntentFor(action: MotorProgramAction, guard: MotorProgramHeldAction): PilotIntentAction {
@@ -271,6 +302,8 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
         agentId: ship.id,
         agentLabel: entry.meta.label,
         actionKind: outcome.action.kind,
+        self: observation.self,
+        contacts: observation.contacts,
         ...(outcome.rationale !== undefined ? { rationale: outcome.rationale } : {}),
       });
 
@@ -316,17 +349,26 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
           pendingBodyTicks[ship.id] = pending;
         } else if (entry?.reflexBody && isMotorProgramAction(action)) {
           const baseControl = adapterFor(action.kind).controlFor(action, ship, { elapsedMs });
-          const guard = weaponsFreeGuard(action);
-          const reflexActive =
-            guard !== undefined &&
+          const guards = weaponsFreeGuards(action);
+          const missileReady = guards.some((guard) => missileSearReady(ship, aircraft, guard));
+          const reflexGuard = guards.find((guard) =>
+            guardAuthorizesGunTwitch(guard) &&
             targetInForwardCone({
               self: ship,
               aircraft,
               coneDeg: guard.coneDeg ?? 12,
               rangeM: guard.rangeM ?? 2_900,
-            });
+            }),
+          );
 
-          if (reflexActive) {
+          if (missileReady) {
+            const phase = activeTwitchPhases[ship.id];
+            if (phase) {
+              phase.endTime = time;
+              activeTwitchPhases[ship.id] = undefined;
+            }
+            controlsById[ship.id] = { ...baseControl, trigger: true };
+          } else if (reflexGuard) {
             let phase = activeTwitchPhases[ship.id];
             if (!phase) {
               phase = {
@@ -340,7 +382,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
                   typeof entry.meta.config?.twitchBodyModel === "string"
                     ? entry.meta.config.twitchBodyModel
                     : entry.meta.label,
-                reason: guard.condition ?? "weapons_free",
+                reason: reflexGuard.condition ?? "weapons_free",
               };
               activeTwitchPhases[ship.id] = phase;
               agentPhases.push(phase);
@@ -357,7 +399,7 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
               dt: config.frameDt,
               self: ship,
               aircraft,
-              pilotIntent: reflexIntentFor(action, guard),
+              pilotIntent: reflexIntentFor(action, reflexGuard),
               device: selectCameraDevice(ship.devices),
             });
             controlsById[ship.id] = pending.controlInput;
@@ -372,10 +414,11 @@ export async function runMatch(config: MatchConfig): Promise<MatchReplay> {
           }
         } else if (action) {
           const control = adapterFor(action.kind).controlFor(action, ship, { elapsedMs });
-          // Release the FOX-2 if this motor-program armed weapons_free and a loaded heat-seeker now has a
-          // live IR lock — the only path by which a no-twitch planner (no reflex Body) takes the shot.
+          // Release a missile only when the planner armed the matching lock guard and the live seeker/track
+          // is valid. Gun-cone guards remain gun/twitch authorization, not generic missile consent.
           controlsById[ship.id] =
-            isMotorProgramAction(action) && weaponsFreeGuard(action) && missileSearReady(ship, aircraft)
+            isMotorProgramAction(action) &&
+            weaponsFreeGuards(action).some((guard) => missileSearReady(ship, aircraft, guard))
               ? { ...control, trigger: true }
               : control;
         }

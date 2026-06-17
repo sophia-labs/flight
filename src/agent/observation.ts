@@ -1,5 +1,10 @@
 import { ObservationSchema, type ContactPercept, type Observation } from "../protocol/schema";
-import { hasLoadedHeatSeeker, irLockAvailable } from "../sim/flight";
+import {
+  activeRadarLockAvailable,
+  hasLoadedActiveRadarMissile,
+  hasLoadedHeatSeeker,
+  irLockAvailable,
+} from "../sim/flight";
 import { radarSensor } from "./perception";
 import type { SensorDevice } from "../sim/parts";
 import { basisFromQuat, dot, length, normalize, sub } from "../sim/math";
@@ -62,6 +67,7 @@ export function toObservation(
 ): Observation {
   const basis = basisFromQuat(self.orientation);
   const missileLoaded = hasLoadedHeatSeeker(self);
+  const radarMissileLoaded = hasLoadedActiveRadarMissile(self);
 
   const contacts: ContactPercept[] = sensor.detect(world, self).map(({ target }) => {
     const relative = sub(target.position, self.position);
@@ -78,6 +84,7 @@ export function toObservation(
       health: target.health,
       ...(target.static ? { balloon: true } : {}),
       ...(missileLoaded && irLockAvailable(self, target) ? { missileLock: true } : {}),
+      ...(radarMissileLoaded && activeRadarLockAvailable(self, target) ? { radarLock: true } : {}),
     };
   });
 
@@ -95,6 +102,7 @@ export function toObservation(
       weaponCooldown: self.weaponCooldown,
       stalled: self.metrics.stalled,
       ...(missileLoaded ? { missileLoaded: true } : {}),
+      ...(radarMissileLoaded ? { radarMissileLoaded: true } : {}),
     },
     contacts,
     ...(messages.length > 0 ? { messages } : {}),

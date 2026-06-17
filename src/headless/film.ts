@@ -10,11 +10,13 @@
 //
 //   npm run film -- --scripted                          # free dev pass (ascii), no API key
 //   npm run film -- --scripted --cinema                 # free dev pass (3D), no API key
-//   npm run film -- deepseek/deepseek-v4-flash --cinema  # live; writes film.mp4
+//   npm run film -- deepseek-v4-flash --cinema  # live direct DeepSeek; writes film.mp4
 //   npm run film -- <model> --cinema --out clips/run.mp4
 //   npm run film -- --scripted --replay-out /tmp/replay.json
-//   env: FILM_TURNS (16), FILM_FPS (30), FILM_MODE (raw-stick|setpoint|flight-director|pilot-intent)
-//        BODY_MODEL (scripted, or an OpenRouter slug when FILM_MODE=pilot-intent)
+//   env: FILM_TURNS (16), FILM_FPS (30), FILM_MODE (raw-stick|setpoint|flight-director|pilot-intent|motor-program)
+//        BODY_MODEL (scripted, or a live slug when FILM_MODE=pilot-intent)
+//        TWITCH_BODY_MODEL (optional fast Body model when FILM_MODE=motor-program; defaults live in non-scripted runs)
+//        PILOT_MAX_TOKENS (defaults higher in motor-program so the planner can return a full tape)
 //        FILM_SENSOR_ID (cockpit-cam default; use nose-cam for the old forward sensor)
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -27,17 +29,19 @@ import { actionSpecs, type ActionMode } from "../agent/actionSpec";
 import { cameraAsciiEncoderV2 } from "../agent/encoders/cameraAscii";
 import { bodyPilotController } from "../agent/controllers/bodyPilot";
 import { FLIGHT_RULES, piController, resolveOpenRouterModel } from "../agent/controllers/pi";
-import { defensiveController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
+import { defensiveController, motorProgramController, pursuitController, pursuitFallback } from "../agent/controllers/scripted";
 import { perfectSensor } from "../agent/observation";
 import { senseAndEncode } from "../agent/perception";
 import { competenceEvaluator } from "../eval/outcome";
 import type { AircraftSnapshot, MatchReplay, Part, ProjectileSnapshot, Quaternion, ReplayEvent } from "../protocol/schema";
 import type { MatchConfig } from "../runtime/config";
+import type { BodyRuntimeConfig } from "../body/runtime";
 import { runMatch } from "../runtime/match";
 import {
   FRAME_DT,
   TURN_DURATION,
   createBalloonScenarioAircraft,
+  createChallengingBalloonScenarioAircraft,
   createDuelDogfightStartAircraft,
   createDuelGunStartAircraft,
   createInitialAircraft,
@@ -59,6 +63,9 @@ import { formatReplayVerification, summarizeReplayVerification } from "./replayV
 
 const PILOT_ID = "blue-1";
 const RAD2DEG = 180 / Math.PI;
+const DEFAULT_LIVE_BODY_MODEL = "deepseek-v4-flash";
+const MOTOR_PROGRAM_TURN_DURATION = 2.5;
+const MOTOR_PROGRAM_FRAME_DT = 0.05;
 
 // Cinema canvas layout (kept in sync with the page below).
 const H = 640;
@@ -88,17 +95,26 @@ const replayOut = flagValue("--replay-out");
 const replayIn = flagValue("--replay-in");
 const model =
   argv.find((a, i) => !a.startsWith("--") && !consumedArgIndices.has(i)) ??
-  "deepseek/deepseek-v4-flash";
+  "deepseek-v4-flash";
 const turns = Number(process.env.FILM_TURNS ?? 16);
 const fps = Number(process.env.FILM_FPS ?? 30);
 const mode = parseActionMode(process.env.FILM_MODE ?? "flight-director");
-const bodyModel = process.env.BODY_MODEL ?? SCRIPTED_BODY_MODEL;
+const turnDuration = Number(
+  process.env.FILM_TURN_DURATION ?? (mode === "motor-program" ? MOTOR_PROGRAM_TURN_DURATION : TURN_DURATION),
+);
+const frameDt = Number(process.env.FILM_FRAME_DT ?? (mode === "motor-program" ? MOTOR_PROGRAM_FRAME_DT : FRAME_DT));
+const bodyModel = process.env.BODY_MODEL ?? (!scripted && mode === "pilot-intent" ? model : SCRIPTED_BODY_MODEL);
+const twitchBodyModel =
+  process.env.TWITCH_BODY_MODEL ??
+  process.env.BODY_MODEL ??
+  (!scripted && mode === "motor-program" ? DEFAULT_LIVE_BODY_MODEL : bodyModel);
+const pilotMaxTokens = Number(process.env.PILOT_MAX_TOKENS ?? (mode === "motor-program" ? 4_096 : 512));
 const bodyTimeoutMs = Number(process.env.BODY_TIMEOUT_MS ?? 15_000);
 const bodyMaxTokens = Number(process.env.BODY_MAX_TOKENS ?? 96);
 const bodyMaxRetries = Number(process.env.BODY_MAX_RETRIES ?? 2);
 const bodyEmptyRetries = Number(process.env.BODY_EMPTY_RETRIES ?? 1);
 const sensorId = process.env.FILM_SENSOR_ID ?? "cockpit-cam";
-const scenario = process.env.FILM_SCENARIO ?? "duel"; // "duel" | "balloon" | "duel-gun-start" | "duel-dogfight-start"
+const scenario = process.env.FILM_SCENARIO ?? "duel"; // "duel" | "balloon" | "balloon-hard" | "duel-gun-start" | "duel-dogfight-start"
 // FILM_LABEL overrides the subtitle speaker name — useful with --replay-in, where the filmed model is
 // the one baked into the replay, not the (unused) positional model arg. Falls back to the model slug.
 const label = process.env.FILM_LABEL ?? (scripted ? "Pursuit" : (model.split("/").pop() ?? model));
@@ -108,29 +124,52 @@ function parseActionMode(raw: string): ActionMode {
   throw new Error(`unknown FILM_MODE=${raw}; expected ${Object.keys(actionSpecs).join("|")}`);
 }
 
+function retimeBodyConfig(config: BodyRuntimeConfig | undefined, dt: number): BodyRuntimeConfig | undefined {
+  return config ? { ...config, manifest: { ...config.manifest, bodyTickDt: dt } } : undefined;
+}
+
 function buildConfig(): MatchConfig {
   const usesBody = mode === "pilot-intent";
-  const body = usesBody
-    ? createHeadlessBodyConfig({
+  const usesReflexBody = mode === "motor-program";
+  const body = retimeBodyConfig(
+    usesBody
+      ? createHeadlessBodyConfig({
         modelSlug: bodyModel,
         maxTokens: bodyMaxTokens,
         maxRetries: bodyMaxRetries,
         emptyRetries: bodyEmptyRetries,
         timeoutMs: bodyTimeoutMs,
       })
-    : undefined;
+      : undefined,
+    frameDt,
+  );
+  const reflexBody = retimeBodyConfig(
+    usesReflexBody
+      ? createHeadlessBodyConfig({
+        modelSlug: twitchBodyModel,
+        maxTokens: bodyMaxTokens,
+        maxRetries: bodyMaxRetries,
+        emptyRetries: bodyEmptyRetries,
+        timeoutMs: bodyTimeoutMs,
+      })
+      : undefined,
+    frameDt,
+  );
   const blue = scripted
-    ? usesBody
+    ? usesReflexBody
+      ? motorProgramController(0.82)
+      : usesBody
       ? bodyPilotController(0.82)
       : pursuitController(0.82)
-    : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES });
+    : piController({ slug: model, spec: actionSpecs[mode], rules: FLIGHT_RULES, maxTokens: pilotMaxTokens });
   // FILM_SCENARIO=balloon: the founding challenge — the embodied Body hunts a single static red balloon
   // instead of dueling a maneuvering jet. Red becomes the hovering no-op balloon (staticController).
-  const balloon = scenario === "balloon";
+  const balloon = scenario === "balloon" || scenario === "balloon-hard";
+  const balloonHard = scenario === "balloon-hard";
   const gunStart = scenario === "duel-gun-start";
   const dogfightStart = scenario === "duel-dogfight-start";
   if (!balloon && !gunStart && !dogfightStart && scenario !== "duel") {
-    throw new Error(`unknown FILM_SCENARIO=${scenario}; expected duel, balloon, duel-gun-start, or duel-dogfight-start`);
+    throw new Error(`unknown FILM_SCENARIO=${scenario}; expected duel, balloon, balloon-hard, duel-gun-start, or duel-dogfight-start`);
   }
   // RED_BODY_MODEL=<slug>: make RED a second embodied Body too — a Body-vs-Body duel (e.g. deepseek vs
   // deepseek). Both sides fly on the glyph-field, arm the held-action sear, and fire real rounds at each
@@ -162,13 +201,16 @@ function buildConfig(): MatchConfig {
   return {
     id:
       `film|${scripted ? "scripted" : model}|${mode}${usesBody ? `|body:${bodyModelLabel(bodyModel)}` : ""}` +
-      `${balloon ? "|balloon" : ""}${gunStart ? "|duel-gun-start" : ""}${dogfightStart ? "|duel-dogfight-start" : ""}`,
-    turnDuration: TURN_DURATION,
-    frameDt: FRAME_DT,
+      `${usesReflexBody ? `|twitch:${bodyModelLabel(twitchBodyModel)}` : ""}` +
+      `${balloonHard ? "|balloon-hard" : balloon ? "|balloon" : ""}${gunStart ? "|duel-gun-start" : ""}${dogfightStart ? "|duel-dogfight-start" : ""}`,
+    turnDuration,
+    frameDt,
     maxTurns: turns,
     decisionTimeoutMs: 30_000,
     initialAircraft: balloon
-      ? createBalloonScenarioAircraft()
+      ? balloonHard
+        ? createChallengingBalloonScenarioAircraft()
+        : createBalloonScenarioAircraft()
       : gunStart
         ? createDuelGunStartAircraft()
         : dogfightStart
@@ -183,12 +225,24 @@ function buildConfig(): MatchConfig {
           id: "blue-1",
           kind: scripted ? "scripted" : "llm",
           label: scripted ? "pursuit" : `${model}/${mode}`,
-          ...(body
-            ? { config: { bodyId: body.manifest.bodyId, bodyModel: bodyModelLabel(bodyModel) } }
+          ...(body || reflexBody
+            ? {
+                config: {
+                  ...(body ? { bodyId: body.manifest.bodyId, bodyModel: bodyModelLabel(bodyModel) } : {}),
+                  ...(reflexBody
+                    ? {
+                        motorProgramDtMs: 50,
+                        twitchBodyId: reflexBody.manifest.bodyId,
+                        twitchBodyModel: bodyModelLabel(twitchBodyModel),
+                      }
+                    : {}),
+                },
+              }
             : {}),
         },
         controller: blue,
         ...(body ? { body } : {}),
+        ...(reflexBody ? { reflexBody } : {}),
       },
       [redEntry.meta.id]: redEntry,
     },
@@ -668,10 +722,14 @@ async function renderCinema(frames: FilmFrame[]): Promise<void> {
 async function main(): Promise<void> {
   if (!scripted) resolveOpenRouterModel(model); // fail fast if the slug isn't in the registry
   if (mode === "pilot-intent" && isLiveBodyModel(bodyModel)) createHeadlessBodyConfig({ modelSlug: bodyModel });
+  if (mode === "motor-program" && isLiveBodyModel(twitchBodyModel)) {
+    createHeadlessBodyConfig({ modelSlug: twitchBodyModel });
+  }
   console.error(
     `film${cinema ? " [cinema]" : ""}: ${scripted ? "scripted" : model} (${mode}` +
-      `${mode === "pilot-intent" ? `, body=${bodyModelLabel(bodyModel)}` : ""}) — ` +
-      `${turns} turns @ ${fps}fps -> ${out}`,
+      `${mode === "pilot-intent" ? `, body=${bodyModelLabel(bodyModel)}` : ""}` +
+      `${mode === "motor-program" ? `, twitch=${bodyModelLabel(twitchBodyModel)}` : ""}) — ` +
+      `${turns} turns, turn=${turnDuration.toFixed(2)}s dt=${frameDt.toFixed(2)}s @ ${fps}fps -> ${out}`,
   );
 
   const replay: MatchReplay = replayIn
@@ -692,7 +750,7 @@ async function main(): Promise<void> {
     `flew: winner=${replay.outcome?.winnerTeam ?? "draw"} fallbacks=${fallbacks}/${pilotDecisions.length} ` +
       `cost=$${(pilotCost + bodyCost).toFixed(4)} pilot=$${pilotCost.toFixed(4)} body=$${bodyCost.toFixed(4)}`,
   );
-  if (mode === "pilot-intent") {
+  if (mode === "pilot-intent" || mode === "motor-program") {
     console.error(formatReplayVerification(summarizeReplayVerification(replay, PILOT_ID)));
   }
   if (recordOnly) {

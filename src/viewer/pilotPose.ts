@@ -1,4 +1,3 @@
-import * as THREE from "three";
 import type { PilotForces } from "./pilotRig";
 
 export interface Rotation {
@@ -192,10 +191,14 @@ function automaticPose(elapsed: number): PilotPose {
   };
 }
 
+function mathClamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 function gForcePose(elapsed: number, forces: PilotForces): PilotPose {
-  const vertical = THREE.MathUtils.clamp(forces.vertical, 0, 6);
-  const lateral = THREE.MathUtils.clamp(forces.lateral, -2, 2);
-  const foreAft = THREE.MathUtils.clamp(forces.foreAft, -2, 2);
+  const vertical = mathClamp(forces.vertical, 0, 6);
+  const lateral = mathClamp(forces.lateral, -2, 2);
+  const foreAft = mathClamp(forces.foreAft, -2, 2);
   const strain = clamp01(vertical / 6 + Math.abs(lateral) / 3 + Math.abs(foreAft) / 3);
 
   if (strain <= 0.001) return createPose();

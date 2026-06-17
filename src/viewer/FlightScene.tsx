@@ -16,6 +16,7 @@ import { defaultAirframe } from "../sim/airframe";
 import { mountedSensorPose, selectCameraDevice } from "../sim/mountedSensor";
 import type { SensorDevice } from "../sim/parts";
 import type { PilotProfile } from "../studio/schema";
+import { playbackTimeScaleAt } from "../replay/agentPhases";
 import { PART_VISUAL_SCALE, PartMeshes } from "./airframeMesh";
 import { PilotAvatar } from "./PilotAvatar";
 import { computePilotCinemaShot } from "./pilotCinema";
@@ -245,7 +246,8 @@ function SceneDriver({
     if (maxIndex < 0) return;
 
     if (clock.playing) {
-      clock.position += delta * clock.framesPerSecond;
+      const simTime = clock.position * replay.frameDt;
+      clock.position += delta * clock.framesPerSecond * playbackTimeScaleAt(replay, pilotId, simTime);
       if (clock.position > maxIndex) clock.position = 0; // loop
     }
     clock.position = Math.min(maxIndex, Math.max(0, clock.position));
