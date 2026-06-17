@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **MissionControl**: full-screen cinematic progress overlay during scenario execution. Replaces the cramped right-panel progress bar with a dark monospace mission-control display featuring an animated radar scope (sweep line, aircraft dots, turn counter), slide-in decision log cards (agent + action + rationale), a scrolling body-tick terminal feed, a segmented timeline bar, and a green "SCENARIO COMPLETE" pulse transition.
+- Added live streaming match progress. `runMatch()` accepts an optional `onProgress` callback emitting `turn_start`, `decision`, `body_tick`, `frame`, and `complete` events. The `/api/scenario/run` endpoint detects `Accept: text/event-stream` and streams SSE progress events; the JSON-only path is unchanged.
+- Client-side scripted matches also stream progress through the same `onProgress` contract; `launchFlight()` unifies both paths, accumulating decisions and body ticks into reactive state for MissionControl.
+
 - Added live Body LLM support to the headless film and sweep paths through `FILM_MODE=pilot-intent`, `BODY_MODEL`, `SWEEP_MODES`, and `SWEEP_BODY_MODEL`.
 - Body ticks now optionally record model usage, cost, latency, and provider errors; provider failures become invalid-recovery ticks instead of crashing a match.
 - Match stats and sweep summaries now include total run cost plus Body-specific cost and parse-rate accounting.
