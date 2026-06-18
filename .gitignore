@@ -5,6 +5,7 @@ playwright-report/
 .DS_Store
 .env
 .env.*
+!.env.example
 match.json
 match-state.json
 sweep-results.jsonl
@@ -14,6 +15,31 @@ clips/
 stills-tuning/
 
 bench/replays/
+
+# Generated research artifacts. Keep curated Markdown reports in git; keep bulky JSON replays local.
+reports/coach/**/*.json
+reports/coach/*.json
+reports/flight-envelopes.json
+surface-physics-demo-contact.png
+
+# Replay batch referenced by reports/coach/replay-compendium-r1.md.
+!reports/coach/baseline.json
+!reports/coach/doctrine.json
+!reports/coach/doctrine-hard.json
+!reports/coach/missile.json
+!reports/coach/tomcat-bvr-motor-tape-motor-high-r1-best-replay.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-strict-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-sonnet-4-6-strict-r1/sortie-1-anthropic-claude-sonnet-4-6.json
+!reports/coach/bvr-doctrine-sonnet-4-6-bvr-override-r2/sortie-1-anthropic-claude-sonnet-4-6.json
+!reports/coach/bvr-doctrine-sonnet-4-6-compact-r1/sortie-1-anthropic-claude-sonnet-4-6.json
+!reports/coach/bvr-doctrine-sonnet-4-6-compact-r2/sortie-1-anthropic-claude-sonnet-4-6.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-compact-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-filter-smoke-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-halfsec-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-halfsec-30s-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-halfsec-leveltarget-r1/sortie-1-deepseek-v4-pro.json
+!reports/coach/bvr-doctrine-deepseek-v4-pro-halfsec-leveltarget-r2/sortie-1-deepseek-v4-pro.json
 
 # Terraform state (sensitive — never commit)
 terraform/.terraform/

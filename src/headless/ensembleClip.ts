@@ -11,7 +11,7 @@ import {
   summarizeReplayVerification,
 } from "./replayVerification";
 
-const DEFAULT_MODEL = "deepseek/deepseek-v4-flash";
+const DEFAULT_MODEL = "deepseek-v4-flash";
 
 const argv = process.argv.slice(2);
 const consumed = new Set<number>();

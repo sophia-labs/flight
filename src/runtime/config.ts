@@ -58,7 +58,16 @@ export interface MatchConfig {
 
 // Emitted by runMatch as the match executes. Turn 0 is the initial snapshot.
 export interface MatchProgress {
-  phase: "turn_start" | "message" | "decision" | "body_tick" | "simulating" | "frame" | "complete" | "error";
+  phase:
+    | "turn_start"
+    | "message"
+    | "decision"
+    | "body_tick"
+    | "simulating"
+    | "frame"
+    | "complete"
+    | "garden_journal"
+    | "error";
   turn: number;
   maxTurns: number;
   time: number;
@@ -74,5 +83,6 @@ export interface MatchProgress {
   frameIndex?: number;
   bodyTick?: { agentId: string; status: string; tick: number; feel?: string };
   replay?: MatchReplay; // only on complete
+  gardenJournal?: unknown; // server-only optional side effect report
   error?: string; // only on error
 }

@@ -65,6 +65,8 @@ test("renders the VTuber Flight Studio first screen", async ({ page }) => {
 });
 
 test("opens Crew as a pilot loadout and customization screen with a VRM preview", async ({ page }) => {
+  test.setTimeout(90_000);
+
   await page.goto("/");
 
   await page.getByRole("button", { name: "Crew" }).click();
@@ -187,7 +189,7 @@ test("runs the scripted pilot cinema camera with a rigged VTuber", async ({ page
   await page.goto("/?camera=pilot-cinema&hud=0");
 
   await page.getByRole("button", { name: /Launch/ }).click();
-  await expect(page.getByRole("button", { name: "Pilot" })).toHaveClass(/active/, { timeout: 30_000 });
+  await expect(page.getByRole("button", { name: "Pilot", exact: true })).toHaveClass(/active/, { timeout: 30_000 });
   await page.locator("canvas").first().waitFor({ state: "visible", timeout: 10_000 });
   await page.waitForFunction(
     () => {

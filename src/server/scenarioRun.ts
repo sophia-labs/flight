@@ -16,15 +16,16 @@ import {
 import { createMatchRoundStepper, runMatch, type MatchRoundStepper } from "../runtime/match";
 import { formatGps, waypointForAircraft } from "../runtime/navigation";
 import { createPhysicsCoachProvider } from "../runtime/physicsCoach";
+import { maybeJournalScenarioReplay, type GardenJournalResult } from "../garden/sortieJournal";
 import {
   FRAME_DT,
   TURN_DURATION,
+  bvrLevelPropController,
   createBalloonScenarioAircraft,
   createBvrInterceptAircraft,
   createChallengingBalloonScenarioAircraft,
   createDuelGunStartAircraft,
   createInitialAircraft,
-  gentlePropController,
   staticController,
 } from "../runtime/scenario";
 import { defaultAirframe } from "../sim/airframe";
@@ -57,11 +58,13 @@ BVR intercept scenario:
 - This is an intercept-and-identify mission with active-radar BVR missiles available when self.radarMissileLoaded is true.
 - messages/comms may include GCI or data-link cues. Treat them as offboard reports; contacts still come from your aircraft sensor model.
 - If comms.navigation.waypoints includes a GPS target datum, fly a stable intercept toward that coordinate and general bearing. That datum is not a radar contact; it is offboard tasking.
-- If contacts is empty, fly a stable high-energy GPS intercept profile from the GCI cue: stay well above the deck, keep speed up, and avoid steep nose-low dives.
+- If contacts is empty, solve lateral geometry first: the target starts far off the nose, so turn toward the GCI bearing while preserving altitude. Do not push the nose down just to "look" for radar.
+- Treat 6000 m as altitude capital. Hold or climb early; if below 5500 m before radar contact, stop tightening the turn and recover altitude. Do not chase the target altitude.
+- Keep speed controlled before any descent. Around 420 m/s is acceptable at 6000 m but becomes over-q near 3000 m; avoid fast nose-low profiles.
 - Physics coach messages are derived from the recorded sim frames before the current decision. Treat them as ground-truth instruction about how your last stick tape actually flew.
 - If the coach says heading error did not improve, do not repeat the same "turn" tape. Correct the stick tape until own heading converges on the steer bearing.
 - If a radar contact appears, use bearingRight/bearingUp/range/closureRate to point and manage closure. Do not lawn-dart while chasing a low slow target.
-- When a contact has radarLock=true and weaponCooldown is ready, arm weapons_free with condition radar_lock and keep the tape smooth. The engine releases the active-radar missile only on a real lock.
+- When a contact has radarLock=true, range <= 25000, and weaponCooldown is ready, arm weapons_free with condition radar_lock and keep the tape smooth. Before that, prioritize clean intercept geometry over shot authorization.
 - Keep direct trigger false in motor-program samples unless the observation explicitly presents a valid weapon solution.`;
 
 const ScenarioRunRequestSchema = z.object({
@@ -82,6 +85,7 @@ const ScenarioRoundRequestSchema = ScenarioRunRequestSchema.extend({
 
 export interface ScenarioRunResponse {
   replay: MatchReplay;
+  gardenJournal?: GardenJournalResult;
 }
 
 export interface ScenarioRoundResponse {
@@ -91,12 +95,18 @@ export interface ScenarioRoundResponse {
   complete: boolean;
   replay: MatchReplay;
   progress: import("../runtime/config").MatchProgress[];
+  gardenJournal?: GardenJournalResult;
 }
 
 export async function runScenarioApiRequest(input: unknown): Promise<ScenarioRunResponse> {
   const request = ScenarioRunRequestSchema.parse(input);
   const replay = await runMatch(buildServerScenarioMatchConfig(request.airframe, request.scenario));
-  return { replay: MatchReplaySchema.parse(replay) };
+  const parsedReplay = MatchReplaySchema.parse(replay);
+  const gardenJournal = await journalIfConfigured(parsedReplay, request.scenario);
+  return {
+    replay: parsedReplay,
+    ...(gardenJournal.enabled ? { gardenJournal } : {}),
+  };
 }
 
 // Runs a scenario match with streaming progress via the onProgress callback.
@@ -107,7 +117,17 @@ export async function runScenarioStreaming(
 ): Promise<void> {
   const request = ScenarioRunRequestSchema.parse(input);
   const config = buildServerScenarioMatchConfig(request.airframe, request.scenario);
-  await runMatch({ ...config, onProgress });
+  const replay = await runMatch({ ...config, onProgress });
+  const gardenJournal = await journalIfConfigured(replay, request.scenario);
+  if (gardenJournal.enabled) {
+    onProgress({
+      phase: "garden_journal",
+      turn: config.maxTurns,
+      maxTurns: config.maxTurns,
+      time: replay.frames.at(-1)?.time ?? 0,
+      gardenJournal,
+    });
+  }
 }
 
 export async function stepScenarioRoundApiRequest(input: unknown): Promise<ScenarioRoundResponse> {
@@ -134,13 +154,18 @@ export async function stepScenarioRoundApiRequest(input: unknown): Promise<Scena
   }
 
   const result = await session.stepper.nextRound();
+  const parsedReplay = MatchReplaySchema.parse(result.replay);
+  const gardenJournal = result.complete
+    ? await journalIfConfigured(parsedReplay, request.scenario)
+    : undefined;
   return {
     sessionId: session.id,
     turn: result.turn,
     maxTurns: baseConfig.maxTurns,
     complete: result.complete,
-    replay: MatchReplaySchema.parse(result.replay),
+    replay: parsedReplay,
     progress: result.progress,
+    ...(gardenJournal?.enabled ? { gardenJournal } : {}),
   };
 }
 
@@ -183,8 +208,8 @@ export function buildServerScenarioMatchConfig(
   const redEntry =
     bvrScenario
       ? {
-          meta: { id: "prop-1", kind: "scripted" as const, label: "Day Tripper (unarmed sightseeing)" },
-          controller: gentlePropController,
+          meta: { id: "prop-1", kind: "scripted" as const, label: "Day Tripper (level BVR target)" },
+          controller: bvrLevelPropController,
         }
       : balloonScenario
       ? {
@@ -287,6 +312,16 @@ function bvrGciProvider(): AgentMessageProvider {
       },
     ];
   };
+}
+
+function journalIfConfigured(
+  replay: MatchReplay,
+  scenario: StudioScenarioConfig,
+): Promise<GardenJournalResult> {
+  return maybeJournalScenarioReplay(replay, {
+    pilotId: "blue-1",
+    targetId: scenario.kind === "bvr-intercept" ? BVR_TARGET_ID : undefined,
+  });
 }
 
 interface RoundSession {

@@ -65,7 +65,7 @@ export function perTurnTruth(
   targetId?: string,
 ): { truth: TurnTruth[]; targetId?: string } {
   const resolvedTarget = targetId ?? inferTargetId(replay, pilotId);
-  if (!resolvedTarget) return { truth: [] };
+  if (!resolvedTarget) return { truth: ownshipTurnTruth(replay, pilotId) };
   const byTurn = new Map<number, TurnTruth>();
   for (const f of replay.frames) {
     if (f.turn < 1) continue;
@@ -100,6 +100,34 @@ export function perTurnTruth(
     if (onNose < 0) t.overshot = true; // target went behind the nose
   }
   return { truth: [...byTurn.values()].sort((a, b) => a.turn - b.turn), targetId: resolvedTarget };
+}
+
+function ownshipTurnTruth(replay: MatchReplay, pilotId: string): TurnTruth[] {
+  const byTurn = new Map<number, TurnTruth>();
+  for (const f of replay.frames) {
+    if (f.turn < 1) continue;
+    const body = f.aircraft.find((a) => a.id === pilotId);
+    if (!body) continue;
+    let t = byTurn.get(f.turn);
+    if (!t) {
+      t = {
+        turn: f.turn,
+        rangeStartM: 0,
+        rangeEndM: 0,
+        offNoseStartDeg: 0,
+        offNoseEndDeg: 0,
+        peakG: body.gLoad,
+        minAltM: body.altitude,
+        peakAoADeg: body.aoaDeg,
+        overshot: false,
+      };
+      byTurn.set(f.turn, t);
+    }
+    t.peakG = Math.max(t.peakG, body.gLoad);
+    t.minAltM = Math.min(t.minAltM, body.altitude);
+    t.peakAoADeg = Math.max(t.peakAoADeg, body.aoaDeg);
+  }
+  return [...byTurn.values()].sort((a, b) => a.turn - b.turn);
 }
 
 function inferTargetId(replay: MatchReplay, pilotId: string): string | undefined {
@@ -165,7 +193,9 @@ export function buildDebriefGrounding(
   const traceLines = decisions.map((decision) => {
     const t = truth.find((x) => x.turn === decision.turn);
     const real = t
-      ? `ACTUAL range ${t.rangeStartM.toFixed(0)}->${t.rangeEndM.toFixed(0)}m, peakG ${t.peakG.toFixed(1)}, minAlt ${t.minAltM.toFixed(0)}m, peakAoA ${t.peakAoADeg.toFixed(0)}deg${t.overshot ? ", OVERSHOT (target passed behind your nose)" : ""}`
+      ? targetId
+        ? `ACTUAL range ${t.rangeStartM.toFixed(0)}->${t.rangeEndM.toFixed(0)}m, peakG ${t.peakG.toFixed(1)}, minAlt ${t.minAltM.toFixed(0)}m, peakAoA ${t.peakAoADeg.toFixed(0)}deg${t.overshot ? ", OVERSHOT (target passed behind your nose)" : ""}`
+        : `ACTUAL ownship peakG ${t.peakG.toFixed(1)}, minAlt ${t.minAltM.toFixed(0)}m, peakAoA ${t.peakAoADeg.toFixed(0)}deg`
       : "ACTUAL (no physics for this turn)";
     const said = decision.rationale ? ` | YOU SAID: "${decision.rationale}"` : "";
     const src = decision.source === "fallback" ? " [FALLBACK — not your decision]" : "";

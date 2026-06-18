@@ -9,6 +9,7 @@ import {
 } from "./src/server/scenarioRun";
 import { inspectScenarioApiRequest } from "./src/server/scenarioAgent";
 import { debriefScenarioApiRequest } from "./src/server/scenarioDebrief";
+import { journalScenarioGardenApiRequest } from "./src/server/scenarioGarden";
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   for (const key of SERVER_ENV_KEYS) {
@@ -46,6 +47,17 @@ const SERVER_ENV_KEYS = [
   "BODY_MAX_TOKENS",
   "BODY_MAX_RETRIES",
   "BODY_EMPTY_RETRIES",
+  "FLIGHT_GARDEN_GRAPH_ID",
+  "FLIGHT_GARDEN_MCP_URL",
+  "FLIGHT_GARDEN_TOKEN",
+  "FLIGHT_GARDEN_MANIFEST",
+  "FLIGHT_GARDEN_TIMEOUT_MS",
+  "GARDEN_GRAPH_ID",
+  "GARDEN_MCP_URL",
+  "GARDEN_TOKEN",
+  "GARDEN_LOOPBACK_MANIFEST",
+  "GARDEN_LOOPBACK_TOKEN",
+  "SOPHIA_LOOPBACK_MANIFEST",
 ] as const;
 
 function scenarioApiPlugin(): Plugin {
@@ -124,6 +136,20 @@ function scenarioApiPlugin(): Plugin {
         try {
           const body = await readJson(req);
           const result = await debriefScenarioApiRequest(body);
+          sendJson(res, 200, result);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          sendJson(res, 500, { error: message });
+        }
+      });
+      server.middlewares.use("/api/scenario/garden-journal", async (req, res, next) => {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: "POST required" });
+          return;
+        }
+        try {
+          const body = await readJson(req);
+          const result = await journalScenarioGardenApiRequest(body);
           sendJson(res, 200, result);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

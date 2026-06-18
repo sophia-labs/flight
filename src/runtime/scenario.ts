@@ -582,6 +582,26 @@ export const gentlePropController: Controller = async (observation) => {
   };
 };
 
+// BVR training target: unarmed, cooperative, and boring on purpose. It should stay airborne and level
+// so the interceptor learns radar geometry instead of being rewarded for chasing a prop into the deck.
+export const bvrLevelPropController: Controller = async (observation) => {
+  const desiredAltitude = 3_250;
+  const altError = desiredAltitude - observation.self.altitude;
+  const targetPitchDeg = Math.max(-4, Math.min(30, 8 + altError / 45));
+  const slow = observation.self.airspeed < 60;
+  const fast = observation.self.airspeed > 92;
+  return {
+    action: {
+      kind: "setpoint",
+      targetBankDeg: 0,
+      targetPitchDeg,
+      throttle: slow ? 0.7 : fast ? 0.24 : 0.42,
+      trigger: false,
+    },
+    rationale: "level BVR target cruise",
+  };
+};
+
 
 // F-14 starts far from a tiny civilian prop plane, navigating on a GCI datum until its nose radar
 // acquires the target. The prop plane has no radar and no weapons.
@@ -594,7 +614,7 @@ export function createBvrInterceptAircraft(
   const propCompiled = compileAirframe(propAirframe);
 
   const propPosition = vec3(0, 2_500, 0);
-  const propVelocity = vec3(55, 0, 0);
+  const propVelocity = vec3(105, 0, 0);
   const f14Position = vec3(-30_000, 6_000, -84_000);
   const f14Velocity = vec3(420, 0, 0);
   const prop: AircraftState = {

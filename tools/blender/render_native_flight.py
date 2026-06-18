@@ -88,11 +88,14 @@ def configure_scene(timeline, samples):
     except TypeError:
         scene.render.engine = "BLENDER_EEVEE"
     scene.eevee.taa_render_samples = max(1, int(samples))
+    for attr, value in (("use_gtao", True), ("gtao_distance", 4), ("gtao_factor", 1.4)):
+        if hasattr(scene.eevee, attr):
+            setattr(scene.eevee, attr, value)
     scene.world = bpy.data.worlds.new("Flight World")
-    scene.world.color = (0.52, 0.68, 0.82)
+    scene.world.color = (0.58, 0.7, 0.78)
     scene.view_settings.view_transform = "Filmic"
     scene.view_settings.look = "Medium High Contrast"
-    scene.view_settings.exposure = 0
+    scene.view_settings.exposure = -0.15
     scene.view_settings.gamma = 1
 
 
@@ -202,6 +205,17 @@ def cylinder(name, parent, loc, radius, depth, mat, vertices=32, rot=(0, 0, 0)):
     return obj
 
 
+def cone(name, parent, loc, radius1, radius2, depth, mat, vertices=32, rot=(0, 0, 0)):
+    bpy.ops.mesh.primitive_cone_add(vertices=vertices, radius1=radius1, radius2=radius2, depth=depth)
+    obj = bpy.context.object
+    obj.name = name
+    parent_to(obj, parent)
+    obj.location = loc
+    obj.rotation_euler = rot
+    obj.data.materials.append(mat)
+    return obj
+
+
 def bar_between(name, parent, start, end, radius, mat, vertices=12):
     a = Vector(start)
     b = Vector(end)
@@ -253,6 +267,8 @@ class AircraftRig:
         self.surfaces = {}
         self.controls = {}
         self.hand_targets = {}
+        self.sweep_groups = []
+        self.afterburners = []
         self.exterior_objects = []
         self.hero_hidden_objects = []
         self.is_static = ship.get("static", False)
@@ -278,6 +294,8 @@ class AircraftRig:
         gear_mat = materials.get("gear", "#d8dee2", roughness=0.52, metallic=0.35)
         dark_mat = materials.get("dark hardware", "#172229", roughness=0.6, metallic=0.2)
         control_mat = materials.get("control surface", "#f4a340", roughness=0.42, metallic=0.18, emission="#f4a340")
+        burner_mat = materials.get("afterburner plume", "#66d7ff", roughness=0.18, metallic=0.0, alpha=0.72, emission="#66d7ff")
+        burner_core = materials.get("afterburner core", "#f2c94c", roughness=0.2, metallic=0.0, alpha=0.68, emission="#f2c94c")
         tank_mat = materials.get("tank", "#c9a14a", roughness=0.6, metallic=0.3)
 
         for part in airframe.get("parts", []):
@@ -301,15 +319,55 @@ class AircraftRig:
                 chord = part["planform"]["chord"]
                 axis = part.get("control", {}).get("axis")
                 vertical = axis == "yaw"
-                dims = (0.09, chord, span) if vertical else (span, chord, 0.1)
-                wing = cube(part["id"], group, (0, 0, 0), dims, body_mat)
-                add_bevel(wing, 0.015)
-                self.add_control_surfaces(group, part, span, chord, vertical, control_mat)
+                if part.get("sweep") and not vertical:
+                    glove = cube(f"{part['id']}:glove", group, (0, -chord * 0.06, 0), (span * 0.2, chord * 1.18, 0.13), body_mat)
+                    add_bevel(glove, 0.018)
+                    for side in (-1, 1):
+                        sweep = empty(f"{part['id']}:{'left' if side < 0 else 'right'}:sweep", group)
+                        self.sweep_groups.append({"object": sweep, "side": side, "min": part["sweep"]["minSweepDeg"]})
+                        panel = cube(
+                            f"{part['id']}:{'left' if side < 0 else 'right'}",
+                            sweep,
+                            (side * span * 0.25, 0, 0),
+                            (span * 0.5, chord, 0.1),
+                            body_mat,
+                        )
+                        add_bevel(panel, 0.014)
+                    self.add_swept_control_surfaces(group, part, span, chord, control_mat)
+                else:
+                    dims = (0.09, chord, span) if vertical else (span, chord, 0.1)
+                    wing = cube(part["id"], group, (0, 0, 0), dims, body_mat)
+                    add_bevel(wing, 0.015)
+                    self.add_control_surfaces(group, part, span, chord, vertical, control_mat)
             elif kind == "engine":
                 radius = part["dims"]["radius"]
                 length = part["dims"]["length"]
                 cylinder(part["id"], group, (0, 0, 0), radius, length, panel_mat, vertices=32, rot=(math.pi / 2, 0, 0))
                 cylinder(f"{part['id']}:intake", group, (0, -length * 0.52, 0), radius * 1.05, length * 0.08, dark_mat, vertices=32, rot=(math.pi / 2, 0, 0))
+                if part.get("afterburnerThrustN"):
+                    flame = cone(
+                        f"{part['id']}:afterburner-plume",
+                        group,
+                        (0, length * 0.64, 0),
+                        radius * 0.68,
+                        radius * 0.12,
+                        length * 0.58,
+                        burner_mat,
+                        vertices=32,
+                        rot=(math.pi / 2, 0, 0),
+                    )
+                    core = cone(
+                        f"{part['id']}:afterburner-core",
+                        group,
+                        (0, length * 0.56, 0),
+                        radius * 0.3,
+                        radius * 0.04,
+                        length * 0.36,
+                        burner_core,
+                        vertices=24,
+                        rot=(math.pi / 2, 0, 0),
+                    )
+                    self.afterburners.append({"flame": flame, "core": core})
             elif kind == "prop":
                 radius = part["radius"]
                 cylinder(part["id"], group, (0, 0, 0), radius * 0.12, radius * 0.12, panel_mat, vertices=24, rot=(math.pi / 2, 0, 0))
@@ -364,6 +422,27 @@ class AircraftRig:
             else:
                 cube(surface_id, hinge, (0, panel_chord / 2, 0), (panel_span, panel_chord, 0.08), material)
             self.surfaces[surface_id] = {"object": hinge, "vertical": vertical}
+
+    def add_swept_control_surfaces(self, group, part, span, chord, material):
+        control = part.get("control")
+        if not control:
+            return
+        axis = control["axis"]
+        if axis != "roll":
+            self.add_control_surfaces(group, part, span, chord, False, material)
+            return
+        panel_chord = max(chord * 0.32, 0.12)
+        hinge_y = chord / 2 - panel_chord
+        panel_span = span * 0.17
+        for side, label in ((-1, "left"), (1, "right")):
+            sweep = next((entry["object"] for entry in self.sweep_groups if entry["object"].name == f"{part['id']}:{label}:sweep"), None)
+            if not sweep:
+                continue
+            surface_id = f"{part['id']}-{label}"
+            hinge = empty(f"{surface_id}:hinge", sweep)
+            hinge.location = (side * span * 0.31, hinge_y, 0.08)
+            cube(surface_id, hinge, (0, panel_chord / 2, 0), (panel_span, panel_chord, 0.08), material)
+            self.surfaces[surface_id] = {"object": hinge, "vertical": False}
 
     def build_cockpit_controls(self, materials):
         dark = materials.get("cockpit dark", "#11191f", roughness=0.58, metallic=0.18)
@@ -474,6 +553,11 @@ class AircraftRig:
 
     def update(self, ship):
         self.root.matrix_world = pose_matrix(ship["position"], ship["orientation"])
+        sweep_deg = ship.get("sweepDeg")
+        for spec in self.sweep_groups:
+            angle = math.radians(float(sweep_deg if sweep_deg is not None else spec.get("min", 0)))
+            spec["object"].rotation_euler = (0, 0, spec["side"] * angle)
+
         surfaces = {surface["id"]: surface for surface in ship.get("surfaceControls", [])}
         for surface_id, spec in self.surfaces.items():
             angle = math.radians(surfaces.get(surface_id, {}).get("deflectionDeg", 0))
@@ -488,6 +572,14 @@ class AircraftRig:
         roll = max(-1, min(1, -controls.get("roll", 0))) * 0.36
         yaw = max(-1, min(1, controls.get("yaw", 0)))
         throttle = max(0, min(1, controls.get("throttle", 0)))
+        spool = max(0, min(1.2, float(ship.get("engineSpool", throttle))))
+        burner_hot = bool(ship.get("afterburner")) or throttle > 0.97
+        for entry in self.afterburners:
+            pulse = 1 + 0.08 * math.sin(float(ship.get("airspeed", 0)) * 0.11)
+            for obj, base in ((entry["flame"], 1.0), (entry["core"], 0.72)):
+                obj.hide_render = not burner_hot
+                obj.hide_viewport = not burner_hot
+                obj.scale = (base * (0.7 + spool * 0.5) * pulse, base * (0.7 + spool * 0.5) * pulse, 0.75 + spool * 0.55)
         if "stick" in self.controls:
             self.controls["stick"].rotation_euler = (pitch, 0, roll)
         if "throttle" in self.controls:
@@ -700,42 +792,88 @@ class AvatarRig:
             if result:
                 self.contact_debug[side] = result
 
+    # VRM humanoid bone → Blender bone name (the sample VRM uses the J_Bip_ convention).
+    _VRM_TO_BLENDER = {
+        "hips": "J_Bip_C_Hips",
+        "spine": "J_Bip_C_Spine",
+        "chest": "J_Bip_C_Chest",
+        "upperChest": "J_Bip_C_UpperChest",
+        "neck": "J_Bip_C_Neck",
+        "head": "J_Bip_C_Head",
+        "leftUpperLeg": "J_Bip_L_UpperLeg",
+        "rightUpperLeg": "J_Bip_R_UpperLeg",
+        "leftLowerLeg": "J_Bip_L_LowerLeg",
+        "rightLowerLeg": "J_Bip_R_LowerLeg",
+        "leftFoot": "J_Bip_L_Foot",
+        "rightFoot": "J_Bip_R_Foot",
+        "leftShoulder": "J_Bip_L_Shoulder",
+        "rightShoulder": "J_Bip_R_Shoulder",
+        "leftUpperArm": "J_Bip_L_UpperArm",
+        "rightUpperArm": "J_Bip_R_UpperArm",
+        "leftLowerArm": "J_Bip_L_LowerArm",
+        "rightLowerArm": "J_Bip_R_LowerArm",
+        "leftHand": "J_Bip_L_Hand",
+        "rightHand": "J_Bip_R_Hand",
+    }
+
     def update(self, frame):
-        dynamics = frame.get("pilotDynamics") or {}
-        if dynamics.get("pilotId") != self.avatar.get("pilotId"):
+        pose = frame.get("pilotPose") or {}
+        if not pose:
             return
-        self.apply_neutral_pose()
-        pitch = math.radians(float(dynamics.get("rootPitchDeg", 0)))
-        roll = math.radians(float(dynamics.get("rootRollDeg", 0)))
-        head_pitch = math.radians(float(dynamics.get("headPitchDeg", 0)))
-        head_roll = math.radians(float(dynamics.get("headRollDeg", 0)))
-        seat_sink = float(dynamics.get("seatSinkM", 0))
-        root_rotation = (pitch, roll, self.base_yaw)
-        self.root.location = self.root_location_for_rotation(root_rotation, seat_sink)
-        self.root.rotation_euler = root_rotation
-        self.set_pose_bone("J_Bip_C_Neck", (math.degrees(head_pitch) * 0.45, math.degrees(head_roll) * 0.25, 0))
-        self.set_pose_bone("J_Bip_C_Head", (math.degrees(head_pitch), math.degrees(head_roll), 0))
+        # Apply the full per-bone pose — same data the React viewer uses.
+        # The pilotPose.bones rotations are accumulated in buildPilotPose (neutral + seated + idle + gForce).
+        # We apply them as offsets from the T-pose rest (no separate neutral pose).
+        bones = pose.get("bones") or {}
+        for vrm_name, rot in bones.items():
+            blender_name = self._VRM_TO_BLENDER.get(vrm_name)
+            if blender_name and self.armature:
+                bone = self.armature.pose.bones.get(blender_name)
+                if bone:
+                    bone.rotation_mode = "XYZ"
+                    # pilotPose.bones are in radians
+                    bone.rotation_euler = (
+                        float(rot.get("x", 0)),
+                        float(rot.get("y", 0)),
+                        float(rot.get("z", 0)),
+                    )
         self.solve_contact_ik()
 
 
 def build_world(materials):
-    terrain = materials.get("terrain", "#4b6b48", roughness=0.95, metallic=0.02)
-    grid = materials.get("runway grid", "#6f8f74", roughness=0.8, metallic=0.0)
-    cube("ground", empty("world"), (0, 0, -1.2), (9000, 9000, 0.4), terrain)
-    for i in range(-8, 9):
-        cube(f"grid:x:{i}", bpy.data.objects["world"], (i * 500, 0, -0.95), (3, 9000, 0.05), grid)
-        cube(f"grid:y:{i}", bpy.data.objects["world"], (0, i * 500, -0.94), (9000, 3, 0.05), grid)
+    world = empty("world")
+    terrain = materials.get("terrain", "#566d55", roughness=0.95, metallic=0.02)
+    grid = materials.get("runway grid", "#78947f", roughness=0.8, metallic=0.0)
+    cloud = materials.get("cloud haze", "#e5edf0", roughness=0.92, metallic=0.0, alpha=0.34)
+    sun_mat = materials.get("low sun disc", "#ffd39a", roughness=0.2, metallic=0.0, alpha=0.88, emission="#ffd39a")
+    cube("ground", world, (0, 0, -1.2), (42000, 42000, 0.4), terrain)
+    for i in range(-16, 17):
+        cube(f"grid:x:{i}", world, (i * 900, 0, -0.95), (2.2, 42000, 0.05), grid)
+        cube(f"grid:y:{i}", world, (0, i * 900, -0.94), (42000, 2.2, 0.05), grid)
+
+    cloud_specs = [
+        (-2500, -1400, 430, 520, 150, 28),
+        (-1200, 2300, 520, 420, 120, 22),
+        (900, -2100, 610, 620, 160, 26),
+        (2300, 1200, 470, 500, 140, 24),
+        (3200, -300, 720, 720, 180, 32),
+    ]
+    for index, (x, y, z, sx, sy, sz) in enumerate(cloud_specs):
+        obj = sphere(f"cloud-bank:{index}", world, (x, y, z), 1, cloud, segments=24)
+        obj.scale = (sx, sy, sz)
+
+    sun = sphere("sun-disc", world, (-3800, -5200, 1550), 70, sun_mat, segments=32)
+    sun.scale = (1.0, 0.2, 1.0)
 
     bpy.ops.object.light_add(type="SUN", location=(0, 0, 0))
     sun = bpy.context.object
     sun.name = "sun"
-    sun.rotation_euler = (math.radians(45), 0, math.radians(28))
-    sun.data.energy = 4.0
-    bpy.ops.object.light_add(type="AREA", location=(0, -200, 600))
+    sun.rotation_euler = (math.radians(51), 0, math.radians(34))
+    sun.data.energy = 3.6
+    bpy.ops.object.light_add(type="AREA", location=(0, -260, 720))
     area = bpy.context.object
     area.name = "sky fill"
-    area.data.energy = 500
-    area.data.size = 800
+    area.data.energy = 650
+    area.data.size = 950
 
 
 def look_at_matrix(eye, target, up):
@@ -778,6 +916,14 @@ def update_camera(camera, camera_frame):
     up = sim_vec(camera_frame["up"])
     camera.matrix_world = look_at_matrix(eye, target, up)
     camera.data.angle = math.radians(float(camera_frame["verticalFovDeg"]))
+    focus = camera_frame.get("focusDistanceM")
+    f_stop = camera_frame.get("fStop")
+    if focus and f_stop:
+        camera.data.dof.use_dof = True
+        camera.data.dof.focus_distance = max(0.1, float(focus))
+        camera.data.dof.aperture_fstop = max(0.7, float(f_stop))
+    else:
+        camera.data.dof.use_dof = False
 
 
 class TracerPool:
@@ -825,48 +971,77 @@ class ProjectilePool:
         self.mats = {
             "blue": materials.get("projectile blue", "#d7e5ea", roughness=0.18, metallic=0.0, emission="#d7e5ea"),
             "red": materials.get("projectile red", "#ff6b61", roughness=0.18, metallic=0.0, emission="#ff6b61"),
+            "missile": materials.get("missile body", "#e8eef2", roughness=0.32, metallic=0.32),
+            "smoke": materials.get("missile smoke", "#bcc6c9", roughness=0.86, metallic=0.0, alpha=0.44),
         }
         for i in range(count):
-            ball = sphere(f"projectile:{i}:glow", None, (0, 0, 0), 7.0, self.mats["blue"], segments=16)
+            ball = sphere(f"projectile:{i}:glow", None, (0, 0, 0), 3.2, self.mats["blue"], segments=16)
             curve = bpy.data.curves.new(f"projectile:{i}:trail", "CURVE")
             curve.dimensions = "3D"
             curve.resolution_u = 1
-            curve.bevel_depth = 2.6
+            curve.bevel_depth = 1.35
             curve.bevel_resolution = 2
             poly = curve.splines.new("POLY")
             poly.points.add(1)
             trail = bpy.data.objects.new(f"projectile:{i}:trail", curve)
             bpy.context.collection.objects.link(trail)
-            self.entries.append((ball, trail))
+            smoke_curve = bpy.data.curves.new(f"projectile:{i}:smoke", "CURVE")
+            smoke_curve.dimensions = "3D"
+            smoke_curve.resolution_u = 2
+            smoke_curve.bevel_depth = 2.2
+            smoke_curve.bevel_resolution = 3
+            smoke_poly = smoke_curve.splines.new("POLY")
+            smoke_poly.points.add(2)
+            smoke = bpy.data.objects.new(f"projectile:{i}:smoke", smoke_curve)
+            bpy.context.collection.objects.link(smoke)
+            body = cylinder(f"projectile:{i}:missile-body", None, (0, 0, 0), 1.15, 24, self.mats["missile"], vertices=18)
+            nose = cone(f"projectile:{i}:missile-nose", None, (0, 0, 0), 1.15, 0.0, 5.2, self.mats["missile"], vertices=18)
+            self.entries.append({"glow": ball, "trail": trail, "smoke": smoke, "body": body, "nose": nose})
         self.hide_all()
 
     def hide_all(self):
-        for ball, trail in self.entries:
-            for obj in (ball, trail):
+        for entry in self.entries:
+            for obj in entry.values():
                 obj.hide_render = True
                 obj.hide_viewport = True
 
     def update(self, projectiles):
         self.hide_all()
-        for (ball, trail), projectile in zip(self.entries, projectiles):
+        for entry, projectile in zip(self.entries, projectiles):
             pos = sim_vec(projectile["position"])
             velocity = sim_vec(projectile["velocity"])
             if velocity.length < 1e-6:
                 direction = Vector((0, -1, 0))
             else:
                 direction = velocity.normalized()
-            trail_length = min(120.0, max(35.0, velocity.length * 0.055))
+            is_missile = projectile.get("kind") == "missile"
+            trail_length = min(360.0 if is_missile else 120.0, max(35.0, velocity.length * (0.16 if is_missile else 0.055)))
             start = pos - direction * trail_length
             end = pos + direction * 10.0
             mat = self.mats.get(projectile.get("team"), self.mats["blue"])
-            ball.location = pos
-            ball.data.materials.clear()
-            ball.data.materials.append(mat)
-            trail.data.splines[0].points[0].co = (start.x, start.y, start.z, 1)
-            trail.data.splines[0].points[1].co = (end.x, end.y, end.z, 1)
-            trail.data.materials.clear()
-            trail.data.materials.append(mat)
-            for obj in (ball, trail):
+            entry["glow"].location = pos
+            entry["glow"].scale = (1.05, 1.05, 1.05) if is_missile else (1, 1, 1)
+            entry["glow"].data.materials.clear()
+            entry["glow"].data.materials.append(mat)
+            entry["body"].location = pos
+            entry["body"].rotation_euler = direction.to_track_quat("Z", "Y").to_euler()
+            entry["nose"].location = pos + direction * 14.0
+            entry["nose"].rotation_euler = direction.to_track_quat("Z", "Y").to_euler()
+            entry["trail"].data.splines[0].points[0].co = (start.x, start.y, start.z, 1)
+            entry["trail"].data.splines[0].points[1].co = (end.x, end.y, end.z, 1)
+            entry["trail"].data.materials.clear()
+            entry["trail"].data.materials.append(mat)
+            smoke_start = pos - direction * (trail_length * 1.25)
+            smoke_mid = pos - direction * (trail_length * 0.62) + Vector((0, 0, math.sin(pos.x * 0.01) * 12.0))
+            smoke_end = pos - direction * 16.0
+            entry["smoke"].data.splines[0].points[0].co = (smoke_start.x, smoke_start.y, smoke_start.z, 1)
+            entry["smoke"].data.splines[0].points[1].co = (smoke_mid.x, smoke_mid.y, smoke_mid.z, 1)
+            entry["smoke"].data.splines[0].points[2].co = (smoke_end.x, smoke_end.y, smoke_end.z, 1)
+            entry["smoke"].data.materials.clear()
+            entry["smoke"].data.materials.append(self.mats["smoke"])
+            visible = ("glow", "trail", "body", "nose", "smoke") if is_missile else ("glow", "trail")
+            for key in visible:
+                obj = entry[key]
                 obj.hide_render = False
                 obj.hide_viewport = False
 
@@ -874,26 +1049,45 @@ class ProjectilePool:
 class SubtitleOverlay:
     def __init__(self, camera, materials, timeline):
         self.subtitles = timeline.get("subtitles", [])
+        self.split = is_split_timeline(timeline)
+        self.wrap_width = 26 if self.split else 34
+        self.max_lines = 3
+        self.backing = self.make_backing(
+            "subtitle:backing",
+            camera,
+            materials.get("subtitle backing", "#020407", roughness=0.9, metallic=0.0, alpha=0.42),
+            (0, -0.044 if self.split else -0.056, -0.235),
+        )
         self.text = self.make_text(
             "subtitle:feel",
             camera,
             materials.get("subtitle white", "#f8fbff", roughness=0.2, metallic=0.0, emission="#f8fbff"),
-            (0, -0.228, -0.8),
+            (0, -0.044 if self.split else -0.056, -0.22),
         )
         self.shadow = self.make_text(
             "subtitle:shadow",
             camera,
             materials.get("subtitle shadow", "#020407", roughness=0.9, metallic=0.0, emission="#020407"),
-            (0.005, -0.233, -0.805),
+            (0.0012, -0.045 if self.split else -0.057, -0.221),
         )
         self.hide()
+
+    def make_backing(self, name, camera, mat, loc):
+        bpy.ops.mesh.primitive_plane_add(size=1)
+        obj = bpy.context.object
+        obj.name = name
+        parent_to(obj, camera)
+        obj.location = loc
+        obj.scale = (0.17 if self.split else 0.235, 0.052 if self.split else 0.052, 1)
+        obj.data.materials.append(mat)
+        return obj
 
     def make_text(self, name, camera, mat, loc):
         curve = bpy.data.curves.new(name, "FONT")
         curve.align_x = "CENTER"
         curve.align_y = "CENTER"
-        curve.size = 0.028
-        curve.space_line = 0.84
+        curve.size = 0.0051 if self.split else 0.0062
+        curve.space_line = 0.9
         curve.resolution_u = 12
         obj = bpy.data.objects.new(name, curve)
         bpy.context.collection.objects.link(obj)
@@ -909,7 +1103,7 @@ class SubtitleOverlay:
         return None
 
     def hide(self):
-        for obj in (self.text, self.shadow):
+        for obj in (self.text, self.shadow, self.backing):
             obj.hide_render = True
             obj.hide_viewport = True
 
@@ -918,12 +1112,15 @@ class SubtitleOverlay:
         if not subtitle:
             self.hide()
             return
-        text = "FEEL: " + str(subtitle.get("text", "")).strip()
-        body = "\n".join(textwrap.wrap(text, width=40, max_lines=2, placeholder="..."))
+        label = str(subtitle.get("label", "THOUGHT")).strip() or "THOUGHT"
+        text = f"{label}: " + str(subtitle.get("text", "")).strip()
+        body = "\n".join(textwrap.wrap(text, width=self.wrap_width, max_lines=self.max_lines, placeholder="..."))
         for obj in (self.text, self.shadow):
             obj.data.body = body
             obj.hide_render = False
             obj.hide_viewport = False
+        self.backing.hide_render = False
+        self.backing.hide_viewport = False
 
 
 def build_aircraft_rigs(timeline, materials):
@@ -940,11 +1137,13 @@ def build_aircraft_rigs(timeline, materials):
 
 def apply_camera_visibility(rigs, pilot_id, camera_frame):
     camera_mode = camera_frame["mode"]
-    cockpit_like = camera_mode == "cockpit" or camera_frame["shot"] == "cockpit-controls"
+    shot = camera_frame.get("shot", "")
+    cockpit_like = camera_mode == "cockpit" or shot == "cockpit-controls" or shot.startswith("director-cockpit")
+    pilot_hero_like = camera_mode == "pilot-hero" or shot.startswith("director-pilot")
     for rig in rigs.values():
         if rig.ship_id == pilot_id and cockpit_like:
             rig.set_exterior_visible(False)
-        elif rig.ship_id == pilot_id and camera_mode == "pilot-hero":
+        elif rig.ship_id == pilot_id and pilot_hero_like:
             rig.set_pilot_hero_visible()
         else:
             rig.set_exterior_visible(True)
@@ -971,7 +1170,11 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
     camera = configure_camera(timeline)
     tracers = TracerPool(materials)
     projectiles = ProjectilePool(materials)
-    subtitles = SubtitleOverlay(camera, materials, timeline) if split else None
+    subtitles = (
+        SubtitleOverlay(camera, materials, timeline)
+        if os.environ.get("NATIVE_RENDER_BLENDER_SUBTITLES") and timeline.get("subtitles")
+        else None
+    )
 
     frames_path = Path(frames_dir)
     if frames_path.exists():
@@ -1025,16 +1228,20 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
         else:
             apply_camera_visibility(rigs, timeline.get("pilotId"), frame["camera"])
             update_camera(camera, frame["camera"])
+            if subtitles:
+                subtitles.update(float(frame.get("time", 0)))
             bpy.context.scene.render.filepath = str(frames_path / f"frame_{frame_index:06d}.png")
             print(f"render frame {frame['index'] + 1}/{len(timeline['frames'])}: {frame['camera']['shot']}", flush=True)
             bpy.ops.render.render(write_still=True)
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    bundled_ffmpeg = Path("/usr/local/opt/ffmpeg-full/bin/ffmpeg")
+    ffmpeg = os.environ.get("FFMPEG_BIN") or (str(bundled_ffmpeg) if bundled_ffmpeg.exists() else "ffmpeg")
     if split:
         subprocess.check_call(
             [
-                "ffmpeg",
+                ffmpeg,
                 "-y",
                 "-framerate",
                 str(timeline["fps"]),
@@ -1062,7 +1269,7 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
     else:
         subprocess.check_call(
             [
-                "ffmpeg",
+                ffmpeg,
                 "-y",
                 "-framerate",
                 str(timeline["fps"]),
