@@ -6,7 +6,7 @@ const replayPath = process.argv[2] ?? "reports/coach/missile.json";
 const outDir = process.argv[3] ?? "clips/sampler-collage";
 
 const MODES: NativeCameraMode[] = [
-  "cinematic", "chase", "cockpit", "director", "orbit",
+  "birdseye", "cinematic", "chase", "cockpit", "director", "orbit",
   "pilot-cinema", "pilot-hero",
 ];
 

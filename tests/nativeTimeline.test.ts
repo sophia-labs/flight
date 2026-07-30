@@ -138,6 +138,26 @@ describe("buildNativeRenderTimeline", () => {
     expect(timeline.frames[0].aircraft.find((entry) => entry.id === "balloon")?.static).toBe(true);
   });
 
+  it("exports a stabilized bird's-eye camera over the recorded aircraft", () => {
+    const timeline = buildNativeRenderTimeline(replay(), {
+      fps: 2,
+      seconds: 0.5,
+      cameraMode: "birdseye",
+      loop: false,
+    });
+
+    const first = timeline.frames[0];
+    const ship = first.aircraft[0];
+    expect(first.camera.mode).toBe("birdseye");
+    expect(first.camera.shot).toBe("birdseye-ownship-follow");
+    expect(first.camera.eye.x).toBeCloseTo(ship.position.x);
+    expect(first.camera.eye.z).toBeCloseTo(ship.position.z);
+    expect(first.camera.target).toEqual(ship.position);
+    expect(first.camera.eye.y).toBeGreaterThan(ship.position.y + 60);
+    expect(Math.abs(first.camera.up.y)).toBeLessThan(1e-6);
+    expect(first.camera.verticalFovDeg).toBe(34);
+  });
+
   it("exports a pilot-hero camera and avatar mount when requested", () => {
     const hardPull = ship(0, {
       controls: { ...neutralControls, roll: 0.8, pitch: 0.7, yaw: 0.25 },

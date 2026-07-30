@@ -70,5 +70,5 @@ variable "key_name" {
 variable "ssh_cidr" {
   description = "CIDR allowed to SSH into the render box when key_name is set"
   type        = string
-  default     = "0.0.0.0/0"
+  default     = "127.0.0.1/32"
 }

@@ -2,13 +2,10 @@
 
 This pass integrates the sample VRM pilot into the flight sim cockpit without a helmet. The goal is rigging quality, measurable cockpit fit, and a cleaner game-design boundary for "where a person sits and what they touch" inside an aircraft.
 
-## Current Repo
+## Fixture
 
-- Branch: `feat/v0.5.0-builder`
-- Path: `/Users/vera/dev/flight`
-- Source VRM: `public/models/VRM1_Constraint_Twist_Sample.vrm`
-
-The old VTuber worktree has been removed. New VTuber/cockpit work should happen directly in this repo.
+The cockpit integration uses `public/models/VRM1_Constraint_Twist_Sample.vrm`
+as its source VRM.
 
 ## Functional Shape
 

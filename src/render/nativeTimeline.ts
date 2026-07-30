@@ -19,6 +19,7 @@ import { buildPilotPose, type PilotPose } from "../viewer/pilotPose";
 
 import { computePilotCinemaShot } from "../viewer/pilotCinema";
 export type NativeCameraMode =
+  | "birdseye"
   | "cinematic"
   | "chase"
   | "cockpit"
@@ -85,7 +86,7 @@ export interface NativeRenderFrame {
 export interface NativeRenderSubtitle {
   start: number;
   end: number;
-  label: "FEEL" | "THOUGHT";
+  label: "FEEL" | "FPS" | "REPLAY" | "THOUGHT";
   text: string;
 }
 
@@ -394,6 +395,7 @@ function computeCamera({
   }
 
   if (mode === "cockpit") return cockpitCamera(pilot, airframes[pilot.id], width / height);
+  if (mode === "birdseye") return birdseyeCamera(pilot, airframes[pilot.id]);
   if (mode === "pilot-cinema") return pilotCinemaCamera(pilot, airframes[pilot.id], time);
   if (mode === "pilot-hero") return pilotHeroCamera(pilot, cameraShake?.shake ?? vec3(0, 0, 0), cameraShake?.strain ?? 0, time);
   if (isSplitScreenMode(mode)) return pilotHeroCamera(pilot, cameraShake?.shake ?? vec3(0, 0, 0), cameraShake?.strain ?? 0, time);
@@ -465,6 +467,53 @@ function chaseCamera(ship: NativeRenderAircraft, shot: string): NativeRenderCame
     verticalFovDeg: 38,
   });
 }
+
+function birdseyeCamera(ship: NativeRenderAircraft, airframe: Airframe | undefined): NativeRenderCamera {
+  const basis = basisFromQuat(ship.orientation);
+  const velocityHeading = normalize(vec3(ship.velocity.x, 0, ship.velocity.z), vec3(0, 0, -1));
+  const heading = normalize(vec3(basis.forward.x, 0, basis.forward.z), velocityHeading);
+  const height = birdseyeCameraHeight(airframe);
+  return sanitizeCamera({
+    mode: "birdseye",
+    shot: "birdseye-ownship-follow",
+    eye: add(ship.position, scale(WORLD_UP, height)),
+    target: ship.position,
+    // Keep the aircraft nose generally "up" in frame while the camera stays vertically overhead.
+    up: heading,
+    verticalFovDeg: 34,
+    focusDistanceM: height,
+    fStop: 9,
+  });
+}
+
+function birdseyeCameraHeight(airframe: Airframe | undefined): number {
+  const footprint = Math.max(airframeFootprintM(airframe), 12);
+  return clamp(footprint * 5.4, 72, 170);
+}
+
+function airframeFootprintM(airframe: Airframe | undefined): number {
+  let footprint = 0;
+  for (const part of airframe?.parts ?? []) {
+    const p = part as any;
+    if (p.kind === "fuselage" || p.kind === "canopy" || p.kind === "weapon" || p.kind === "tank") {
+      footprint = Math.max(footprint, positiveDimension(p.dims?.length), positiveDimension(p.dims?.width));
+    } else if (p.kind === "wing") {
+      footprint = Math.max(footprint, positiveDimension(p.planform?.span), positiveDimension(p.planform?.chord));
+    } else if (p.kind === "engine") {
+      footprint = Math.max(footprint, positiveDimension(p.dims?.length), positiveDimension(p.dims?.radius) * 2);
+    } else if (p.kind === "prop") {
+      footprint = Math.max(footprint, positiveDimension(p.radius) * 2);
+    } else if (p.kind === "gear") {
+      footprint = Math.max(footprint, positiveDimension(p.trackM), positiveDimension(p.heightM));
+    }
+  }
+  return footprint;
+}
+
+function positiveDimension(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function pilotHeroCamera(
   ship: NativeRenderAircraft,
   shake: Vec3,

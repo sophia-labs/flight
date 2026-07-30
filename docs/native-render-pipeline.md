@@ -3,7 +3,7 @@
 This pipeline renders Flight replays without Chromium. The browser viewer remains useful for app QA, but final clips can now go through an engine-native offline path:
 
 ```text
-MatchReplay JSON -> native render timeline JSON -> Blender scene frames -> ffmpeg MP4
+MatchReplay JSON -> native render timeline JSON -> Blender -> H.264 MP4
 ```
 
 ## Commands
@@ -28,17 +28,33 @@ npm run render:native -- --turns 8 --seconds 10 --camera cinematic --out clips/n
 
 Useful flags:
 
-- `--camera cinematic|chase|cockpit|orbit|pilot-hero`
+- `--camera birdseye|cinematic|chase|cockpit|director|orbit|pilot-hero`
 - `--avatar public/models/VRM1_Constraint_Twist_Sample.vrm`
 - `--fps 24`
 - `--width 1280 --height 720`
 - `--pilot-id blue-1`
 - `--timeline-out clips/run.timeline.json`
 - `--frames-dir clips/run.frames`
+- `--frame-format png|jpeg`
+- `--direct-video`
 - `--keep-frames`
 - `--blender /path/to/blender`
 
 You can also set `BLENDER=/path/to/blender`.
+
+Bird's-eye mode follows ownship from directly overhead, sizes the view to the
+recorded airframe, and draws colored trajectory trails:
+
+```bash
+npm run render:native -- --replay match.json --camera birdseye --direct-video \
+  --out clips/birdseye.mp4
+```
+
+Build a chronological bird's-eye montage from the curated replay compendium:
+
+```bash
+npm run montage:compendium-birdseye
+```
 
 ## Files
 
@@ -57,7 +73,7 @@ You can also set `BLENDER=/path/to/blender`.
   - Blender scene builder.
   - Builds native proxy geometry from recorded airframe parts.
   - Animates aircraft transforms, cockpit controls, moving control surfaces, tracers, and cameras.
-  - Renders PNG frames and shells out to ffmpeg for the MP4.
+  - Renders PNG/JPEG frames through ffmpeg or writes H.264 directly for single-camera timelines.
 
 ## Remote GPU Render Box
 
@@ -71,10 +87,14 @@ The script packages the repo-side Blender payload, uploads it as a Terraform-man
 
 - AWS profile/region: `terraform-user` / `us-east-1`
 - instance: `g5.xlarge`
-- SSH key: `flight-render-vera`
-- SSH ingress: caller IP `/32`, autodetected with `checkip.amazonaws.com`
+- SSH: disabled; monitoring remains available through SSM Session Manager
 - render samples: `RENDER_SAMPLES=48`
 - root volume: `100` GiB for GPU AMIs
+
+This path creates billable AWS resources. Inspect the Terraform plan and your
+account configuration before applying it. To enable SSH explicitly, provide a
+key pair; the scripts then restrict ingress to the caller IP `/32` unless
+`SSH_CIDR` is set:
 
 Useful overrides:
 
@@ -82,7 +102,7 @@ Useful overrides:
 INSTANCE_TYPE=g5.2xlarge RENDER_SAMPLES=64 \
   tools/render-remote.sh clips/full-render/timeline.json clips/remote-render.mp4
 
-KEY_NAME= SSH_CIDR= \
+KEY_NAME=flight-render SSH_CIDR=203.0.113.10/32 \
   tools/render-remote.sh clips/full-render/timeline.json clips/remote-render.mp4
 ```
 

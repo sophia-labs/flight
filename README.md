@@ -2,7 +2,12 @@
 
 A physics-driven flight combat sim where LLM-scale agents can fly through auditable control layers. Version 0.8.0 adds an embodied fixed-wing Body loop: a Pilot emits desire, the Body emits strict motor grammar, the adapter maps muscles onto the existing airplane, and replay telemetry records the consequence.
 
-## Run
+![A Flight agent pursuing a target in the native director replay](docs/assets/flight-director-demo.gif)
+
+Flight is an experimental game and agent lab. Aircraft, sensors, and weapon envelopes are deliberately
+compact, gameplay-facing approximations—not flight training or engineering models.
+
+## Play
 
 ```bash
 npm install
@@ -16,6 +21,14 @@ now exposes the control loop (`Body Pilot` or `Motor Tape`), planner model, Body
 count, camera, and motor-program timing. `Motor Tape` is the game-integrated slow-planner/fast-twitch
 path: the planner writes a smooth control tape, a held `weapons_free` guard wakes the twitch Body, and
 replay playback slows during recorded twitch spans so the handoff is visible.
+
+The browser Studio is the interactive game surface. Replays can also go through the native Blender
+renderer for cinematic, cockpit, director, split-screen, and stabilized bird's-eye views:
+
+```bash
+npm run render:native -- --camera birdseye --seconds 8 --direct-video --out clips/birdseye.mp4
+npm run render:native -- --camera pilot-hero --seconds 4 --out clips/pilot-hero.mp4
+```
 
 The Vite dev server also exposes agent-friendly scenario endpoints:
 
@@ -63,7 +76,9 @@ For live Body runs, `BODY_TIMEOUT_MS`, `BODY_MAX_RETRIES`, `BODY_EMPTY_RETRIES`,
 
 `clip:controls` records the live React viewer, so use it when the clip needs the same cockpit controls, pedals, and HUD overlay the app shows. Pass `--replay` to capture a specific generated match; omit it for the built-in deterministic demo.
 
-`render:native` bypasses Chromium. It exports a deterministic timeline from replay data, asks Blender to build an engine-native scene, renders PNG frames, then encodes the MP4 with ffmpeg. See `docs/native-render-pipeline.md`.
+`render:native` bypasses Chromium. It exports a deterministic timeline from replay data, asks Blender
+to build an engine-native scene, then renders still frames or writes H.264 directly. Bird's-eye mode
+adds aircraft-sized framing and colored trajectory trails. See `docs/native-render-pipeline.md`.
 
 `clip:ensemble` is the repeatable live path. By default it uses direct `deepseek-v4-flash` for both Pilot and Body, writes a sensor film plus replay under `clips/`, verifies that the pilot did not fall back and that the live Body ticks parsed, writes the matching transcript Markdown, then records the cockpit-mounted viewer clip. Use `--transcript-out` to choose the transcript path or `--no-transcript` to skip it.
 
@@ -79,3 +94,14 @@ The primary debugging workflow is transcript reading. The app's Flight Transcrip
 - `src/viewer`: React and Three.js replay viewer, telemetry, timeline, and virtual control displays.
 
 The viewer renders replay frames and Body audit traces. It does not own the combat truth.
+
+## Cost and credentials
+
+Scripted runs are local and free. Live-model runs use credentials from your ignored `.env`; provider
+charges are your responsibility. The optional Terraform render path creates billable AWS GPU, S3,
+IAM, and networking resources. Review the plan and your AWS account before applying it.
+
+## License
+
+Flight's original code and documentation are available under the [MIT License](LICENSE). Bundled
+sample models retain the licenses listed in [Third-party notices](THIRD_PARTY_NOTICES.md).

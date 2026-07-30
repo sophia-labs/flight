@@ -10,7 +10,7 @@ OUT_DIR="$(dirname "$OUT")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-MODES=(cinematic chase cockpit director orbit pilot-cinema pilot-hero)
+MODES=(birdseye cinematic chase cockpit director orbit pilot-cinema pilot-hero)
 
 echo "==> Generating ${#MODES[@]} timelines..."
 npx tsx src/headless/collageTimelines.ts "$REPLAY" "$WORK/timelines" 2>&1
@@ -42,15 +42,14 @@ for mode in "${MODES[@]}"; do
   LABELED+=("$dst")
 done
 
-# 4 top + 3 bottom, centered.
+# 4 top + 4 bottom.
 mkdir -p "$OUT_DIR"
 $FFMPEG -y -v error \
   -i "${LABELED[0]}" -i "${LABELED[1]}" -i "${LABELED[2]}" -i "${LABELED[3]}" \
-  -i "${LABELED[4]}" -i "${LABELED[5]}" -i "${LABELED[6]}" \
+  -i "${LABELED[4]}" -i "${LABELED[5]}" -i "${LABELED[6]}" -i "${LABELED[7]}" \
   -filter_complex "
     [0:v][1:v][2:v][3:v]hstack=inputs=4[top];
-    [4:v][5:v][6:v]hstack=inputs=3[botraw];
-    [botraw]pad=iw+1280:ih+44:(ow-iw)/2:44:black[bot];
+    [4:v][5:v][6:v][7:v]hstack=inputs=4[bot];
     [top][bot]vstack=inputs=2
   " \
   "$OUT"

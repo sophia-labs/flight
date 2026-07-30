@@ -50,12 +50,16 @@ fi
 cd /tmp/render/payload
 
 echo "==> Rendering..."
-mkdir -p frames
-"$BLENDER" --background --python render_native_flight.py -- \
-  --timeline timeline.json \
-  --out result.mp4 \
-  --frames-dir frames \
-  --samples "$RENDER_SAMPLES"
+if [[ -x ./render.sh ]]; then
+  BLENDER="$BLENDER" SAMPLES="$RENDER_SAMPLES" FFMPEG_BIN="$${FFMPEG_BIN:-ffmpeg}" ./render.sh result.mp4
+else
+  mkdir -p frames
+  "$BLENDER" --background --python render_native_flight.py -- \
+    --timeline timeline.json \
+    --out result.mp4 \
+    --frames-dir frames \
+    --samples "$RENDER_SAMPLES"
+fi
 
 echo "==> Uploading result to s3://$S3_BUCKET/$S3_RESULT_KEY..."
 aws s3 cp result.mp4 "s3://$S3_BUCKET/$S3_RESULT_KEY"

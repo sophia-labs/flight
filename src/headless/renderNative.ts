@@ -42,9 +42,19 @@ function cameraMode(value: string): NativeCameraMode {
     return "split-dogfight";
   }
   if (
+    value === "birdseye" ||
+    value === "bird-eye" ||
+    value === "topdown" ||
+    value === "top-down" ||
+    value === "overhead"
+  ) {
+    return "birdseye";
+  }
+  if (
     value === "cinematic" ||
     value === "chase" ||
     value === "cockpit" ||
+    value === "director" ||
     value === "orbit" ||
     value === "pilot-hero" ||
     value === "split-balloon" ||
@@ -52,7 +62,9 @@ function cameraMode(value: string): NativeCameraMode {
   ) {
     return value;
   }
-  throw new Error("--camera must be cinematic, chase, cockpit, orbit, pilot-hero, split-balloon, or split-dogfight");
+  throw new Error(
+    "--camera must be birdseye, cinematic, chase, cockpit, director, orbit, pilot-hero, split-balloon, or split-dogfight",
+  );
 }
 
 const replayPath = flag("--replay");
@@ -71,6 +83,8 @@ const avatarPath =
     : undefined);
 const timelineOnly = argv.includes("--timeline-only");
 const keepFrames = argv.includes("--keep-frames");
+const directVideo = argv.includes("--direct-video") || truthy(process.env.NATIVE_RENDER_DIRECT_VIDEO);
+const frameFormat = frameFormatFlag(flag("--frame-format") ?? process.env.NATIVE_RENDER_FRAME_FORMAT ?? "png");
 const samples = Math.max(1, Math.round(numberFlag("--samples", Number(process.env.NATIVE_RENDER_SAMPLES ?? 48))));
 const out = resolve(flag("--out") ?? "clips/native-flight.mp4");
 const timelineOut = resolve(flag("--timeline-out") ?? `${out}.timeline.json`);
@@ -116,6 +130,9 @@ async function main(): Promise<void> {
       framesDir,
       "--samples",
       String(samples),
+      "--frame-format",
+      frameFormat,
+      ...(directVideo ? ["--direct-video"] : []),
       ...(keepFrames ? ["--keep-frames"] : []),
     ],
     { stdio: "inherit" },
@@ -139,6 +156,15 @@ function assertBlenderAvailable(command: string): void {
   if (typeof probe.status === "number" && probe.status !== 0) {
     throw new Error(`Blender probe exited ${probe.status}`);
   }
+}
+
+function frameFormatFlag(value: string): "png" | "jpeg" | "jpg" {
+  if (value === "png" || value === "jpeg" || value === "jpg") return value;
+  throw new Error("--frame-format must be png, jpeg, or jpg");
+}
+
+function truthy(value: string | undefined): boolean {
+  return (value ?? "").trim().toLowerCase() === "1" || (value ?? "").trim().toLowerCase() === "true";
 }
 
 main().catch((error) => {

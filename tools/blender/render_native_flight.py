@@ -20,8 +20,14 @@ def parse_args():
     parser.add_argument("--out", required=True)
     parser.add_argument("--frames-dir", required=True)
     parser.add_argument("--samples", type=int, default=48)
+    parser.add_argument("--frame-format", choices=("png", "jpeg", "jpg"), default=os.environ.get("NATIVE_RENDER_FRAME_FORMAT", "png").lower())
+    parser.add_argument("--direct-video", action="store_true", default=truthy(os.environ.get("NATIVE_RENDER_DIRECT_VIDEO")))
     parser.add_argument("--keep-frames", action="store_true")
     return parser.parse_args(args)
+
+
+def truthy(value):
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def sim_vec(value):
@@ -72,7 +78,7 @@ def clear_scene():
     bpy.ops.object.delete()
 
 
-def configure_scene(timeline, samples):
+def configure_scene(timeline, samples, frame_format):
     scene = bpy.context.scene
     split = is_split_timeline(timeline)
     scene.frame_start = 0
@@ -81,8 +87,7 @@ def configure_scene(timeline, samples):
     scene.render.resolution_x = max(1, int(timeline["width"]) // 2) if split else int(timeline["width"])
     scene.render.resolution_y = int(timeline["height"])
     scene.render.resolution_percentage = 100
-    scene.render.image_settings.file_format = "PNG"
-    scene.render.image_settings.color_mode = "RGB"
+    configure_still_output(scene, frame_format)
     try:
         scene.render.engine = "BLENDER_EEVEE_NEXT"
     except TypeError:
@@ -97,6 +102,41 @@ def configure_scene(timeline, samples):
     scene.view_settings.look = "Medium High Contrast"
     scene.view_settings.exposure = -0.15
     scene.view_settings.gamma = 1
+
+
+def normalized_frame_format(value):
+    return "jpeg" if value == "jpg" else value
+
+
+def frame_extension(frame_format):
+    return "jpg" if normalized_frame_format(frame_format) == "jpeg" else "png"
+
+
+def configure_still_output(scene, frame_format):
+    if normalized_frame_format(frame_format) == "jpeg":
+        scene.render.image_settings.file_format = "JPEG"
+        scene.render.image_settings.color_mode = "RGB"
+        scene.render.image_settings.quality = max(1, min(100, int(os.environ.get("NATIVE_RENDER_JPEG_QUALITY", "90"))))
+    else:
+        scene.render.image_settings.file_format = "PNG"
+        scene.render.image_settings.color_mode = "RGB"
+
+
+def configure_video_output(scene, output_path):
+    scene.render.filepath = str(output_path)
+    scene.render.image_settings.file_format = "FFMPEG"
+    scene.render.ffmpeg.format = "MPEG4"
+    scene.render.ffmpeg.codec = "H264"
+    for attr, value in (
+        ("constant_rate_factor", os.environ.get("NATIVE_RENDER_VIDEO_CRF", "MEDIUM")),
+        ("ffmpeg_preset", os.environ.get("NATIVE_RENDER_VIDEO_PRESET", "GOOD")),
+        ("audio_codec", "NONE"),
+    ):
+        if hasattr(scene.render.ffmpeg, attr):
+            try:
+                setattr(scene.render.ffmpeg, attr, value)
+            except Exception:
+                pass
 
 
 def is_split_timeline(timeline):
@@ -876,6 +916,55 @@ def build_world(materials):
     area.data.size = 950
 
 
+def build_birdseye_trails(timeline, materials):
+    if timeline.get("cameraMode") != "birdseye":
+        return []
+
+    positions_by_id = {}
+    first_ship_by_id = {}
+    for frame in timeline.get("frames", []):
+        for ship in frame.get("aircraft", []):
+            ship_id = ship.get("id")
+            if not ship_id:
+                continue
+            first_ship_by_id.setdefault(ship_id, ship)
+            positions_by_id.setdefault(ship_id, []).append(sim_vec(ship["position"]) + Vector((0, 0, 1.8)))
+
+    trails = []
+    max_points = 520
+    for ship_id, positions in positions_by_id.items():
+        if len(positions) < 2:
+            continue
+        step = max(1, math.ceil(len(positions) / max_points))
+        sampled = positions[::step]
+        if (sampled[-1] - positions[-1]).length > 1e-3:
+            sampled.append(positions[-1])
+        ship = first_ship_by_id.get(ship_id, {})
+        color = ship.get("color", "#d7e5ea")
+        mat = materials.get(
+            f"birdseye trail:{ship_id}",
+            color,
+            roughness=0.35,
+            metallic=0.0,
+            alpha=0.48,
+            emission=color,
+        )
+        curve = bpy.data.curves.new(f"birdseye-trail:{ship_id}", "CURVE")
+        curve.dimensions = "3D"
+        curve.resolution_u = 2
+        curve.bevel_depth = 1.15 if ship.get("team") == "blue" else 0.8
+        curve.bevel_resolution = 2
+        poly = curve.splines.new("POLY")
+        poly.points.add(len(sampled) - 1)
+        for point, pos in zip(poly.points, sampled):
+            point.co = (pos.x, pos.y, pos.z, 1)
+        obj = bpy.data.objects.new(f"birdseye-trail:{ship_id}", curve)
+        bpy.context.collection.objects.link(obj)
+        obj.data.materials.append(mat)
+        trails.append(obj)
+    return trails
+
+
 def look_at_matrix(eye, target, up):
     direction = target - eye
     if direction.length < 1e-6:
@@ -1154,12 +1243,13 @@ def apply_external_visibility(rigs):
         rig.set_exterior_visible(True)
 
 
-def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
+def render_timeline(timeline, output_path, frames_dir, keep_frames, samples, frame_format, direct_video):
     clear_scene()
-    configure_scene(timeline, samples)
+    configure_scene(timeline, samples, frame_format)
     split = is_split_timeline(timeline)
     materials = MaterialCache()
     build_world(materials)
+    build_birdseye_trails(timeline, materials)
     rigs = build_aircraft_rigs(timeline, materials)
     avatar_rig = None
     avatar = timeline.get("avatar")
@@ -1175,6 +1265,7 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
         if os.environ.get("NATIVE_RENDER_BLENDER_SUBTITLES") and timeline.get("subtitles")
         else None
     )
+    frame_ext = frame_extension(frame_format)
 
     frames_path = Path(frames_dir)
     if frames_path.exists():
@@ -1186,7 +1277,7 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
         left_path.mkdir(parents=True, exist_ok=True)
         right_path.mkdir(parents=True, exist_ok=True)
 
-    for frame in timeline["frames"]:
+    def apply_frame_state(frame):
         frame_index = int(frame["index"])
         bpy.context.scene.frame_set(int(frame["index"]))
         for ship in frame["aircraft"]:
@@ -1208,12 +1299,54 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
         tracers.update(frame.get("events", []))
         projectiles.update(frame.get("projectiles", []))
 
+    def apply_primary_camera(frame):
+        apply_camera_visibility(rigs, timeline.get("pilotId"), frame["camera"])
+        update_camera(camera, frame["camera"])
+        if subtitles:
+            subtitles.update(float(frame.get("time", 0)))
+
+    if direct_video and not split:
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        configure_video_output(bpy.context.scene, output)
+        applied_frame = {"index": None}
+
+        def apply_animation_frame(scene):
+            frame_number = int(scene.frame_current)
+            frame = timeline["frames"][max(0, min(len(timeline["frames"]) - 1, frame_number))]
+            frame_index = int(frame["index"])
+            if applied_frame["index"] == frame_index:
+                return
+            applied_frame["index"] = frame_index
+            for ship in frame["aircraft"]:
+                rig = rigs.get(ship["id"])
+                if rig:
+                    rig.update(ship)
+            if avatar_rig:
+                avatar_rig.update(frame)
+            tracers.update(frame.get("events", []))
+            projectiles.update(frame.get("projectiles", []))
+            apply_primary_camera(frame)
+            print(f"render video frame {frame_index + 1}/{len(timeline['frames'])}: {frame['camera']['shot']}", flush=True)
+
+        bpy.context.scene.frame_set(int(bpy.context.scene.frame_start))
+        bpy.app.handlers.frame_change_pre.append(apply_animation_frame)
+        try:
+            apply_animation_frame(bpy.context.scene)
+            bpy.ops.render.render(animation=True)
+        finally:
+            if apply_animation_frame in bpy.app.handlers.frame_change_pre:
+                bpy.app.handlers.frame_change_pre.remove(apply_animation_frame)
+        if frames_path.exists() and not keep_frames:
+            shutil.rmtree(frames_path)
+        return
+
+    for frame in timeline["frames"]:
+        frame_index = int(frame["index"])
+        apply_frame_state(frame)
         if split:
-            apply_camera_visibility(rigs, timeline.get("pilotId"), frame["camera"])
-            update_camera(camera, frame["camera"])
-            if subtitles:
-                subtitles.update(float(frame.get("time", 0)))
-            bpy.context.scene.render.filepath = str(left_path / f"frame_{frame_index:06d}.png")
+            apply_primary_camera(frame)
+            bpy.context.scene.render.filepath = str(left_path / f"frame_{frame_index:06d}.{frame_ext}")
             print(f"render left {frame['index'] + 1}/{len(timeline['frames'])}: {frame['camera']['shot']}", flush=True)
             bpy.ops.render.render(write_still=True)
 
@@ -1222,15 +1355,12 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
             apply_external_visibility(rigs)
             external_camera = frame.get("externalCamera") or frame["camera"]
             update_camera(camera, external_camera)
-            bpy.context.scene.render.filepath = str(right_path / f"frame_{frame_index:06d}.png")
+            bpy.context.scene.render.filepath = str(right_path / f"frame_{frame_index:06d}.{frame_ext}")
             print(f"render right {frame['index'] + 1}/{len(timeline['frames'])}: {external_camera['shot']}", flush=True)
             bpy.ops.render.render(write_still=True)
         else:
-            apply_camera_visibility(rigs, timeline.get("pilotId"), frame["camera"])
-            update_camera(camera, frame["camera"])
-            if subtitles:
-                subtitles.update(float(frame.get("time", 0)))
-            bpy.context.scene.render.filepath = str(frames_path / f"frame_{frame_index:06d}.png")
+            apply_primary_camera(frame)
+            bpy.context.scene.render.filepath = str(frames_path / f"frame_{frame_index:06d}.{frame_ext}")
             print(f"render frame {frame['index'] + 1}/{len(timeline['frames'])}: {frame['camera']['shot']}", flush=True)
             bpy.ops.render.render(write_still=True)
 
@@ -1248,13 +1378,13 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
                 "-start_number",
                 "0",
                 "-i",
-                str(left_path / "frame_%06d.png"),
+                str(left_path / f"frame_%06d.{frame_ext}"),
                 "-framerate",
                 str(timeline["fps"]),
                 "-start_number",
                 "0",
                 "-i",
-                str(right_path / "frame_%06d.png"),
+                str(right_path / f"frame_%06d.{frame_ext}"),
                 "-filter_complex",
                 "[0:v][1:v]hstack=inputs=2,pad=ceil(iw/2)*2:ceil(ih/2)*2",
                 "-c:v",
@@ -1276,7 +1406,7 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
                 "-start_number",
                 "0",
                 "-i",
-                str(frames_path / "frame_%06d.png"),
+                str(frames_path / f"frame_%06d.{frame_ext}"),
                 "-vf",
                 "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                 "-c:v",
@@ -1288,7 +1418,7 @@ def render_timeline(timeline, output_path, frames_dir, keep_frames, samples):
                 str(output),
             ]
         )
-    if not keep_frames:
+    if frames_path.exists() and not keep_frames:
         shutil.rmtree(frames_path)
 
 
@@ -1296,7 +1426,7 @@ def main():
     args = parse_args()
     with open(args.timeline, "r", encoding="utf8") as handle:
         timeline = json.load(handle)
-    render_timeline(timeline, args.out, args.frames_dir, args.keep_frames, args.samples)
+    render_timeline(timeline, args.out, args.frames_dir, args.keep_frames, args.samples, args.frame_format, args.direct_video)
 
 
 if __name__ == "__main__":

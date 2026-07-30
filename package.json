@@ -2,6 +2,7 @@
   "name": "flight",
   "version": "0.8.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -18,6 +19,7 @@
     "bench:balloon": "tsx --env-file=.env src/headless/balloonBench.ts",
     "export:native-timeline": "tsx src/headless/renderNative.ts --timeline-only",
     "render:native": "tsx src/headless/renderNative.ts",
+    "montage:compendium-birdseye": "tsx src/headless/compendiumBirdseyeMontage.ts",
     "demo:physics": "tsx src/headless/surfaceDemo.ts",
     "audit:props": "tsx src/headless/propPerformanceAudit.ts",
     "audit:envelopes": "tsx src/headless/performanceEnvelopeReport.ts",
